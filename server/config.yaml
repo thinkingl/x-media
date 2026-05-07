@@ -1,0 +1,16 @@
+server:
+  http_addr: ":8080"
+  rtmp_addr: ":1935"
+  rtsp_addr: ":5544"
+
+database:
+  driver: "sqlite"
+  dsn: "./data/x-media.db"
+
+log:
+  level: "info"
+  filename: "./logs/x-media.log"
+  max_size: 100
+  max_backups: 5
+  max_age: 30
+  compress: true
