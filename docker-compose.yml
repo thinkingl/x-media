@@ -1,0 +1,17 @@
+version: "3.8"
+
+services:
+  x-media:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    container_name: x-media
+    ports:
+      - "8080:8080"
+      - "1935:1935"
+      - "5544:5544"
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./videos:/app/videos
+    restart: unless-stopped

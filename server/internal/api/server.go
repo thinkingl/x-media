@@ -9,17 +9,20 @@ import (
 
 // ServerConfig 服务器配置
 type ServerConfig struct {
-	HTTPAddr string
+	HTTPAddr   string
+	StaticPath string
 }
 
 // Server API服务器
 type Server struct {
-	config     *ServerConfig
-	engine     *gin.Engine
-	httpServer *http.Server
-	inputSvc   *service.InputService
-	outputSvc  *service.OutputService
-	pipeSvc    *service.PipeService
+	config       *ServerConfig
+	engine       *gin.Engine
+	httpServer   *http.Server
+	inputSvc     *service.InputService
+	outputSvc    *service.OutputService
+	pipeSvc      *service.PipeService
+	statsHandler *StatsHandler
+	logHandler   *LogHandler
 }
 
 // NewServer 创建API服务器
@@ -28,6 +31,8 @@ func NewServer(
 	inputSvc *service.InputService,
 	outputSvc *service.OutputService,
 	pipeSvc *service.PipeService,
+	statsHandler *StatsHandler,
+	logHandler *LogHandler,
 ) *Server {
 	gin.SetMode(gin.ReleaseMode)
 	engine := gin.New()
@@ -38,11 +43,13 @@ func NewServer(
 	engine.Use(corsMiddleware())
 
 	s := &Server{
-		config:    config,
-		engine:    engine,
-		inputSvc:  inputSvc,
-		outputSvc: outputSvc,
-		pipeSvc:   pipeSvc,
+		config:       config,
+		engine:       engine,
+		inputSvc:     inputSvc,
+		outputSvc:    outputSvc,
+		pipeSvc:      pipeSvc,
+		statsHandler: statsHandler,
+		logHandler:   logHandler,
 	}
 
 	// 注册路由
@@ -109,7 +116,24 @@ func (s *Server) registerRoutes() {
 		}
 
 		// 统计
-		api.GET("/stats", s.getStats)
+		api.GET("/stats", s.statsHandler.getStats)
+
+		// 日志
+		logs := api.Group("/logs")
+		{
+			logs.GET("", s.logHandler.getLogs)
+			logs.GET("/config", s.logHandler.getLogConfig)
+			logs.PUT("/config", s.logHandler.updateLogConfig)
+		}
+	}
+
+	// 前端静态文件
+	if s.config.StaticPath != "" {
+		s.engine.Static("/assets", s.config.StaticPath+"/assets")
+		s.engine.StaticFile("/vite.svg", s.config.StaticPath+"/vite.svg")
+		s.engine.NoRoute(func(c *gin.Context) {
+			c.File(s.config.StaticPath + "/index.html")
+		})
 	}
 }
 

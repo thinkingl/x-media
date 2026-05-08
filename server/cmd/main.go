@@ -19,6 +19,7 @@ import (
 func main() {
 	// 解析命令行参数
 	configFile := flag.String("c", "config.yaml", "配置文件路径")
+	staticPath := flag.String("s", "", "前端静态文件路径")
 	flag.Parse()
 
 	// 加载配置
@@ -56,11 +57,16 @@ func main() {
 	inputSvc := service.NewInputService(inputRepo, engine)
 	outputSvc := service.NewOutputService(outputRepo, engine)
 	pipeSvc := service.NewPipeService(pipeRepo, inputRepo, outputRepo, engine)
+	statsSvc := service.NewStatsService(inputRepo, outputRepo, pipeRepo)
+	logSvc := service.NewLogService(&cfg.Log)
 
 	// 初始化API服务器
+	statsHandler := api.NewStatsHandler(statsSvc)
+	logHandler := api.NewLogHandler(logSvc)
 	server := api.NewServer(&api.ServerConfig{
-		HTTPAddr: cfg.Server.HTTPAddr,
-	}, inputSvc, outputSvc, pipeSvc)
+		HTTPAddr:   cfg.Server.HTTPAddr,
+		StaticPath: *staticPath,
+	}, inputSvc, outputSvc, pipeSvc, statsHandler, logHandler)
 
 	// 启动服务器
 	go func() {

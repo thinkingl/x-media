@@ -83,17 +83,3 @@ func (s *Server) stopPipe(c *gin.Context) {
 
 	response(c, http.StatusOK, gin.H{"message": "停止成功"})
 }
-
-// getStats 获取统计信息
-func (s *Server) getStats(c *gin.Context) {
-	// TODO: 实现统计功能
-	stats := gin.H{
-		"total_bytes_in":  0,
-		"total_bytes_out": 0,
-		"active_inputs":   0,
-		"active_outputs":  0,
-		"active_pipes":    0,
-	}
-
-	response(c, http.StatusOK, stats)
-}
