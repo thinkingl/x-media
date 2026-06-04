@@ -3,27 +3,12 @@ package media
 import (
 	"context"
 	"os"
-	"path/filepath"
-	"runtime"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/x-media/x-media-server/internal/config"
 	"github.com/x-media/x-media-server/pkg/logger"
 )
-
-func testFixturePathE(t *testing.T, relPath string) string {
-	t.Helper()
-	_, filename, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("failed to get caller info")
-	}
-	abs, err := filepath.Abs(filepath.Join(filepath.Dir(filename), relPath))
-	if err != nil {
-		t.Fatalf("failed to resolve path: %v", err)
-	}
-	return abs
-}
 
 func TestMain(m *testing.M) {
 	// 初始化日志
@@ -42,7 +27,7 @@ func TestDefaultMediaEngine_CreateInput(t *testing.T) {
 		config := &InputConfig{
 			ID:   "input_001",
 			Type: "file",
-			Path: testFixturePathE(t, "../../test/fixtures/h265_test.mp4"),
+			Path: testFixturePath(t, "../../test/fixtures/h265_test.mp4"),
 		}
 
 		input, err := engine.CreateInput(config)
@@ -346,7 +331,7 @@ func TestFileInput_StartStop(t *testing.T) {
 		config := &InputConfig{
 			ID:   "file_input_001",
 			Type: "file",
-			Path: testFixturePathE(t, "../../test/fixtures/test.mp4"),
+			Path: testFixturePath(t, "../../test/fixtures/test.mp4"),
 			Loop: true,
 		}
 
