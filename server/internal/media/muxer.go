@@ -278,8 +278,12 @@ func (m *SimpleMuxer) WritePacket(pkt *MediaPacket) error {
 	stdin := m.stdin
 	m.mu.RUnlock()
 
-	if !started || stdin == nil {
+	if !started {
 		return fmt.Errorf("muxer not started")
+	}
+
+	if stdin == nil {
+		return nil
 	}
 
 	_, err := stdin.Write(pkt.Data)
@@ -464,8 +468,12 @@ func (m *HTTPFLVMuxer) WritePacket(pkt *MediaPacket) error {
 	stdin := m.stdin
 	m.mu.RUnlock()
 
-	if !started || stdin == nil {
+	if !started {
 		return fmt.Errorf("muxer not started")
+	}
+
+	if stdin == nil {
+		return nil
 	}
 
 	_, err := stdin.Write(pkt.Data)
