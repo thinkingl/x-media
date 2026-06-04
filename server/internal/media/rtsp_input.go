@@ -3,7 +3,6 @@ package media
 import (
 	"context"
 	"sync"
-	"time"
 
 	"github.com/x-media/x-media-server/pkg/logger"
 	"github.com/x-media/x-media-server/pkg/utils"
@@ -16,7 +15,6 @@ type RTSPInput struct {
 	status  StreamStatus
 	handler PacketHandler
 	cancel  context.CancelFunc
-	demuxer *StreamDemuxer
 	streams []StreamInfo
 }
 
@@ -29,10 +27,9 @@ func NewRTSPInput(config *InputConfig) (*RTSPInput, error) {
 		id = utils.GenerateID()
 	}
 	return &RTSPInput{
-		id:      id,
-		config:  config,
-		status:  StreamStatusStopped,
-		demuxer: NewStreamDemuxer(config.URL),
+		id:     id,
+		config: config,
+		status: StreamStatusStopped,
 	}, nil
 }
 
@@ -53,53 +50,16 @@ func (r *RTSPInput) Start(ctx context.Context) error {
 		return nil
 	}
 
-	streams, err := r.demuxer.Probe()
+	streams, err := ProbeStreamsFromURL(r.config.URL)
 	if err != nil {
-		logger.Errorf("failed to probe RTSP stream %s: %v", r.config.URL, err)
+		logger.Errorf("failed to probe RTSP %s: %v", r.config.URL, err)
 		r.status = StreamStatusError
 		return err
 	}
 
 	r.streams = streams
 	r.status = StreamStatusRunning
-
-	ctx, r.cancel = context.WithCancel(ctx)
-
-	for _, stream := range streams {
-		r.demuxer.OnPacket(stream.ChannelID, func(pkt *MediaPacket) {
-			r.mu.RLock()
-			handler := r.handler
-			r.mu.RUnlock()
-			if handler != nil {
-				handler(pkt)
-			}
-		})
-	}
-
-	go func() {
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			default:
-			}
-
-			if err := r.demuxer.Start(ctx); err != nil {
-				logger.Errorf("RTSP demuxer start failed: %v", err)
-				time.Sleep(3 * time.Second)
-				continue
-			}
-
-			<-ctx.Done()
-
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(3 * time.Second):
-				logger.Infof("RTSP input reconnect: %s", r.id)
-			}
-		}
-	}()
+	r.cancel = func() {}
 
 	logger.Infof("RTSP input started: %s, url: %s, streams: %d", r.id, r.config.URL, len(streams))
 	return nil
@@ -117,7 +77,6 @@ func (r *RTSPInput) Stop() error {
 		r.cancel()
 	}
 
-	r.demuxer.Stop()
 	r.status = StreamStatusStopped
 	logger.Infof("RTSP input stopped: %s", r.id)
 	return nil
@@ -133,3 +92,7 @@ func (r *RTSPInput) OnPacket(handler PacketHandler) {
 	r.handler = handler
 }
 
+func ProbeStreamsFromURL(url string) ([]StreamInfo, error) {
+	demuxer := NewStreamDemuxer(url)
+	return demuxer.Probe()
+}
