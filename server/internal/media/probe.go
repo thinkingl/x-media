@@ -124,6 +124,9 @@ func ExtractThumbnail(filePath, outputPath string, timeSeconds float64) error {
 	if err := ValidateFilePath(filePath); err != nil {
 		return fmt.Errorf("invalid input file path: %w", err)
 	}
+	if err := ValidateFilePath(outputPath); err != nil {
+		return fmt.Errorf("invalid output path: %w", err)
+	}
 	cmd := exec.Command("ffmpeg",
 		"-y",
 		"-ss", fmt.Sprintf("%.2f", timeSeconds),

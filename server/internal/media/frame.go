@@ -10,7 +10,7 @@ import (
 // Frame protocol would be needed for in-process stream routing, recording, or transformation.
 var FrameMagic = [2]byte{0x58, 0x4D}
 
-const FrameVersion uint8 = 0x01
+const FrameVersion uint8 = 0x02
 
 type FrameHeader struct {
 	Magic      [2]byte

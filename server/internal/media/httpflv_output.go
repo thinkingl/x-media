@@ -176,6 +176,10 @@ func (m *HTTPFLVMuxer) EnsureFFmpeg() error {
 		return nil
 	}
 
+	if err := ValidateFilePath(m.filePath); err != nil {
+		return fmt.Errorf("invalid file path: %w", err)
+	}
+
 	args := []string{
 		"-re",
 		"-i", m.filePath,
@@ -191,7 +195,11 @@ func (m *HTTPFLVMuxer) EnsureFFmpeg() error {
 		return fmt.Errorf("failed to create stdout pipe: %w", err)
 	}
 
-	cmd.Stderr = nil
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return fmt.Errorf("failed to create stderr pipe: %w", err)
+	}
+
 	m.cmd = cmd
 
 	if err := cmd.Start(); err != nil {
@@ -203,6 +211,19 @@ func (m *HTTPFLVMuxer) EnsureFFmpeg() error {
 		err := cmd.Wait()
 		if err != nil {
 			logger.Debugf("ffmpeg exited for httpflv %s: %v", m.output, err)
+		}
+	}()
+
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			n, err := stderr.Read(buf)
+			if n > 0 {
+				logger.Debugf("ffmpeg stderr [%s]: %s", m.output, string(buf[:n]))
+			}
+			if err != nil {
+				break
+			}
 		}
 	}()
 

@@ -1,6 +1,7 @@
 package logger
 
 import (
+	"fmt"
 	"os"
 
 	"github.com/x-media/x-media-server/internal/config"
@@ -126,18 +127,28 @@ func Fatal(args ...interface{}) {
 	if sugar != nil {
 		sugar.Fatal(args...)
 	}
+	fmt.Fprintln(os.Stderr, args...)
+	os.Exit(1)
 }
 
 func Fatalf(template string, args ...interface{}) {
 	if sugar != nil {
 		sugar.Fatalf(template, args...)
 	}
+	fmt.Fprintf(os.Stderr, template+"\n", args...)
+	os.Exit(1)
 }
 
 func With(fields ...zap.Field) *zap.Logger {
-	return log.With(fields...)
+	if log != nil {
+		return log.With(fields...)
+	}
+	return zap.NewNop()
 }
 
 func GetLogger() *zap.Logger {
-	return log
+	if log != nil {
+		return log
+	}
+	return zap.NewNop()
 }

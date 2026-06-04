@@ -211,7 +211,6 @@ func (d *StreamDemuxer) demuxStream(ctx context.Context, stream StreamInfo) {
 		}
 	}
 
-	cmd.Wait()
 	logger.Infof("demux stopped for channel %d", stream.ChannelID)
 }
 

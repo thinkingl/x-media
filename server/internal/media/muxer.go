@@ -201,7 +201,10 @@ func (m *SimpleMuxer) Start(ctx context.Context, codec CodecID) error {
 	}
 
 	cmd.Stdout = nil
-	cmd.Stderr = nil
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return fmt.Errorf("failed to create stderr pipe: %w", err)
+	}
 
 	m.cmd = cmd
 	m.stdin = stdin
@@ -216,6 +219,19 @@ func (m *SimpleMuxer) Start(ctx context.Context, codec CodecID) error {
 		err := cmd.Wait()
 		if err != nil {
 			logger.Debugf("simple muxer ffmpeg exited for %s: %v", m.output, err)
+		}
+	}()
+
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			n, err := stderr.Read(buf)
+			if n > 0 {
+				logger.Debugf("ffmpeg stderr [%s]: %s", m.output, string(buf[:n]))
+			}
+			if err != nil {
+				break
+			}
 		}
 	}()
 
@@ -253,7 +269,10 @@ func (m *SimpleMuxer) StartWithFile(ctx context.Context, filePath string) error 
 
 	cmd := exec.CommandContext(ctx, "ffmpeg", args...)
 	cmd.Stdout = nil
-	cmd.Stderr = nil
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return fmt.Errorf("failed to create stderr pipe: %w", err)
+	}
 
 	m.cmd = cmd
 	m.started = true
@@ -267,6 +286,19 @@ func (m *SimpleMuxer) StartWithFile(ctx context.Context, filePath string) error 
 		err := cmd.Wait()
 		if err != nil {
 			logger.Debugf("simple muxer ffmpeg exited for %s (file=%s): %v", m.output, filePath, err)
+		}
+	}()
+
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			n, err := stderr.Read(buf)
+			if n > 0 {
+				logger.Debugf("ffmpeg stderr [%s]: %s", m.output, string(buf[:n]))
+			}
+			if err != nil {
+				break
+			}
 		}
 	}()
 
