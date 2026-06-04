@@ -251,6 +251,17 @@ func (e *DefaultMediaEngine) GetStats() *MediaStats {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 
-	// TODO: 实现统计信息收集
 	return &MediaStats{}
+}
+
+func (e *DefaultMediaEngine) StartInput(id string) error {
+	e.mu.RLock()
+	input, ok := e.inputs[id]
+	e.mu.RUnlock()
+
+	if !ok {
+		return ErrInputNotFound
+	}
+
+	return input.Start(e.ctx)
 }

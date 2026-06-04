@@ -6,22 +6,15 @@ import (
 
 // MediaEngine 媒体引擎接口
 type MediaEngine interface {
-	// Start 启动引擎
 	Start(ctx context.Context) error
-	// Stop 停止引擎
 	Stop() error
-	// CreateInput 创建输入流
 	CreateInput(config *InputConfig) (InputStream, error)
-	// CreateOutput 创建输出流
 	CreateOutput(config *OutputConfig) (OutputStream, error)
-	// Connect 连接输入输出流
 	Connect(inputID, outputID string) error
-	// Disconnect 断开连接
 	Disconnect(inputID, outputID string) error
-	// RemoveInput 移除输入流
 	RemoveInput(id string) error
-	// RemoveOutput 移除输出流
 	RemoveOutput(id string) error
+	StartInput(id string) error
 }
 
 // InputStream 输入流接口

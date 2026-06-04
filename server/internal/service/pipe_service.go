@@ -207,6 +207,10 @@ func (s *PipeService) Start(id string) error {
 		return errors.NewInternalError(err)
 	}
 
+	if err := s.engine.StartInput(pipe.InputID); err != nil {
+		logger.Warnf("启动输入流失败(可能已启动): %v", err)
+	}
+
 	return s.pipeRepo.UpdateStatus(id, model.PipeStatusRunning)
 }
 
