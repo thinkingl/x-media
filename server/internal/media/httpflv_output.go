@@ -206,11 +206,16 @@ func (m *HTTPFLVMuxer) EnsureFFmpeg() error {
 			if n > 0 {
 				data := make([]byte, n)
 				copy(data, buf[:n])
+				// Copy client list under lock, then release before writing
 				m.mu.RLock()
+				clients := make([]io.Writer, 0, len(m.clients))
 				for w := range m.clients {
-					w.Write(data)
+					clients = append(clients, w)
 				}
 				m.mu.RUnlock()
+				for _, w := range clients {
+					w.Write(data)
+				}
 			}
 			if err != nil {
 				break

@@ -96,6 +96,8 @@ func (m *StreamMuxer) Start(ctx context.Context) error {
 		return fmt.Errorf("failed to start ffmpeg muxer: %w", err)
 	}
 
+	m.cmds[0] = cmd
+
 	for _, s := range videoStreams {
 		m.stdins[s.ChannelID] = stdin
 	}

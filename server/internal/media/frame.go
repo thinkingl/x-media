@@ -31,11 +31,11 @@ func (h *FrameHeader) Encode() []byte {
 	buf[2] = h.Version
 	buf[3] = h.ChannelID
 	buf[4] = uint8(h.FrameType)
-	binary.BigEndian.PutUint16(buf[5:7], uint16(h.Codec))
-	buf[7] = uint8(h.Flags)
-	binary.BigEndian.PutUint64(buf[8:16], uint64(h.PTS))
-	binary.BigEndian.PutUint64(buf[16:24], uint64(h.DTS))
-	binary.BigEndian.PutUint32(buf[24:28], h.PayloadLen)
+	binary.BigEndian.PutUint32(buf[5:9], uint32(h.Codec)) // 4 bytes for FFmpeg AVCodecID (e.g. AAC=86018)
+	buf[9] = uint8(h.Flags)
+	binary.BigEndian.PutUint64(buf[10:18], uint64(h.PTS))
+	binary.BigEndian.PutUint64(buf[18:26], uint64(h.DTS))
+	binary.BigEndian.PutUint32(buf[26:30], h.PayloadLen)
 	return buf
 }
 
@@ -49,11 +49,11 @@ func DecodeFrameHeader(data []byte) (*FrameHeader, error) {
 		Version:    data[2],
 		ChannelID:  data[3],
 		FrameType:  FrameType(data[4]),
-		Codec:      CodecID(binary.BigEndian.Uint16(data[5:7])),
-		Flags:      FrameFlag(data[7]),
-		PTS:        int64(binary.BigEndian.Uint64(data[8:16])),
-		DTS:        int64(binary.BigEndian.Uint64(data[16:24])),
-		PayloadLen: binary.BigEndian.Uint32(data[24:28]),
+		Codec:      CodecID(binary.BigEndian.Uint32(data[5:9])),
+		Flags:      FrameFlag(data[9]),
+		PTS:        int64(binary.BigEndian.Uint64(data[10:18])),
+		DTS:        int64(binary.BigEndian.Uint64(data[18:26])),
+		PayloadLen: binary.BigEndian.Uint32(data[26:30]),
 	}
 
 	if h.Magic != FrameMagic {
