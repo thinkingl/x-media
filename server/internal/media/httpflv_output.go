@@ -261,7 +261,6 @@ func (m *HTTPFLVMuxer) Stop() {
 
 	if m.cmd != nil && m.cmd.Process != nil {
 		m.cmd.Process.Kill()
-		m.cmd.Wait()
 		m.cmd = nil
 	}
 

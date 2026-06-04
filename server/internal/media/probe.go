@@ -124,7 +124,7 @@ func ExtractThumbnail(filePath, outputPath string, timeSeconds float64) error {
 	if err := ValidateFilePath(filePath); err != nil {
 		return fmt.Errorf("invalid input file path: %w", err)
 	}
-	if err := ValidateFilePath(outputPath); err != nil {
+	if err := ValidateOutputPath(outputPath); err != nil {
 		return fmt.Errorf("invalid output path: %w", err)
 	}
 	cmd := exec.Command("ffmpeg",
@@ -194,6 +194,27 @@ func ValidateFilePath(filePath string) error {
 	}
 	if info.IsDir() {
 		return fmt.Errorf("path is a directory, not a file: %s", filePath)
+	}
+	return nil
+}
+
+func ValidateOutputPath(outputPath string) error {
+	if outputPath == "" {
+		return fmt.Errorf("output path is empty")
+	}
+	if strings.ContainsRune(outputPath, '\x00') {
+		return fmt.Errorf("output path contains null byte")
+	}
+	if !filepath.IsAbs(outputPath) {
+		return fmt.Errorf("output path must be absolute: %s", outputPath)
+	}
+	dir := filepath.Dir(outputPath)
+	info, err := os.Stat(dir)
+	if err != nil {
+		return fmt.Errorf("output directory not accessible: %w", err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("output parent is not a directory: %s", dir)
 	}
 	return nil
 }
