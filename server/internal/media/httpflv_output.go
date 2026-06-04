@@ -2,8 +2,10 @@ package media
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/http"
+	"os/exec"
 	"sync"
 
 	"github.com/x-media/x-media-server/pkg/logger"
@@ -17,9 +19,6 @@ type HTTPFLVOutput struct {
 	status    StreamStatus
 	cancel    context.CancelFunc
 	ctx       context.Context
-	server    *http.Server
-	clients   map[io.Writer]bool
-	clientsMu sync.RWMutex
 	muxer     *HTTPFLVMuxer
 }
 
@@ -32,79 +31,21 @@ func NewHTTPFLVOutput(config *OutputConfig) (*HTTPFLVOutput, error) {
 		id = utils.GenerateID()
 	}
 	return &HTTPFLVOutput{
-		id:      id,
-		config:  config,
-		status:  StreamStatusStopped,
-		clients: make(map[io.Writer]bool),
-		muxer:   NewHTTPFLVMuxer(""),
+		id:     id,
+		config: config,
+		status: StreamStatusStopped,
+		muxer:  NewHTTPFLVMuxer(""),
 	}, nil
 }
 
 func (h *HTTPFLVOutput) ID() string           { return h.id }
 func (h *HTTPFLVOutput) Status() StreamStatus { h.mu.RLock(); defer h.mu.RUnlock(); return h.status }
 
-func (h *HTTPFLVOutput) Start(ctx context.Context) error {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	if h.status == StreamStatusRunning {
-		return nil
-	}
-
-	h.ctx, h.cancel = context.WithCancel(ctx)
-
-	mux := http.NewServeMux()
-	mux.HandleFunc("/"+h.id+".flv", h.serveFLV)
-	mux.HandleFunc("/live/"+h.id+".flv", h.serveFLV)
-
-	h.server = &http.Server{
-		Addr:    h.config.Addr,
-		Handler: mux,
-	}
-
-	go func() {
-		if err := h.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			logger.Errorf("HTTP-FLV server start failed: %v", err)
-		}
-	}()
-
-	h.status = StreamStatusRunning
-	logger.Infof("HTTP-FLV output ready: %s, addr: %s", h.id, h.config.Addr)
-	return nil
+func (h *HTTPFLVOutput) GetRoutePath() string {
+	return "/live/" + h.id + ".flv"
 }
 
-func (h *HTTPFLVOutput) StartWithFile(ctx context.Context, filePath string) error {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	if h.status == StreamStatusRunning {
-		return nil
-	}
-
-	h.ctx, h.cancel = context.WithCancel(ctx)
-
-	mux := http.NewServeMux()
-	mux.HandleFunc("/"+h.id+".flv", h.serveFLV)
-	mux.HandleFunc("/live/"+h.id+".flv", h.serveFLV)
-
-	h.server = &http.Server{
-		Addr:    h.config.Addr,
-		Handler: mux,
-	}
-
-	go func() {
-		if err := h.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			logger.Errorf("HTTP-FLV server start failed: %v", err)
-		}
-	}()
-
-	h.status = StreamStatusRunning
-	if err := h.muxer.StartWithFile(h.ctx, filePath); err != nil {
-		h.status = StreamStatusStopped
-		return err
-	}
-	return nil
-}
-
-func (h *HTTPFLVOutput) serveFLV(w http.ResponseWriter, r *http.Request) {
+func (h *HTTPFLVOutput) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
@@ -125,17 +66,37 @@ func (h *HTTPFLVOutput) serveFLV(w http.ResponseWriter, r *http.Request) {
 	w.Write(flvHeader)
 	flusher.Flush()
 
-	h.clientsMu.Lock()
-	h.clients[w] = true
-	h.clientsMu.Unlock()
+	h.muxer.AddClient(w)
+	defer h.muxer.RemoveClient(w)
 
-	defer func() {
-		h.clientsMu.Lock()
-		delete(h.clients, w)
-		h.clientsMu.Unlock()
-	}()
+	h.muxer.EnsureFFmpeg()
 
 	<-r.Context().Done()
+}
+
+func (h *HTTPFLVOutput) Start(ctx context.Context) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.status == StreamStatusRunning {
+		return nil
+	}
+	h.ctx, h.cancel = context.WithCancel(ctx)
+	h.status = StreamStatusRunning
+	logger.Infof("HTTP-FLV output ready: %s", h.id)
+	return nil
+}
+
+func (h *HTTPFLVOutput) StartWithFile(ctx context.Context, filePath string) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.status == StreamStatusRunning {
+		return nil
+	}
+	h.ctx, h.cancel = context.WithCancel(ctx)
+	h.status = StreamStatusRunning
+	h.muxer.SetFileContext(h.ctx, filePath)
+	logger.Infof("HTTP-FLV output ready: %s, file: %s", h.id, filePath)
+	return nil
 }
 
 func (h *HTTPFLVOutput) Stop() error {
@@ -148,13 +109,6 @@ func (h *HTTPFLVOutput) Stop() error {
 		h.cancel()
 	}
 	h.muxer.Stop()
-	if h.server != nil {
-		h.server.Close()
-		h.server = nil
-	}
-	h.clientsMu.Lock()
-	h.clients = make(map[io.Writer]bool)
-	h.clientsMu.Unlock()
 	h.status = StreamStatusStopped
 	logger.Infof("HTTP-FLV output stopped: %s", h.id)
 	return nil
@@ -170,15 +124,132 @@ func (h *HTTPFLVOutput) WritePacket(pkt *MediaPacket) error {
 		return ErrStreamNotRunning
 	}
 
-	if !muxer.started {
-		h.mu.Lock()
-		if !muxer.started {
-			if err := muxer.Start(h.ctx, pkt.CodecID); err != nil {
-				h.mu.Unlock()
-				return err
+	return muxer.WritePacket(pkt)
+}
+
+type HTTPFLVMuxer struct {
+	mu       sync.RWMutex
+	cmd      *exec.Cmd
+	stdin    io.WriteCloser
+	ctx      context.Context
+	filePath string
+	started  bool
+	output   string
+	clients  map[io.Writer]bool
+}
+
+func NewHTTPFLVMuxer(output string) *HTTPFLVMuxer {
+	return &HTTPFLVMuxer{
+		output:  output,
+		clients: make(map[io.Writer]bool),
+	}
+}
+
+func (m *HTTPFLVMuxer) SetFileContext(ctx context.Context, filePath string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.ctx = ctx
+	m.filePath = filePath
+}
+
+func (m *HTTPFLVMuxer) AddClient(w io.Writer) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.clients[w] = true
+}
+
+func (m *HTTPFLVMuxer) RemoveClient(w io.Writer) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.clients, w)
+}
+
+func (m *HTTPFLVMuxer) EnsureFFmpeg() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.cmd != nil {
+		return nil
+	}
+
+	if m.filePath == "" {
+		return nil
+	}
+
+	args := []string{
+		"-re",
+		"-i", m.filePath,
+		"-c:v", "copy",
+		"-c:a", "copy",
+		"-f", "flv",
+		"pipe:1",
+	}
+
+	cmd := exec.CommandContext(m.ctx, "ffmpeg", args...)
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return fmt.Errorf("failed to create stdout pipe: %w", err)
+	}
+
+	cmd.Stderr = nil
+	m.cmd = cmd
+
+	if err := cmd.Start(); err != nil {
+		m.cmd = nil
+		return fmt.Errorf("failed to start ffmpeg: %w", err)
+	}
+
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			n, err := stdout.Read(buf)
+			if n > 0 {
+				data := make([]byte, n)
+				copy(data, buf[:n])
+				m.mu.RLock()
+				for w := range m.clients {
+					w.Write(data)
+				}
+				m.mu.RUnlock()
+			}
+			if err != nil {
+				break
 			}
 		}
-		h.mu.Unlock()
+	}()
+
+	logger.Infof("HTTP-FLV ffmpeg started for %s", m.output)
+	return nil
+}
+
+func (m *HTTPFLVMuxer) Stop() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.cmd != nil && m.cmd.Process != nil {
+		m.cmd.Process.Kill()
+		m.cmd.Wait()
+		m.cmd = nil
 	}
-	return muxer.WritePacket(pkt)
+
+	m.clients = make(map[io.Writer]bool)
+	logger.Infof("HTTP-FLV muxer stopped for %s", m.output)
+}
+
+func (m *HTTPFLVMuxer) WritePacket(pkt *MediaPacket) error {
+	m.mu.RLock()
+	started := m.started
+	stdin := m.stdin
+	m.mu.RUnlock()
+
+	if !started {
+		return nil
+	}
+
+	if stdin == nil {
+		return nil
+	}
+
+	_, err := stdin.Write(pkt.Data)
+	return err
 }

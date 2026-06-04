@@ -68,7 +68,7 @@ func main() {
 	server := api.NewServer(&api.ServerConfig{
 		HTTPAddr:   cfg.Server.HTTPAddr,
 		StaticPath: *staticPath,
-	}, inputSvc, outputSvc, pipeSvc, statsHandler, logHandler, fileHandler)
+	}, engine, inputSvc, outputSvc, pipeSvc, statsHandler, logHandler, fileHandler)
 
 	// 启动服务器
 	go func() {

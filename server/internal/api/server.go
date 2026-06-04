@@ -2,8 +2,10 @@ package api
 
 import (
 	"net/http"
+	"strings"
 
 	"github.com/gin-gonic/gin"
+	"github.com/x-media/x-media-server/internal/media"
 	"github.com/x-media/x-media-server/internal/service"
 )
 
@@ -13,22 +15,29 @@ type ServerConfig struct {
 	StaticPath string
 }
 
-// Server API服务器
+type httpHandler interface {
+	GetRoutePath() string
+	ServeHTTP(w http.ResponseWriter, r *http.Request)
+}
+
 type Server struct {
 	config       *ServerConfig
 	engine       *gin.Engine
 	httpServer   *http.Server
+	mediaEngine  media.MediaEngine
 	inputSvc     *service.InputService
 	outputSvc    *service.OutputService
 	pipeSvc      *service.PipeService
 	statsHandler *StatsHandler
 	logHandler   *LogHandler
 	fileHandler  *FileHandler
+	flvOutputs   map[string]httpHandler
 }
 
 // NewServer 创建API服务器
 func NewServer(
 	config *ServerConfig,
+	mediaEngine media.MediaEngine,
 	inputSvc *service.InputService,
 	outputSvc *service.OutputService,
 	pipeSvc *service.PipeService,
@@ -47,12 +56,14 @@ func NewServer(
 	s := &Server{
 		config:       config,
 		engine:       engine,
+		mediaEngine:  mediaEngine,
 		inputSvc:     inputSvc,
 		outputSvc:    outputSvc,
 		pipeSvc:      pipeSvc,
 		statsHandler: statsHandler,
 		logHandler:   logHandler,
 		fileHandler:  fileHandler,
+		flvOutputs:   make(map[string]httpHandler),
 	}
 
 	// 注册路由
@@ -148,6 +159,21 @@ func (s *Server) registerRoutes() {
 	}
 
 	s.engine.Static("/uploads", "./uploads")
+
+	s.engine.GET("/live/:filename", func(c *gin.Context) {
+		filename := c.Param("filename")
+		outputID := strings.TrimSuffix(filename, ".flv")
+		out, err := s.mediaEngine.GetOutput(outputID)
+		if err != nil {
+			c.JSON(404, gin.H{"code": 404, "message": "output not found"})
+			return
+		}
+		if h, ok := out.(httpHandler); ok {
+			h.ServeHTTP(c.Writer, c.Request)
+		} else {
+			c.JSON(400, gin.H{"code": 400, "message": "output is not HTTP-FLV"})
+		}
+	})
 }
 
 // corsMiddleware CORS中间件
