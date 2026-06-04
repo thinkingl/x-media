@@ -200,6 +200,13 @@ func (m *HTTPFLVMuxer) EnsureFFmpeg() error {
 	}
 
 	go func() {
+		err := cmd.Wait()
+		if err != nil {
+			logger.Debugf("ffmpeg exited for httpflv %s: %v", m.output, err)
+		}
+	}()
+
+	go func() {
 		buf := make([]byte, 4096)
 		for {
 			n, err := stdout.Read(buf)

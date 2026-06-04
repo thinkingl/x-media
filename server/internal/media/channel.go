@@ -16,6 +16,7 @@ type StreamInfo struct {
 	CodecConfig []byte         `json:"codec_config"`
 }
 
+// Not used in current architecture: signaling would be needed for WebRTC-like channel negotiation.
 type SessionOffer struct {
 	Type      string       `json:"type"`
 	SessionID string       `json:"session_id"`

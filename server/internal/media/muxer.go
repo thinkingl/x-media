@@ -10,6 +10,8 @@ import (
 	"github.com/x-media/x-media-server/pkg/logger"
 )
 
+// Not used in current architecture: outputs use SimpleMuxer which reads files directly via ffmpeg.
+// StreamMuxer would be needed for piping data through Go with per-channel stdin.
 type StreamMuxer struct {
 	mu       sync.RWMutex
 	output   string
@@ -106,8 +108,12 @@ func (m *StreamMuxer) Start(ctx context.Context) error {
 	}
 
 	go func() {
-		cmd.Wait()
-		logger.Infof("muxer stopped for %s", m.output)
+		err := cmd.Wait()
+		if err != nil {
+			logger.Debugf("muxer ffmpeg exited for %s: %v", m.output, err)
+		} else {
+			logger.Infof("muxer stopped for %s", m.output)
+		}
 	}()
 
 	logger.Infof("muxer started for %s (format=%s, sync=%v)", m.output, m.format, m.syncMode)
@@ -206,11 +212,21 @@ func (m *SimpleMuxer) Start(ctx context.Context, codec CodecID) error {
 		return fmt.Errorf("failed to start ffmpeg: %w", err)
 	}
 
+	go func() {
+		err := cmd.Wait()
+		if err != nil {
+			logger.Debugf("simple muxer ffmpeg exited for %s: %v", m.output, err)
+		}
+	}()
+
 	logger.Infof("simple muxer started for %s (format=%s, codec=%s)", m.output, m.format, codec)
 	return nil
 }
 
 func (m *SimpleMuxer) StartWithFile(ctx context.Context, filePath string) error {
+	if err := ValidateFilePath(filePath); err != nil {
+		return fmt.Errorf("invalid file path: %w", err)
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -246,6 +262,13 @@ func (m *SimpleMuxer) StartWithFile(ctx context.Context, filePath string) error 
 		m.started = false
 		return fmt.Errorf("failed to start ffmpeg: %w", err)
 	}
+
+	go func() {
+		err := cmd.Wait()
+		if err != nil {
+			logger.Debugf("simple muxer ffmpeg exited for %s (file=%s): %v", m.output, filePath, err)
+		}
+	}()
 
 	logger.Infof("simple muxer started for %s (format=%s, file=%s)", m.output, m.format, filePath)
 	return nil

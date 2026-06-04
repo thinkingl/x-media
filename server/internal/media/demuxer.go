@@ -67,6 +67,8 @@ func (d *StreamDemuxer) OnPacket(channelID uint8, handler func(*MediaPacket)) {
 	d.handlers[channelID] = handler
 }
 
+// Not used in current architecture: inputs are probe-only, outputs read files directly via ffmpeg.
+// This data path would be needed for live RTSP relay through Go or in-process stream transformation.
 func (d *StreamDemuxer) Start(ctx context.Context) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -147,6 +149,13 @@ func (d *StreamDemuxer) demuxStream(ctx context.Context, stream StreamInfo) {
 		return
 	}
 
+	go func() {
+		err := cmd.Wait()
+		if err != nil {
+			logger.Debugf("ffmpeg exited for channel %d: %v", stream.ChannelID, err)
+		}
+	}()
+
 	logger.Infof("demux started for channel %d (codec=%s, kind=%s)",
 		stream.ChannelID, codec, stream.Kind)
 
@@ -212,6 +221,9 @@ func ProbeFileStreams(filePath string) ([]StreamInfo, error) {
 }
 
 func ProbeAndSaveMediaInfo(filePath string) (string, error) {
+	if err := ValidateFilePath(filePath); err != nil {
+		return "", fmt.Errorf("invalid file path: %w", err)
+	}
 	cmd := exec.Command("ffprobe",
 		"-v", "quiet",
 		"-print_format", "json",

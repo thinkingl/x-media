@@ -146,6 +146,7 @@ func CodecIDFromFFmpegName(name string) CodecID {
 	}
 }
 
+// Not used in current architecture: NAL parsing would be needed for in-process stream analysis or keyframe detection.
 func ParseNALType(data []byte, codec CodecID) (naluType int, isKey bool) {
 	if len(data) < 5 {
 		return 0, false

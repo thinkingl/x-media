@@ -3,6 +3,7 @@ package media
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -66,6 +67,9 @@ type ffprobeFormatInfo struct {
 }
 
 func ProbeFile(filePath string) (*MediaInfo, error) {
+	if err := ValidateFilePath(filePath); err != nil {
+		return nil, fmt.Errorf("invalid file path: %w", err)
+	}
 	cmd := exec.Command("ffprobe",
 		"-v", "quiet",
 		"-print_format", "json",
@@ -117,6 +121,9 @@ func ProbeFile(filePath string) (*MediaInfo, error) {
 }
 
 func ExtractThumbnail(filePath, outputPath string, timeSeconds float64) error {
+	if err := ValidateFilePath(filePath); err != nil {
+		return fmt.Errorf("invalid input file path: %w", err)
+	}
 	cmd := exec.Command("ffmpeg",
 		"-y",
 		"-ss", fmt.Sprintf("%.2f", timeSeconds),
@@ -164,6 +171,26 @@ func GetAudioStream(info *MediaInfo) *FFprobeStream {
 		if strings.EqualFold(info.Streams[i].CodecType, "audio") {
 			return &info.Streams[i]
 		}
+	}
+	return nil
+}
+
+func ValidateFilePath(filePath string) error {
+	if filePath == "" {
+		return fmt.Errorf("file path is empty")
+	}
+	if strings.ContainsRune(filePath, '\x00') {
+		return fmt.Errorf("file path contains null byte")
+	}
+	if !filepath.IsAbs(filePath) {
+		return fmt.Errorf("file path must be absolute: %s", filePath)
+	}
+	info, err := os.Stat(filePath)
+	if err != nil {
+		return fmt.Errorf("file not accessible: %w", err)
+	}
+	if info.IsDir() {
+		return fmt.Errorf("path is a directory, not a file: %s", filePath)
 	}
 	return nil
 }
