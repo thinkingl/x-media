@@ -168,6 +168,12 @@ func NewSimpleMuxer(output, format string) *SimpleMuxer {
 	}
 }
 
+func (m *SimpleMuxer) IsStarted() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.started
+}
+
 func (m *SimpleMuxer) Start(ctx context.Context, codec CodecID) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()

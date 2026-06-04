@@ -95,9 +95,9 @@ func (r *RTSPOutput) WritePacket(pkt *MediaPacket) error {
 		return ErrStreamNotRunning
 	}
 
-	if !muxer.started {
+	if !muxer.IsStarted() {
 		r.mu.Lock()
-		if !muxer.started {
+		if !muxer.IsStarted() {
 			if err := muxer.Start(r.ctx, pkt.CodecID); err != nil {
 				r.mu.Unlock()
 				return err
