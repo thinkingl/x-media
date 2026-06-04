@@ -89,6 +89,17 @@ func (d *StreamDemuxer) Stop() {
 }
 
 func (d *StreamDemuxer) demuxAll(ctx context.Context) {
+	var videoCodec CodecID
+	for _, s := range d.streams {
+		if s.Kind == "video" {
+			videoCodec = s.CodecID
+			break
+		}
+	}
+	if videoCodec == 0 {
+		videoCodec = CodecH264
+	}
+
 	args := []string{
 		"-re",
 		"-i", d.source,
@@ -130,8 +141,8 @@ func (d *StreamDemuxer) demuxAll(ctx context.Context) {
 			pkt := &MediaPacket{
 				StreamID:  "demux",
 				Kind:      "video",
-				CodecID:   CodecH264,
-				CodecType: "H264",
+				CodecID:   videoCodec,
+				CodecType: videoCodec.String(),
 				IsVideo:   true,
 				Data:      data,
 				Timestamp: time.Now().UnixMilli(),
