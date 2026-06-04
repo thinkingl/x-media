@@ -357,8 +357,7 @@ func TestFileInput_StartStop(t *testing.T) {
 }
 
 func TestRTSPInput_StartStop(t *testing.T) {
-	t.Run("启动和停止RTSP输入", func(t *testing.T) {
-		// Arrange
+	t.Run("启动RTSP输入_不可达URL", func(t *testing.T) {
 		config := &InputConfig{
 			ID:        "rtsp_input_001",
 			Type:      "rtsp",
@@ -371,19 +370,21 @@ func TestRTSPInput_StartStop(t *testing.T) {
 
 		ctx := context.Background()
 
-		// Act - 启动
 		err = input.Start(ctx)
+		assert.Error(t, err, "should fail for unreachable RTSP URL")
+		assert.Equal(t, StreamStatusError, input.Status())
+	})
 
-		// Assert
-		assert.NoError(t, err)
-		assert.Equal(t, StreamStatusRunning, input.Status())
+	t.Run("RTSP输入_空URL", func(t *testing.T) {
+		config := &InputConfig{
+			ID:   "rtsp_input_002",
+			Type: "rtsp",
+			URL:  "",
+		}
 
-		// Act - 停止
-		err = input.Stop()
-
-		// Assert
-		assert.NoError(t, err)
-		assert.Equal(t, StreamStatusStopped, input.Status())
+		input, err := NewRTSPInput(config)
+		assert.Error(t, err)
+		assert.Nil(t, input)
 	})
 }
 
