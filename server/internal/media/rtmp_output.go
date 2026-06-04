@@ -49,6 +49,21 @@ func (r *RTMPOutput) Start(ctx context.Context) error {
 	return nil
 }
 
+func (r *RTMPOutput) StartWithFile(ctx context.Context, filePath string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.status == StreamStatusRunning {
+		return nil
+	}
+	r.ctx, r.cancel = context.WithCancel(ctx)
+	r.status = StreamStatusRunning
+	if err := r.muxer.StartWithFile(r.ctx, filePath); err != nil {
+		r.status = StreamStatusStopped
+		return err
+	}
+	return nil
+}
+
 func (r *RTMPOutput) Stop() error {
 	r.mu.Lock()
 	defer r.mu.Unlock()

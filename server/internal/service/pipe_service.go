@@ -203,12 +203,18 @@ func (s *PipeService) Start(id string) error {
 		}
 	}
 
-	if err := s.engine.StartOutput(pipe.OutputID); err != nil {
-		logger.Warnf("启动输出流失败(可能已启动): %v", err)
-	}
-
 	if err := s.engine.Connect(pipe.InputID, pipe.OutputID); err != nil {
 		return errors.NewInternalError(err)
+	}
+
+	if input.Type == model.InputTypeFile && inputConfig.Path != "" {
+		if err := s.engine.StartOutputWithFile(pipe.OutputID, inputConfig.Path); err != nil {
+			logger.Warnf("启动输出流失败: %v", err)
+		}
+	} else {
+		if err := s.engine.StartOutput(pipe.OutputID); err != nil {
+			logger.Warnf("启动输出流失败: %v", err)
+		}
 	}
 
 	if err := s.engine.StartInput(pipe.InputID); err != nil {

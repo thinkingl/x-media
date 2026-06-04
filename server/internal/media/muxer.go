@@ -208,6 +208,47 @@ func (m *SimpleMuxer) Start(ctx context.Context, codec CodecID) error {
 	return nil
 }
 
+func (m *SimpleMuxer) StartWithFile(ctx context.Context, filePath string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.started {
+		return nil
+	}
+
+	args := []string{
+		"-re",
+		"-i", filePath,
+		"-c:v", "copy",
+		"-c:a", "copy",
+	}
+
+	if m.format == "rtmp" || m.format == "flv" {
+		args = append(args, "-f", "flv")
+	} else if m.format == "rtsp" {
+		args = append(args, "-f", "rtsp", "-rtsp_transport", "tcp")
+	} else {
+		args = append(args, "-f", m.format)
+	}
+
+	args = append(args, m.output)
+
+	cmd := exec.CommandContext(ctx, "ffmpeg", args...)
+	cmd.Stdout = nil
+	cmd.Stderr = nil
+
+	m.cmd = cmd
+	m.started = true
+
+	if err := cmd.Start(); err != nil {
+		m.started = false
+		return fmt.Errorf("failed to start ffmpeg: %w", err)
+	}
+
+	logger.Infof("simple muxer started for %s (format=%s, file=%s)", m.output, m.format, filePath)
+	return nil
+}
+
 func (m *SimpleMuxer) Stop() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -323,6 +364,61 @@ func (m *HTTPFLVMuxer) Start(ctx context.Context, codec CodecID) error {
 	}()
 
 	logger.Infof("HTTP-FLV muxer started for %s (codec=%s)", m.output, codec)
+	return nil
+}
+
+func (m *HTTPFLVMuxer) StartWithFile(ctx context.Context, filePath string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.started {
+		return nil
+	}
+
+	args := []string{
+		"-re",
+		"-i", filePath,
+		"-c:v", "copy",
+		"-c:a", "copy",
+		"-f", "flv",
+		"pipe:1",
+	}
+
+	cmd := exec.CommandContext(ctx, "ffmpeg", args...)
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return fmt.Errorf("failed to create stdout pipe: %w", err)
+	}
+
+	cmd.Stderr = nil
+	m.cmd = cmd
+	m.started = true
+
+	if err := cmd.Start(); err != nil {
+		m.started = false
+		return fmt.Errorf("failed to start ffmpeg: %w", err)
+	}
+
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			n, err := stdout.Read(buf)
+			if n > 0 {
+				data := make([]byte, n)
+				copy(data, buf[:n])
+				m.mu.RLock()
+				for w := range m.clients {
+					w.Write(data)
+				}
+				m.mu.RUnlock()
+			}
+			if err != nil {
+				break
+			}
+		}
+	}()
+
+	logger.Infof("HTTP-FLV muxer started for %s (file=%s)", m.output, filePath)
 	return nil
 }
 

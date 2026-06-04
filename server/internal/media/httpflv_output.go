@@ -72,6 +72,38 @@ func (h *HTTPFLVOutput) Start(ctx context.Context) error {
 	return nil
 }
 
+func (h *HTTPFLVOutput) StartWithFile(ctx context.Context, filePath string) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.status == StreamStatusRunning {
+		return nil
+	}
+
+	h.ctx, h.cancel = context.WithCancel(ctx)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/"+h.id+".flv", h.serveFLV)
+	mux.HandleFunc("/live/"+h.id+".flv", h.serveFLV)
+
+	h.server = &http.Server{
+		Addr:    h.config.Addr,
+		Handler: mux,
+	}
+
+	go func() {
+		if err := h.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			logger.Errorf("HTTP-FLV server start failed: %v", err)
+		}
+	}()
+
+	h.status = StreamStatusRunning
+	if err := h.muxer.StartWithFile(h.ctx, filePath); err != nil {
+		h.status = StreamStatusStopped
+		return err
+	}
+	return nil
+}
+
 func (h *HTTPFLVOutput) serveFLV(w http.ResponseWriter, r *http.Request) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {

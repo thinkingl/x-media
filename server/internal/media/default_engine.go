@@ -277,3 +277,21 @@ func (e *DefaultMediaEngine) StartOutput(id string) error {
 
 	return output.Start(e.ctx)
 }
+
+func (e *DefaultMediaEngine) StartOutputWithFile(id string, filePath string) error {
+	e.mu.RLock()
+	output, ok := e.outputs[id]
+	e.mu.RUnlock()
+
+	if !ok {
+		return ErrOutputNotFound
+	}
+
+	type fileStarter interface {
+		StartWithFile(ctx context.Context, filePath string) error
+	}
+	if fs, ok := output.(fileStarter); ok {
+		return fs.StartWithFile(e.ctx, filePath)
+	}
+	return output.Start(e.ctx)
+}

@@ -55,6 +55,21 @@ func (r *RTSPOutput) Start(ctx context.Context) error {
 	return nil
 }
 
+func (r *RTSPOutput) StartWithFile(ctx context.Context, filePath string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.status == StreamStatusRunning {
+		return nil
+	}
+	r.ctx, r.cancel = context.WithCancel(ctx)
+	r.status = StreamStatusRunning
+	if err := r.muxer.StartWithFile(r.ctx, filePath); err != nil {
+		r.status = StreamStatusStopped
+		return err
+	}
+	return nil
+}
+
 func (r *RTSPOutput) Stop() error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
