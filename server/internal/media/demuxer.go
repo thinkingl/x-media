@@ -215,6 +215,9 @@ func (d *StreamDemuxer) demuxStream(ctx context.Context, stream StreamInfo) {
 }
 
 func ProbeFileStreams(filePath string) ([]StreamInfo, error) {
+	if err := ValidateFilePath(filePath); err != nil {
+		return nil, fmt.Errorf("invalid file path: %w", err)
+	}
 	demuxer := NewStreamDemuxer(filePath)
 	return demuxer.Probe()
 }

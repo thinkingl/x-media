@@ -5,11 +5,26 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 )
+
+func testFixturePathI(t *testing.T, relPath string) string {
+	t.Helper()
+	_, filename, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("failed to get caller info")
+	}
+	abs, err := filepath.Abs(filepath.Join(filepath.Dir(filename), relPath))
+	if err != nil {
+		t.Fatalf("failed to resolve path: %v", err)
+	}
+	return abs
+}
 
 func TestHTTPFLVOutput_FileToFLVFlow(t *testing.T) {
 	output, err := NewHTTPFLVOutput(&OutputConfig{
@@ -22,7 +37,7 @@ func TestHTTPFLVOutput_FileToFLVFlow(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	err = output.StartWithFile(ctx, "../../test/fixtures/h265_test.mp4")
+	err = output.StartWithFile(ctx, testFixturePathI(t, "../../test/fixtures/h265_test.mp4"))
 	assert.NoError(t, err)
 	assert.Equal(t, StreamStatusRunning, output.Status())
 
@@ -62,7 +77,7 @@ func TestHTTPFLVOutput_MultipleClients(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	err = output.StartWithFile(ctx, "../../test/fixtures/h265_test.mp4")
+	err = output.StartWithFile(ctx, testFixturePathI(t, "../../test/fixtures/h265_test.mp4"))
 	assert.NoError(t, err)
 
 	mux := http.NewServeMux()

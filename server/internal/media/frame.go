@@ -24,7 +24,7 @@ type FrameHeader struct {
 	PayloadLen uint32
 }
 
-const FrameHeaderSize = 32
+const FrameHeaderSize = 30
 
 func (h *FrameHeader) Encode() []byte {
 	buf := make([]byte, FrameHeaderSize)

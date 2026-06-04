@@ -2,18 +2,33 @@ package media
 
 import (
 	"context"
+	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 )
+
+func testFixturePath(t *testing.T, relPath string) string {
+	t.Helper()
+	_, filename, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("failed to get caller info")
+	}
+	abs, err := filepath.Abs(filepath.Join(filepath.Dir(filename), relPath))
+	if err != nil {
+		t.Fatalf("failed to resolve path: %v", err)
+	}
+	return abs
+}
 
 func TestFileInput_OpenRealMP4(t *testing.T) {
 	tests := []struct {
 		name string
 		path string
 	}{
-		{"H264 MP4", "../../test/fixtures/test.mp4"},
-		{"H265 MP4", "../../test/fixtures/h265_test.mp4"},
+		{"H264 MP4", testFixturePath(t, "../../test/fixtures/test.mp4")},
+		{"H265 MP4", testFixturePath(t, "../../test/fixtures/h265_test.mp4")},
 	}
 
 	for _, tt := range tests {
@@ -49,8 +64,8 @@ func TestFileInput_ProbeStreams(t *testing.T) {
 		expectAudio  bool
 		videoCodec   string
 	}{
-		{"H264 MP4", "../../test/fixtures/test.mp4", true, true, "h264"},
-		{"H265 MP4", "../../test/fixtures/h265_test.mp4", true, false, "hevc"},
+		{"H264 MP4", testFixturePath(t, "../../test/fixtures/test.mp4"), true, true, "h264"},
+		{"H265 MP4", testFixturePath(t, "../../test/fixtures/h265_test.mp4"), true, false, "hevc"},
 	}
 
 	for _, tt := range tests {
@@ -99,7 +114,7 @@ func TestFileInput_ReadPacketWhenStopped(t *testing.T) {
 	config := &InputConfig{
 		ID:   "test_stopped_read",
 		Type: "file",
-		Path: "../../test/fixtures/h265_test.mp4",
+		Path: testFixturePath(t, "../../test/fixtures/h265_test.mp4"),
 	}
 
 	input, err := NewFileInput(config)
@@ -114,7 +129,7 @@ func TestFileInput_DoubleStartStop(t *testing.T) {
 	config := &InputConfig{
 		ID:   "test_double",
 		Type: "file",
-		Path: "../../test/fixtures/h265_test.mp4",
+		Path: testFixturePath(t, "../../test/fixtures/h265_test.mp4"),
 	}
 
 	input, err := NewFileInput(config)
@@ -170,7 +185,7 @@ func TestFileInput_ViaEngine(t *testing.T) {
 	config := &InputConfig{
 		ID:   "engine_file_input",
 		Type: "file",
-		Path: "../../test/fixtures/h265_test.mp4",
+		Path: testFixturePath(t, "../../test/fixtures/h265_test.mp4"),
 	}
 
 	input, err := engine.CreateInput(config)
@@ -193,7 +208,7 @@ func TestFileInput_ProbeH264AudioVideo(t *testing.T) {
 	config := &InputConfig{
 		ID:   "test_h264_av",
 		Type: "file",
-		Path: "../../test/fixtures/test.mp4",
+		Path: testFixturePath(t, "../../test/fixtures/test.mp4"),
 	}
 
 	input, err := NewFileInput(config)
@@ -227,7 +242,7 @@ func TestFileInput_ProbeH265VideoOnly(t *testing.T) {
 	config := &InputConfig{
 		ID:   "test_h265_v",
 		Type: "file",
-		Path: "../../test/fixtures/h265_test.mp4",
+		Path: testFixturePath(t, "../../test/fixtures/h265_test.mp4"),
 	}
 
 	input, err := NewFileInput(config)
