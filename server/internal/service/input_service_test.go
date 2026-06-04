@@ -162,6 +162,29 @@ func (m *MockMediaEngine) RemoveOutput(id string) error {
 	return args.Error(0)
 }
 
+func (m *MockMediaEngine) StartInput(id string) error {
+	args := m.Called(id)
+	return args.Error(0)
+}
+
+func (m *MockMediaEngine) StartOutput(id string) error {
+	args := m.Called(id)
+	return args.Error(0)
+}
+
+func (m *MockMediaEngine) StartOutputWithFile(id string, filePath string) error {
+	args := m.Called(id, filePath)
+	return args.Error(0)
+}
+
+func (m *MockMediaEngine) GetOutput(id string) (media.OutputStream, error) {
+	args := m.Called(id)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).(media.OutputStream), args.Error(1)
+}
+
 func TestInputService_Create(t *testing.T) {
 	t.Run("成功创建MP4输入端", func(t *testing.T) {
 		// Arrange

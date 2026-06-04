@@ -271,30 +271,37 @@ func TestPipeService_Delete(t *testing.T) {
 
 func TestPipeService_Start(t *testing.T) {
 	t.Run("成功启动管道", func(t *testing.T) {
-		// Arrange
 		mockPipeRepo := new(MockPipeRepo)
 		mockInputRepo := new(MockInputRepo)
 		mockOutputRepo := new(MockOutputRepo)
 		mockEngine := new(MockMediaEngine)
 		svc := NewPipeService(mockPipeRepo, mockInputRepo, mockOutputRepo, mockEngine)
 
-		existing := &model.Pipe{
+		pipe := &model.Pipe{
 			ID:       "pipe_001",
 			InputID:  "input_001",
 			OutputID: "output_001",
 			Status:   model.PipeStatusStopped,
 		}
+		input := &model.Input{ID: "input_001", Name: "输入", Type: "file", Config: `{"path":"/tmp/test.mp4"}`}
+		output := &model.Output{ID: "output_001", Name: "输出", Type: "http-flv", Config: `{"addr":":8080"}`}
 
-		mockPipeRepo.On("GetByID", "pipe_001").Return(existing, nil)
+		mockPipeRepo.On("GetByID", "pipe_001").Return(pipe, nil)
+		mockInputRepo.On("GetByID", "input_001").Return(input, nil)
+		mockOutputRepo.On("GetByID", "output_001").Return(output, nil)
+		mockEngine.On("CreateInput", mock.Anything).Return((*MockInputStream)(nil), nil)
+		mockEngine.On("CreateOutput", mock.Anything).Return((*MockOutputStream)(nil), nil)
 		mockEngine.On("Connect", "input_001", "output_001").Return(nil)
+		mockEngine.On("StartOutputWithFile", "output_001", "/tmp/test.mp4").Return(nil)
+		mockEngine.On("StartInput", "input_001").Return(nil)
 		mockPipeRepo.On("UpdateStatus", "pipe_001", model.PipeStatusRunning).Return(nil)
 
-		// Act
 		err := svc.Start("pipe_001")
 
-		// Assert
 		assert.NoError(t, err)
 		mockPipeRepo.AssertExpectations(t)
+		mockInputRepo.AssertExpectations(t)
+		mockOutputRepo.AssertExpectations(t)
 		mockEngine.AssertExpectations(t)
 	})
 
