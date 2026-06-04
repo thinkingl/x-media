@@ -25,6 +25,13 @@ export const useInputStore = defineStore('input', () => {
     return data.data
   }
 
+  async function updateInput(id: string, name: string, type: string, config: string) {
+    const { data } = await api.updateInput(id, { name, type, config })
+    const idx = inputs.value.findIndex((i) => i.id === id)
+    if (idx !== -1) inputs.value[idx] = data.data
+    return data.data
+  }
+
   async function deleteInput(id: string) {
     await api.deleteInput(id)
     inputs.value = inputs.value.filter((i) => i.id !== id)
@@ -42,5 +49,5 @@ export const useInputStore = defineStore('input', () => {
     if (input) input.status = 'stopped'
   }
 
-  return { inputs, loading, fetchInputs, createInput, deleteInput, startInput, stopInput }
+  return { inputs, loading, fetchInputs, createInput, updateInput, deleteInput, startInput, stopInput }
 })

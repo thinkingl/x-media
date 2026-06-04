@@ -2,98 +2,151 @@ package media
 
 import (
 	"context"
+	"io"
+	"net/http"
 	"sync"
 
 	"github.com/x-media/x-media-server/pkg/logger"
 	"github.com/x-media/x-media-server/pkg/utils"
 )
 
-// HTTPFLVOutput HTTP-FLV输出流
 type HTTPFLVOutput struct {
-	mu     sync.RWMutex
-	id     string
-	config *OutputConfig
-	status StreamStatus
-	cancel context.CancelFunc
+	mu        sync.RWMutex
+	id        string
+	config    *OutputConfig
+	status    StreamStatus
+	cancel    context.CancelFunc
+	ctx       context.Context
+	server    *http.Server
+	clients   map[io.Writer]bool
+	clientsMu sync.RWMutex
+	muxer     *HTTPFLVMuxer
 }
 
-// NewHTTPFLVOutput 创建HTTP-FLV输出流
 func NewHTTPFLVOutput(config *OutputConfig) (*HTTPFLVOutput, error) {
 	if config.Addr == "" {
 		return nil, ErrInvalidConfig
 	}
-
 	id := config.ID
 	if id == "" {
 		id = utils.GenerateID()
 	}
-
 	return &HTTPFLVOutput{
-		id:     id,
-		config: config,
-		status: StreamStatusStopped,
+		id:      id,
+		config:  config,
+		status:  StreamStatusStopped,
+		clients: make(map[io.Writer]bool),
+		muxer:   NewHTTPFLVMuxer(""),
 	}, nil
 }
 
-// ID 获取流ID
-func (h *HTTPFLVOutput) ID() string {
-	return h.id
-}
+func (h *HTTPFLVOutput) ID() string           { return h.id }
+func (h *HTTPFLVOutput) Status() StreamStatus { h.mu.RLock(); defer h.mu.RUnlock(); return h.status }
 
-// Start 启动流
 func (h *HTTPFLVOutput) Start(ctx context.Context) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-
 	if h.status == StreamStatusRunning {
 		return nil
 	}
 
-	// TODO: 实际启动HTTP服务
-	// 这里简化处理，实际应该使用LAL库
+	h.ctx, h.cancel = context.WithCancel(ctx)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/"+h.id+".flv", h.serveFLV)
+	mux.HandleFunc("/live/"+h.id+".flv", h.serveFLV)
+
+	h.server = &http.Server{
+		Addr:    h.config.Addr,
+		Handler: mux,
+	}
+
+	go func() {
+		if err := h.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			logger.Errorf("HTTP-FLV server start failed: %v", err)
+		}
+	}()
 
 	h.status = StreamStatusRunning
-	_, h.cancel = context.WithCancel(ctx)
-
-	logger.Infof("HTTP-FLV输出流已启动: %s, 地址: %s", h.id, h.config.Addr)
+	logger.Infof("HTTP-FLV output ready: %s, addr: %s", h.id, h.config.Addr)
 	return nil
 }
 
-// Stop 停止流
+func (h *HTTPFLVOutput) serveFLV(w http.ResponseWriter, r *http.Request) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "video/x-flv")
+	w.Header().Set("Connection", "close")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	flvHeader := []byte{
+		0x46, 0x4C, 0x56, 0x01,
+		0x01,
+		0x00, 0x00, 0x00, 0x09,
+		0x00, 0x00, 0x00, 0x00,
+	}
+	w.Write(flvHeader)
+	flusher.Flush()
+
+	h.clientsMu.Lock()
+	h.clients[w] = true
+	h.clientsMu.Unlock()
+
+	defer func() {
+		h.clientsMu.Lock()
+		delete(h.clients, w)
+		h.clientsMu.Unlock()
+	}()
+
+	<-r.Context().Done()
+}
+
 func (h *HTTPFLVOutput) Stop() error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-
 	if h.status == StreamStatusStopped {
 		return nil
 	}
-
 	if h.cancel != nil {
 		h.cancel()
 	}
-
+	h.muxer.Stop()
+	if h.server != nil {
+		h.server.Close()
+		h.server = nil
+	}
+	h.clientsMu.Lock()
+	h.clients = make(map[io.Writer]bool)
+	h.clientsMu.Unlock()
 	h.status = StreamStatusStopped
-	logger.Infof("HTTP-FLV输出流已停止: %s", h.id)
+	logger.Infof("HTTP-FLV output stopped: %s", h.id)
 	return nil
 }
 
-// Status 获取状态
-func (h *HTTPFLVOutput) Status() StreamStatus {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
-	return h.status
-}
-
-// WritePacket 写入数据包
 func (h *HTTPFLVOutput) WritePacket(pkt *MediaPacket) error {
 	h.mu.RLock()
-	defer h.mu.RUnlock()
+	status := h.status
+	muxer := h.muxer
+	h.mu.RUnlock()
 
-	if h.status != StreamStatusRunning {
+	if status != StreamStatusRunning {
 		return ErrStreamNotRunning
 	}
 
-	// TODO: 实际写入HTTP-FLV数据
-	logger.Debugf("写入HTTP-FLV数据包: %s, 大小: %d", h.id, len(pkt.Data))
-	return nil
+	if !muxer.started {
+		h.mu.Lock()
+		if !muxer.started {
+			if err := muxer.Start(h.ctx, pkt.CodecID); err != nil {
+				h.mu.Unlock()
+				return err
+			}
+		}
+		h.mu.Unlock()
+	}
+	return muxer.WritePacket(pkt)
 }

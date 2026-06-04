@@ -127,15 +127,25 @@ func (e *DefaultMediaEngine) Connect(inputID, outputID string) error {
 		return ErrInputNotFound
 	}
 
-	output, ok := e.outputs[outputID]
-	if !ok {
+	if _, ok := e.outputs[outputID]; !ok {
 		return ErrOutputNotFound
 	}
 
-	// 设置数据包回调
 	input.OnPacket(func(pkt *MediaPacket) {
-		if err := output.WritePacket(pkt); err != nil {
-			logger.Errorf("写入数据包失败: %v", err)
+		e.mu.RLock()
+		outputIDs := make([]string, len(e.conns[inputID]))
+		copy(outputIDs, e.conns[inputID])
+		outs := make([]OutputStream, 0, len(outputIDs))
+		for _, oid := range outputIDs {
+			if out, ok := e.outputs[oid]; ok {
+				outs = append(outs, out)
+			}
+		}
+		e.mu.RUnlock()
+		for _, out := range outs {
+			if err := out.WritePacket(pkt); err != nil {
+				logger.Errorf("写入数据包失败 %s: %v", out.ID(), err)
+			}
 		}
 	})
 

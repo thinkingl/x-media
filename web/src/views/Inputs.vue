@@ -20,8 +20,24 @@
           </el-tag>
         </template>
       </el-table-column>
-      <el-table-column label="操作" width="250">
+      <el-table-column label="操作" width="350">
         <template #default="{ row }">
+          <el-button
+            v-if="row.type === 'file'"
+            type="info"
+            size="small"
+            @click="showDetails(row)"
+          >
+            详情
+          </el-button>
+          <el-button
+            type="primary"
+            size="small"
+            @click="showEditDialog(row)"
+            :disabled="row.status === 'running'"
+          >
+            编辑
+          </el-button>
           <el-button
             v-if="row.status !== 'running'"
             type="success"
@@ -50,7 +66,7 @@
       </el-table-column>
     </el-table>
 
-    <el-dialog v-model="createDialogVisible" title="创建输入端" width="500">
+    <el-dialog v-model="createDialogVisible" :title="isEditing ? '编辑输入端' : '创建输入端'" width="600">
       <el-form :model="createForm" label-width="100px">
         <el-form-item label="名称">
           <el-input v-model="createForm.name" placeholder="请输入名称" />
@@ -61,31 +77,163 @@
             <el-option label="RTSP流" value="rtsp" />
           </el-select>
         </el-form-item>
-        <el-form-item v-if="createForm.type === 'file'" label="文件路径">
-          <el-input v-model="createForm.configPath" placeholder="/path/to/video.mp4" />
-        </el-form-item>
-        <el-form-item v-if="createForm.type === 'rtsp'" label="RTSP URL">
-          <el-input v-model="createForm.configUrl" placeholder="rtsp://example.com/stream" />
-        </el-form-item>
-        <el-form-item v-if="createForm.type === 'file'" label="循环播放">
-          <el-switch v-model="createForm.configLoop" />
-        </el-form-item>
+
+        <template v-if="createForm.type === 'file'">
+          <el-form-item label="文件来源">
+            <el-radio-group v-model="fileSource">
+              <el-radio value="upload">上传文件</el-radio>
+              <el-radio value="browse">浏览服务器</el-radio>
+              <el-radio value="manual">手动输入</el-radio>
+            </el-radio-group>
+          </el-form-item>
+
+          <template v-if="fileSource === 'upload'">
+            <el-form-item label="选择文件">
+              <el-upload
+                ref="uploadRef"
+                :auto-upload="false"
+                :limit="1"
+                accept=".mp4,.flv,.ts,.avi,.mkv,.mov"
+                :on-change="onUploadFileChange"
+                :on-exceed="onUploadExceed"
+              >
+                <el-button type="primary">选择文件</el-button>
+                <template #tip>
+                  <div class="el-upload__tip">支持 MP4/FLV/TS/AVI/MKV/MOV</div>
+                </template>
+              </el-upload>
+            </el-form-item>
+            <el-form-item v-if="uploadFileName" label="已选文件">
+              <el-tag>{{ uploadFileName }}</el-tag>
+            </el-form-item>
+          </template>
+
+          <template v-if="fileSource === 'browse'">
+            <el-form-item label="当前路径">
+              <el-input v-model="browsePath" readonly>
+                <template #prefix>
+                  <span>📁</span>
+                </template>
+              </el-input>
+            </el-form-item>
+            <el-form-item label="目录内容">
+              <div class="file-browser">
+                <div
+                  v-if="browsePath !== '/'"
+                  class="file-item dir"
+                  @click="browseGoUp"
+                >
+                  📂 ..
+                </div>
+                <div
+                  v-for="item in browseItems"
+                  :key="item.path"
+                  :class="['file-item', item.is_dir ? 'dir' : 'file']"
+                  @click="item.is_dir ? browseEnterDir(item.path) : browseSelectFile(item)"
+                >
+                  <span class="file-icon">{{ item.is_dir ? '📁' : '📄' }}</span>
+                  <span class="file-name">{{ item.name }}</span>
+                  <span v-if="!item.is_dir" class="file-size">{{ formatSize(item.size) }}</span>
+                </div>
+                <div v-if="browseItems.length === 0" class="empty">目录为空</div>
+              </div>
+            </el-form-item>
+          </template>
+
+          <template v-if="fileSource === 'manual'">
+            <el-form-item label="文件路径">
+              <el-input v-model="createForm.configPath" placeholder="/path/to/video.mp4" />
+            </el-form-item>
+          </template>
+
+          <el-form-item label="循环播放">
+            <el-switch v-model="createForm.configLoop" />
+          </el-form-item>
+        </template>
+
+        <template v-if="createForm.type === 'rtsp'">
+          <el-form-item label="RTSP URL">
+            <el-input v-model="createForm.configUrl" placeholder="rtsp://example.com/stream" />
+          </el-form-item>
+        </template>
       </el-form>
       <template #footer>
         <el-button @click="createDialogVisible = false">取消</el-button>
-        <el-button type="primary" @click="handleCreate">确定</el-button>
+        <el-button type="primary" @click="handleCreate" :loading="creating">确定</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog v-model="detailsVisible" title="媒体信息" width="700">
+      <div v-loading="detailsLoading" class="media-details">
+        <template v-if="currentMediaInfo">
+          <div class="detail-section">
+            <h4>文件信息</h4>
+            <el-descriptions :column="2" border size="small">
+              <el-descriptions-item label="文件名">{{ currentMediaInfo.file_name }}</el-descriptions-item>
+              <el-descriptions-item label="文件大小">{{ formatSize(currentMediaInfo.file_size) }}</el-descriptions-item>
+              <el-descriptions-item label="格式">{{ currentMediaInfo.format_long_name }}</el-descriptions-item>
+              <el-descriptions-item label="时长">{{ formatDuration(currentMediaInfo.duration) }}</el-descriptions-item>
+              <el-descriptions-item label="总码率">{{ formatBitRate(currentMediaInfo.bit_rate) }}</el-descriptions-item>
+              <el-descriptions-item label="文件路径" :span="2">{{ currentMediaInfo.file_path }}</el-descriptions-item>
+            </el-descriptions>
+          </div>
+
+          <div v-if="videoStream" class="detail-section">
+            <h4>视频流</h4>
+            <el-descriptions :column="2" border size="small">
+              <el-descriptions-item label="编码">{{ videoStream.codec_long_name }}</el-descriptions-item>
+              <el-descriptions-item label="Profile">{{ videoStream.profile }}</el-descriptions-item>
+              <el-descriptions-item label="分辨率">{{ videoStream.width }}x{{ videoStream.height }}</el-descriptions-item>
+              <el-descriptions-item label="像素格式">{{ videoStream.pix_fmt }}</el-descriptions-item>
+              <el-descriptions-item v-if="videoStream.bit_rate" label="码率">{{ formatBitRate(parseInt(videoStream.bit_rate)) }}</el-descriptions-item>
+            </el-descriptions>
+          </div>
+
+          <div v-if="audioStream" class="detail-section">
+            <h4>音频流</h4>
+            <el-descriptions :column="2" border size="small">
+              <el-descriptions-item label="编码">{{ audioStream.codec_long_name }}</el-descriptions-item>
+              <el-descriptions-item label="采样率">{{ audioStream.sample_rate }} Hz</el-descriptions-item>
+              <el-descriptions-item label="声道数">{{ audioStream.channels }}</el-descriptions-item>
+              <el-descriptions-item v-if="audioStream.channel_layout" label="声道布局">{{ audioStream.channel_layout }}</el-descriptions-item>
+              <el-descriptions-item v-if="audioStream.bit_rate" label="码率">{{ formatBitRate(parseInt(audioStream.bit_rate)) }}</el-descriptions-item>
+            </el-descriptions>
+          </div>
+
+          <div v-if="currentMediaInfo.thumbnail_path" class="detail-section thumbnail-section">
+            <h4>视频预览</h4>
+            <el-image
+              :src="'/' + currentMediaInfo.thumbnail_path"
+              fit="contain"
+              style="max-width: 100%; max-height: 300px; border-radius: 4px;"
+            >
+              <template #error>
+                <div class="image-error">预览图加载失败</div>
+              </template>
+            </el-image>
+          </div>
+        </template>
+        <el-empty v-else-if="!detailsLoading" description="暂无媒体信息" />
+      </div>
+      <template #footer>
+        <el-button @click="handleReProbe" :loading="probing">重新探测</el-button>
+        <el-button @click="detailsVisible = false">关闭</el-button>
       </template>
     </el-dialog>
   </div>
 </template>
 
 <script setup lang="ts">
-import { onMounted, reactive, ref } from 'vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { ElMessage, ElMessageBox, type UploadFile } from 'element-plus'
 import { useInputStore } from '@/stores/input'
+import { listFiles, uploadFile, probeInput, type FileEntry, type MediaInfo, type StreamInfo } from '@/api'
 
 const inputStore = useInputStore()
 const createDialogVisible = ref(false)
+const creating = ref(false)
+const isEditing = ref(false)
+const editingId = ref('')
 
 const createForm = reactive({
   name: '',
@@ -95,8 +243,38 @@ const createForm = reactive({
   configLoop: true,
 })
 
+const fileSource = ref<'upload' | 'browse' | 'manual'>('browse')
+const uploadRef = ref()
+const uploadFileName = ref('')
+const uploadFileObj = ref<File | null>(null)
+
+const browsePath = ref('/')
+const browseItems = ref<FileEntry[]>([])
+
+const detailsVisible = ref(false)
+const detailsLoading = ref(false)
+const probing = ref(false)
+const currentInputId = ref('')
+const currentMediaInfo = ref<MediaInfo | null>(null)
+
+const videoStream = computed<StreamInfo | null>(() => {
+  if (!currentMediaInfo.value) return null
+  return currentMediaInfo.value.streams.find(s => s.codec_type === 'video') || null
+})
+
+const audioStream = computed<StreamInfo | null>(() => {
+  if (!currentMediaInfo.value) return null
+  return currentMediaInfo.value.streams.find(s => s.codec_type === 'audio') || null
+})
+
 onMounted(() => {
   inputStore.fetchInputs()
+})
+
+watch(fileSource, (val) => {
+  if (val === 'browse') {
+    loadBreadDir('/')
+  }
 })
 
 function getTypeTag(type: string) {
@@ -110,12 +288,106 @@ function getTypeTag(type: string) {
 }
 
 function showCreateDialog() {
+  isEditing.value = false
+  editingId.value = ''
   createForm.name = ''
   createForm.type = 'file'
   createForm.configPath = ''
   createForm.configUrl = ''
   createForm.configLoop = true
+  fileSource.value = 'browse'
+  uploadFileName.value = ''
+  uploadFileObj.value = null
+  if (uploadRef.value) {
+    uploadRef.value.clearFiles()
+  }
+  browsePath.value = '/'
+  browseItems.value = []
+  loadBreadDir('/')
   createDialogVisible.value = true
+}
+
+function showEditDialog(row: any) {
+  isEditing.value = true
+  editingId.value = row.id
+  createForm.name = row.name
+  createForm.type = row.type
+  createForm.configPath = ''
+  createForm.configUrl = ''
+  createForm.configLoop = true
+  fileSource.value = 'manual'
+
+  if (row.type === 'file') {
+    try {
+      const cfg = JSON.parse(row.config)
+      createForm.configPath = cfg.path || ''
+      createForm.configLoop = cfg.loop ?? true
+    } catch {}
+  } else if (row.type === 'rtsp') {
+    try {
+      const cfg = JSON.parse(row.config)
+      createForm.configUrl = cfg.url || ''
+    } catch {}
+  }
+
+  createDialogVisible.value = true
+}
+
+function formatSize(bytes: number): string {
+  if (bytes === 0) return '0 B'
+  const k = 1024
+  const sizes = ['B', 'KB', 'MB', 'GB']
+  const i = Math.floor(Math.log(bytes) / Math.log(k))
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i]
+}
+
+function formatDuration(seconds: number): string {
+  const h = Math.floor(seconds / 3600)
+  const m = Math.floor((seconds % 3600) / 60)
+  const s = Math.floor(seconds % 60)
+  if (h > 0) return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`
+  return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`
+}
+
+function formatBitRate(bps: number): string {
+  if (bps >= 1000000) return (bps / 1000000).toFixed(2) + ' Mbps'
+  return (bps / 1000).toFixed(0) + ' Kbps'
+}
+
+async function loadBreadDir(path: string) {
+  try {
+    const { data } = await listFiles(path)
+    browseItems.value = data.data || []
+    browsePath.value = path
+  } catch (e: any) {
+    ElMessage.error(e.response?.data?.message || '读取目录失败')
+  }
+}
+
+function browseGoUp() {
+  const parts = browsePath.value.split('/').filter(Boolean)
+  parts.pop()
+  loadBreadDir('/' + parts.join('/'))
+}
+
+function browseEnterDir(path: string) {
+  loadBreadDir(path)
+}
+
+function browseSelectFile(item: FileEntry) {
+  createForm.configPath = item.path
+  ElMessage.success('已选择: ' + item.name)
+}
+
+function onUploadFileChange(file: UploadFile) {
+  if (file.raw) {
+    uploadFileName.value = file.name
+    uploadFileObj.value = file.raw
+  }
+}
+
+function onUploadExceed() {
+  ElMessage.warning('只能选择一个文件')
 }
 
 async function handleCreate() {
@@ -125,10 +397,32 @@ async function handleCreate() {
   }
 
   let config = ''
+
   if (createForm.type === 'file') {
-    if (!createForm.configPath) {
-      ElMessage.warning('请输入文件路径')
-      return
+    if (fileSource.value === 'upload') {
+      if (!uploadFileObj.value) {
+        ElMessage.warning('请选择要上传的文件')
+        return
+      }
+      creating.value = true
+      try {
+        const { data } = await uploadFile(uploadFileObj.value)
+        createForm.configPath = data.data.path
+      } catch (e: any) {
+        ElMessage.error(e.response?.data?.message || '上传失败')
+        creating.value = false
+        return
+      }
+    } else if (fileSource.value === 'browse') {
+      if (!createForm.configPath) {
+        ElMessage.warning('请从文件浏览器中选择一个文件')
+        return
+      }
+    } else {
+      if (!createForm.configPath) {
+        ElMessage.warning('请输入文件路径')
+        return
+      }
     }
     config = JSON.stringify({ path: createForm.configPath, loop: createForm.configLoop })
   } else if (createForm.type === 'rtsp') {
@@ -140,11 +434,56 @@ async function handleCreate() {
   }
 
   try {
-    await inputStore.createInput(createForm.name, createForm.type, config)
-    ElMessage.success('创建成功')
+    if (isEditing.value) {
+      await inputStore.updateInput(editingId.value, createForm.name, createForm.type, config)
+      ElMessage.success('修改成功')
+    } else {
+      await inputStore.createInput(createForm.name, createForm.type, config)
+      ElMessage.success('创建成功')
+    }
     createDialogVisible.value = false
   } catch (error: any) {
     ElMessage.error(error.response?.data?.message || '创建失败')
+  } finally {
+    creating.value = false
+  }
+}
+
+async function showDetails(row: any) {
+  currentInputId.value = row.id
+  detailsVisible.value = true
+  currentMediaInfo.value = null
+
+  if (row.media_info) {
+    try {
+      currentMediaInfo.value = JSON.parse(row.media_info)
+    } catch {
+      await fetchProbe()
+    }
+  } else {
+    await fetchProbe()
+  }
+}
+
+async function fetchProbe() {
+  detailsLoading.value = true
+  try {
+    const { data } = await probeInput(currentInputId.value)
+    currentMediaInfo.value = data.data
+  } catch (e: any) {
+    ElMessage.error(e.response?.data?.message || '探测失败')
+  } finally {
+    detailsLoading.value = false
+  }
+}
+
+async function handleReProbe() {
+  probing.value = true
+  try {
+    await fetchProbe()
+    ElMessage.success('探测完成')
+  } finally {
+    probing.value = false
   }
 }
 
@@ -194,5 +533,81 @@ async function handleDelete(id: string) {
 
 .page-header h2 {
   color: #303133;
+}
+
+.file-browser {
+  border: 1px solid #dcdfe6;
+  border-radius: 4px;
+  max-height: 300px;
+  overflow-y: auto;
+  width: 100%;
+}
+
+.file-item {
+  display: flex;
+  align-items: center;
+  padding: 8px 12px;
+  cursor: pointer;
+  border-bottom: 1px solid #f5f5f5;
+}
+
+.file-item:last-child {
+  border-bottom: none;
+}
+
+.file-item:hover {
+  background: #f5f7fa;
+}
+
+.file-item.dir {
+  font-weight: 600;
+}
+
+.file-icon {
+  margin-right: 8px;
+  flex-shrink: 0;
+}
+
+.file-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-size {
+  color: #909399;
+  font-size: 12px;
+  margin-left: 8px;
+  flex-shrink: 0;
+}
+
+.empty {
+  text-align: center;
+  color: #909399;
+  padding: 20px;
+}
+
+.media-details {
+  min-height: 100px;
+}
+
+.detail-section {
+  margin-bottom: 20px;
+}
+
+.detail-section h4 {
+  margin: 0 0 10px 0;
+  color: #303133;
+  font-size: 14px;
+}
+
+.thumbnail-section {
+  text-align: center;
+}
+
+.image-error {
+  color: #909399;
+  font-size: 14px;
 }
 </style>

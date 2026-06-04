@@ -102,3 +102,15 @@ func (s *Server) stopInput(c *gin.Context) {
 
 	response(c, http.StatusOK, gin.H{"message": "停止成功"})
 }
+
+func (s *Server) probeInput(c *gin.Context) {
+	id := c.Param("id")
+
+	info, err := s.inputSvc.ProbeInput(id)
+	if err != nil {
+		handleError(c, err)
+		return
+	}
+
+	response(c, http.StatusOK, info)
+}

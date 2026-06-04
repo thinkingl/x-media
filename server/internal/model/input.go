@@ -10,6 +10,7 @@ type Input struct {
 	Name      string    `json:"name" gorm:"type:varchar(100);not null"`
 	Type      string    `json:"type" gorm:"type:varchar(20);not null"`
 	Config    string    `json:"config" gorm:"type:text;not null"`
+	MediaInfo string    `json:"media_info,omitempty" gorm:"type:text"`
 	Status    string    `json:"status" gorm:"type:varchar(20);default:stopped"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`

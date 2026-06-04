@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log"
@@ -44,7 +45,7 @@ func main() {
 
 	// 初始化媒体引擎
 	engine := media.NewMediaEngine()
-	if err := engine.Start(nil); err != nil {
+	if err := engine.Start(context.Background()); err != nil {
 		logger.Fatalf("启动媒体引擎失败: %v", err)
 	}
 
@@ -59,14 +60,15 @@ func main() {
 	pipeSvc := service.NewPipeService(pipeRepo, inputRepo, outputRepo, engine)
 	statsSvc := service.NewStatsService(inputRepo, outputRepo, pipeRepo)
 	logSvc := service.NewLogService(&cfg.Log)
+	fileSvc := service.NewFileService("./uploads")
 
-	// 初始化API服务器
 	statsHandler := api.NewStatsHandler(statsSvc)
 	logHandler := api.NewLogHandler(logSvc)
+	fileHandler := api.NewFileHandler(fileSvc)
 	server := api.NewServer(&api.ServerConfig{
 		HTTPAddr:   cfg.Server.HTTPAddr,
 		StaticPath: *staticPath,
-	}, inputSvc, outputSvc, pipeSvc, statsHandler, logHandler)
+	}, inputSvc, outputSvc, pipeSvc, statsHandler, logHandler, fileHandler)
 
 	// 启动服务器
 	go func() {

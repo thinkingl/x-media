@@ -2,7 +2,6 @@ package media
 
 import (
 	"context"
-	"os"
 	"sync"
 	"time"
 
@@ -10,41 +9,42 @@ import (
 	"github.com/x-media/x-media-server/pkg/utils"
 )
 
-// FileInput 文件输入流
 type FileInput struct {
 	mu      sync.RWMutex
 	id      string
 	config  *InputConfig
-	file    *os.File
 	status  StreamStatus
 	handler PacketHandler
 	cancel  context.CancelFunc
+	demuxer *StreamDemuxer
+	streams []StreamInfo
 }
 
-// NewFileInput 创建文件输入流
 func NewFileInput(config *InputConfig) (*FileInput, error) {
 	if config.Path == "" {
 		return nil, ErrInvalidConfig
 	}
-
 	id := config.ID
 	if id == "" {
 		id = utils.GenerateID()
 	}
-
 	return &FileInput{
-		id:     id,
-		config: config,
-		status: StreamStatusStopped,
+		id:      id,
+		config:  config,
+		status:  StreamStatusStopped,
+		demuxer: NewStreamDemuxer(config.Path),
 	}, nil
 }
 
-// ID 获取流ID
-func (f *FileInput) ID() string {
-	return f.id
+func (f *FileInput) ID() string           { return f.id }
+func (f *FileInput) Status() StreamStatus { f.mu.RLock(); defer f.mu.RUnlock(); return f.status }
+
+func (f *FileInput) GetStreams() []StreamInfo {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	return f.streams
 }
 
-// Start 启动流
 func (f *FileInput) Start(ctx context.Context) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -53,26 +53,57 @@ func (f *FileInput) Start(ctx context.Context) error {
 		return nil
 	}
 
-	// 打开文件
-	file, err := os.Open(f.config.Path)
+	streams, err := f.demuxer.Probe()
 	if err != nil {
-		logger.Errorf("打开文件失败 %s: %v", f.config.Path, err)
+		logger.Errorf("failed to probe file %s: %v", f.config.Path, err)
 		f.status = StreamStatusError
 		return err
 	}
 
-	f.file = file
+	f.streams = streams
 	f.status = StreamStatusRunning
 
-	// 启动读取协程
 	ctx, f.cancel = context.WithCancel(ctx)
-	go f.readLoop(ctx)
 
-	logger.Infof("文件输入流已启动: %s, 文件: %s", f.id, f.config.Path)
+	for _, stream := range streams {
+		f.demuxer.OnPacket(stream.ChannelID, func(pkt *MediaPacket) {
+			f.mu.RLock()
+			handler := f.handler
+			f.mu.RUnlock()
+			if handler != nil {
+				handler(pkt)
+			}
+		})
+	}
+
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+
+			if err := f.demuxer.Start(ctx); err != nil {
+				logger.Errorf("demuxer start failed: %v", err)
+				return
+			}
+
+			<-ctx.Done()
+
+			if f.config.Loop {
+				logger.Infof("file input loop: %s", f.id)
+				time.Sleep(100 * time.Millisecond)
+				continue
+			}
+			break
+		}
+	}()
+
+	logger.Infof("file input started: %s, file: %s, streams: %d", f.id, f.config.Path, len(streams))
 	return nil
 }
 
-// Stop 停止流
 func (f *FileInput) Stop() error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -85,86 +116,18 @@ func (f *FileInput) Stop() error {
 		f.cancel()
 	}
 
-	if f.file != nil {
-		f.file.Close()
-		f.file = nil
-	}
-
+	f.demuxer.Stop()
 	f.status = StreamStatusStopped
-	logger.Infof("文件输入流已停止: %s", f.id)
+	logger.Infof("file input stopped: %s", f.id)
 	return nil
 }
 
-// Status 获取状态
-func (f *FileInput) Status() StreamStatus {
-	f.mu.RLock()
-	defer f.mu.RUnlock()
-	return f.status
-}
-
-// ReadPacket 读取数据包
 func (f *FileInput) ReadPacket() (*MediaPacket, error) {
-	f.mu.RLock()
-	defer f.mu.RUnlock()
-
-	if f.status != StreamStatusRunning {
-		return nil, ErrStreamNotRunning
-	}
-
-	// 读取文件数据
-	buf := make([]byte, 4096)
-	n, err := f.file.Read(buf)
-	if err != nil {
-		return nil, err
-	}
-
-	return &MediaPacket{
-		StreamID:  f.id,
-		Timestamp: time.Now().UnixMilli(),
-		IsVideo:   true,
-		Data:      buf[:n],
-	}, nil
+	return nil, ErrStreamNotRunning
 }
 
-// OnPacket 设置数据包回调
 func (f *FileInput) OnPacket(handler PacketHandler) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.handler = handler
-}
-
-// readLoop 读取循环
-func (f *FileInput) readLoop(ctx context.Context) {
-	ticker := time.NewTicker(33 * time.Millisecond) // ~30fps
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			pkt, err := f.ReadPacket()
-			if err != nil {
-				if f.config.Loop {
-					// 循环播放，重置文件位置
-					f.mu.Lock()
-					if f.file != nil {
-						f.file.Seek(0, 0)
-					}
-					f.mu.Unlock()
-					continue
-				}
-				logger.Errorf("读取数据包失败: %v", err)
-				return
-			}
-
-			f.mu.RLock()
-			handler := f.handler
-			f.mu.RUnlock()
-
-			if handler != nil {
-				handler(pkt)
-			}
-		}
-	}
 }

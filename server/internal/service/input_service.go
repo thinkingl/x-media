@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 
 	"github.com/x-media/x-media-server/internal/media"
 	"github.com/x-media/x-media-server/internal/model"
@@ -58,6 +60,13 @@ func (s *InputService) Create(req *CreateInputRequest) (*model.Input, error) {
 
 	if err := s.repo.Create(input); err != nil {
 		return nil, errors.NewInternalError(err)
+	}
+
+	if req.Type == model.InputTypeFile {
+		var config model.InputConfig
+		if err := json.Unmarshal([]byte(req.Config), &config); err == nil && config.Path != "" {
+			go s.probeAndSave(input.ID, config.Path)
+		}
 	}
 
 	return input, nil
@@ -217,4 +226,77 @@ func validateInputConfig(inputType string, configStr string) error {
 	}
 
 	return nil
+}
+
+func (s *InputService) probeAndSave(inputID, filePath string) {
+	probeResult, err := media.ProbeFile(filePath)
+	if err != nil {
+		logger.Warnf("probe file failed for input %s: %v", inputID, err)
+		return
+	}
+
+	thumbDir := "./uploads/thumbnails"
+	_ = os.MkdirAll(thumbDir, 0755)
+	thumbPath := filepath.Join(thumbDir, inputID+".jpg")
+
+	seekTime := 1.0
+	if probeResult.Duration > 2 {
+		seekTime = probeResult.Duration / 10
+	}
+	if err := media.ExtractThumbnail(filePath, thumbPath, seekTime); err != nil {
+		logger.Warnf("extract thumbnail failed for input %s: %v", inputID, err)
+		thumbPath = ""
+	} else {
+		probeResult.ThumbnailPath = thumbPath
+	}
+
+	infoJSON, err := json.Marshal(probeResult)
+	if err != nil {
+		logger.Warnf("marshal media info failed for input %s: %v", inputID, err)
+		return
+	}
+
+	_ = s.repo.UpdateMediaInfo(inputID, string(infoJSON))
+	logger.Infof("media info saved for input %s", inputID)
+}
+
+func (s *InputService) ProbeInput(id string) (*media.MediaInfo, error) {
+	input, err := s.repo.GetByID(id)
+	if err != nil {
+		return nil, errors.NewNotFoundError("输入端", id)
+	}
+
+	if input.Type != model.InputTypeFile {
+		return nil, errors.NewValidationError("只有文件类型输入端支持媒体探测")
+	}
+
+	var config model.InputConfig
+	if err := json.Unmarshal([]byte(input.Config), &config); err != nil {
+		return nil, errors.NewValidationError("配置格式错误")
+	}
+
+	probeResult, err := media.ProbeFile(config.Path)
+	if err != nil {
+		return nil, errors.NewInternalError(err)
+	}
+
+	thumbDir := "./uploads/thumbnails"
+	_ = os.MkdirAll(thumbDir, 0755)
+	thumbPath := filepath.Join(thumbDir, id+".jpg")
+
+	seekTime := 1.0
+	if probeResult.Duration > 2 {
+		seekTime = probeResult.Duration / 10
+	}
+	if err := media.ExtractThumbnail(config.Path, thumbPath, seekTime); err != nil {
+		logger.Warnf("extract thumbnail failed: %v", err)
+		thumbPath = ""
+	} else {
+		probeResult.ThumbnailPath = thumbPath
+	}
+
+	infoJSON, _ := json.Marshal(probeResult)
+	_ = s.repo.UpdateMediaInfo(id, string(infoJSON))
+
+	return probeResult, nil
 }

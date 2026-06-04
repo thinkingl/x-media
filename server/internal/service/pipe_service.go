@@ -32,13 +32,42 @@ func NewPipeService(
 	}
 }
 
-// CreatePipeRequest 创建管道请求
 type CreatePipeRequest struct {
-	InputID  string `json:"input_id" binding:"required"`
-	OutputID string `json:"output_id" binding:"required"`
+	InputID    string `json:"input_id" binding:"required"`
+	OutputID   string `json:"output_id" binding:"required"`
+	ChannelMap string `json:"channel_map"`
+	MuxSync    bool   `json:"mux_sync"`
 }
 
-// Create 创建管道
+func (s *PipeService) Update(id string, req *CreatePipeRequest) (*model.Pipe, error) {
+	pipe, err := s.pipeRepo.GetByID(id)
+	if err != nil {
+		return nil, errors.NewNotFoundError("管道", id)
+	}
+
+	if pipe.Status == model.PipeStatusRunning {
+		return nil, errors.NewValidationError("运行中的管道不能修改")
+	}
+
+	if _, err := s.inputRepo.GetByID(req.InputID); err != nil {
+		return nil, errors.NewNotFoundError("输入端", req.InputID)
+	}
+	if _, err := s.outputRepo.GetByID(req.OutputID); err != nil {
+		return nil, errors.NewNotFoundError("输出端", req.OutputID)
+	}
+
+	pipe.InputID = req.InputID
+	pipe.OutputID = req.OutputID
+	pipe.ChannelMap = req.ChannelMap
+	pipe.MuxSync = req.MuxSync
+
+	if err := s.pipeRepo.Update(pipe); err != nil {
+		return nil, errors.NewInternalError(err)
+	}
+
+	return pipe, nil
+}
+
 func (s *PipeService) Create(req *CreatePipeRequest) (*model.Pipe, error) {
 	// 验证输入端存在
 	_, err := s.inputRepo.GetByID(req.InputID)
@@ -64,10 +93,12 @@ func (s *PipeService) Create(req *CreatePipeRequest) (*model.Pipe, error) {
 	}
 
 	pipe := &model.Pipe{
-		ID:       utils.GenerateID(),
-		InputID:  req.InputID,
-		OutputID: req.OutputID,
-		Status:   model.PipeStatusStopped,
+		ID:         utils.GenerateID(),
+		InputID:    req.InputID,
+		OutputID:   req.OutputID,
+		ChannelMap: req.ChannelMap,
+		MuxSync:    req.MuxSync,
+		Status:     model.PipeStatusStopped,
 	}
 
 	if err := s.pipeRepo.Create(pipe); err != nil {

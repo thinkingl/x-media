@@ -19,9 +19,16 @@ export const usePipeStore = defineStore('pipe', () => {
     }
   }
 
-  async function createPipe(inputId: string, outputId: string) {
-    const { data } = await api.createPipe({ input_id: inputId, output_id: outputId })
+  async function createPipe(inputId: string, outputId: string, channelMap?: string, muxSync?: boolean) {
+    const { data } = await api.createPipe({ input_id: inputId, output_id: outputId, channel_map: channelMap, mux_sync: muxSync })
     pipes.value.push(data.data)
+    return data.data
+  }
+
+  async function updatePipe(id: string, inputId: string, outputId: string, channelMap?: string, muxSync?: boolean) {
+    const { data } = await api.updatePipe(id, { input_id: inputId, output_id: outputId, channel_map: channelMap, mux_sync: muxSync })
+    const idx = pipes.value.findIndex((p) => p.id === id)
+    if (idx !== -1) pipes.value[idx] = data.data
     return data.data
   }
 
@@ -42,5 +49,5 @@ export const usePipeStore = defineStore('pipe', () => {
     if (pipe) pipe.status = 'stopped'
   }
 
-  return { pipes, loading, fetchPipes, createPipe, deletePipe, startPipe, stopPipe }
+  return { pipes, loading, fetchPipes, createPipe, updatePipe, deletePipe, startPipe, stopPipe }
 })

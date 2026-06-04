@@ -21,22 +21,16 @@ func TestMain(m *testing.M) {
 
 func TestDefaultMediaEngine_CreateInput(t *testing.T) {
 	t.Run("成功创建文件输入", func(t *testing.T) {
-		// Arrange
 		engine := NewMediaEngine()
-		ctx := context.Background()
-		engine.Start(ctx)
+		engine.Start(context.Background())
 
 		config := &InputConfig{
 			ID:   "input_001",
 			Type: "file",
-			Path: "/data/test.mp4",
-			Loop: true,
+			Path: "../../test/fixtures/h265_test.mp4",
 		}
 
-		// Act
 		input, err := engine.CreateInput(config)
-
-		// Assert
 		assert.NoError(t, err)
 		assert.NotNil(t, input)
 		assert.Equal(t, "input_001", input.ID())

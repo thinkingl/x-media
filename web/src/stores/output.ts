@@ -25,6 +25,13 @@ export const useOutputStore = defineStore('output', () => {
     return data.data
   }
 
+  async function updateOutput(id: string, name: string, type: string, config: string) {
+    const { data } = await api.updateOutput(id, { name, type, config })
+    const idx = outputs.value.findIndex((o) => o.id === id)
+    if (idx !== -1) outputs.value[idx] = data.data
+    return data.data
+  }
+
   async function deleteOutput(id: string) {
     await api.deleteOutput(id)
     outputs.value = outputs.value.filter((o) => o.id !== id)
@@ -42,5 +49,5 @@ export const useOutputStore = defineStore('output', () => {
     if (output) output.status = 'stopped'
   }
 
-  return { outputs, loading, fetchOutputs, createOutput, deleteOutput, startOutput, stopOutput }
+  return { outputs, loading, fetchOutputs, createOutput, updateOutput, deleteOutput, startOutput, stopOutput }
 })

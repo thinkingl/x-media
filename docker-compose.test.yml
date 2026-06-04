@@ -1,0 +1,25 @@
+version: "3.8"
+
+services:
+  x-media-test:
+    build:
+      context: .
+      dockerfile: test/Dockerfile
+    container_name: x-media-test
+    ports:
+      - "18090:18090"
+      - "1935:1935"
+      - "18001:18001"
+      - "18002:18002"
+      - "18003:18003"
+      - "18004:18004"
+      - "18005:18005"
+      - "18006:18006"
+      - "18007:18007"
+      - "18008:18008"
+      - "18009:18009"
+      - "18010:18010"
+      - "18011:18011"
+    volumes:
+      - ./test_data:/app/test_data
+    restart: "no"

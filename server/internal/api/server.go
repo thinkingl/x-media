@@ -23,6 +23,7 @@ type Server struct {
 	pipeSvc      *service.PipeService
 	statsHandler *StatsHandler
 	logHandler   *LogHandler
+	fileHandler  *FileHandler
 }
 
 // NewServer 创建API服务器
@@ -33,6 +34,7 @@ func NewServer(
 	pipeSvc *service.PipeService,
 	statsHandler *StatsHandler,
 	logHandler *LogHandler,
+	fileHandler *FileHandler,
 ) *Server {
 	gin.SetMode(gin.ReleaseMode)
 	engine := gin.New()
@@ -50,6 +52,7 @@ func NewServer(
 		pipeSvc:      pipeSvc,
 		statsHandler: statsHandler,
 		logHandler:   logHandler,
+		fileHandler:  fileHandler,
 	}
 
 	// 注册路由
@@ -90,6 +93,7 @@ func (s *Server) registerRoutes() {
 			inputs.DELETE("/:id", s.deleteInput)
 			inputs.POST("/:id/start", s.startInput)
 			inputs.POST("/:id/stop", s.stopInput)
+			inputs.POST("/:id/probe", s.probeInput)
 		}
 
 		// 输出端
@@ -110,6 +114,7 @@ func (s *Server) registerRoutes() {
 			pipes.POST("", s.createPipe)
 			pipes.GET("", s.getPipes)
 			pipes.GET("/:id", s.getPipe)
+			pipes.PUT("/:id", s.updatePipe)
 			pipes.DELETE("/:id", s.deletePipe)
 			pipes.POST("/:id/start", s.startPipe)
 			pipes.POST("/:id/stop", s.stopPipe)
@@ -125,6 +130,12 @@ func (s *Server) registerRoutes() {
 			logs.GET("/config", s.logHandler.getLogConfig)
 			logs.PUT("/config", s.logHandler.updateLogConfig)
 		}
+
+		files := api.Group("/files")
+		{
+			files.GET("/list", s.fileHandler.listDir)
+			files.POST("/upload", s.fileHandler.upload)
+		}
 	}
 
 	// 前端静态文件
@@ -135,6 +146,8 @@ func (s *Server) registerRoutes() {
 			c.File(s.config.StaticPath + "/index.html")
 		})
 	}
+
+	s.engine.Static("/uploads", "./uploads")
 }
 
 // corsMiddleware CORS中间件

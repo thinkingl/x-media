@@ -13,6 +13,7 @@ type InputRepository interface {
 	Update(input *model.Input) error
 	Delete(id string) error
 	UpdateStatus(id string, status string) error
+	UpdateMediaInfo(id string, mediaInfo string) error
 }
 
 // InputRepo 输入端仓储实现
@@ -61,4 +62,8 @@ func (r *InputRepo) Delete(id string) error {
 // UpdateStatus 更新状态
 func (r *InputRepo) UpdateStatus(id string, status string) error {
 	return r.db.Model(&model.Input{}).Where("id = ?", id).Update("status", status).Error
+}
+
+func (r *InputRepo) UpdateMediaInfo(id string, mediaInfo string) error {
+	return r.db.Model(&model.Input{}).Where("id = ?", id).Update("media_info", mediaInfo).Error
 }

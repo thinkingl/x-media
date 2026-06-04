@@ -48,7 +48,24 @@ func (s *Server) getPipe(c *gin.Context) {
 	response(c, http.StatusOK, pipe)
 }
 
-// deletePipe 删除管道
+func (s *Server) updatePipe(c *gin.Context) {
+	id := c.Param("id")
+
+	var req service.CreatePipeRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		errorResponse(c, http.StatusBadRequest, "请求参数错误: "+err.Error())
+		return
+	}
+
+	pipe, err := s.pipeSvc.Update(id, &req)
+	if err != nil {
+		handleError(c, err)
+		return
+	}
+
+	response(c, http.StatusOK, pipe)
+}
+
 func (s *Server) deletePipe(c *gin.Context) {
 	id := c.Param("id")
 

@@ -26,31 +26,20 @@ type MediaEngine interface {
 
 // InputStream 输入流接口
 type InputStream interface {
-	// ID 获取流ID
 	ID() string
-	// Start 启动流
 	Start(ctx context.Context) error
-	// Stop 停止流
 	Stop() error
-	// Status 获取状态
 	Status() StreamStatus
-	// ReadPacket 读取数据包
 	ReadPacket() (*MediaPacket, error)
-	// OnPacket 设置数据包回调
 	OnPacket(handler PacketHandler)
 }
 
 // OutputStream 输出流接口
 type OutputStream interface {
-	// ID 获取流ID
 	ID() string
-	// Start 启动流
 	Start(ctx context.Context) error
-	// Stop 停止流
 	Stop() error
-	// Status 获取状态
 	Status() StreamStatus
-	// WritePacket 写入数据包
 	WritePacket(pkt *MediaPacket) error
 }
 
@@ -87,13 +76,19 @@ type OutputConfig struct {
 
 // MediaPacket 媒体数据包
 type MediaPacket struct {
-	StreamID  string
-	Timestamp int64
-	IsVideo   bool
-	IsAudio   bool
-	Data      []byte
-	PTS       int64
-	DTS       int64
+	StreamID   string
+	ChannelID  uint8
+	Kind       string
+	CodecID    CodecID
+	Timestamp  int64
+	IsVideo    bool
+	IsAudio    bool
+	IsKeyFrame bool
+	Data       []byte
+	PTS        int64
+	DTS        int64
+	CodecType  string
+	CodecConfig []byte
 }
 
 // PacketHandler 数据包处理函数

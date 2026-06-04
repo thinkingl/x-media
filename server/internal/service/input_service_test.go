@@ -48,6 +48,11 @@ func (m *MockInputRepo) UpdateStatus(id string, status string) error {
 	return args.Error(0)
 }
 
+func (m *MockInputRepo) UpdateMediaInfo(id string, mediaInfo string) error {
+	args := m.Called(id, mediaInfo)
+	return args.Error(0)
+}
+
 // MockInputStream 模拟输入流
 type MockInputStream struct {
 	mock.Mock
