@@ -74,7 +74,9 @@ func (d *StreamDemuxer) Start(ctx context.Context) error {
 
 	ctx, d.cancel = context.WithCancel(ctx)
 
-	go d.demuxAll(ctx)
+	for _, stream := range d.streams {
+		go d.demuxStream(ctx, stream)
+	}
 
 	return nil
 }
@@ -88,43 +90,66 @@ func (d *StreamDemuxer) Stop() {
 	}
 }
 
-func (d *StreamDemuxer) demuxAll(ctx context.Context) {
-	var videoCodec CodecID
-	for _, s := range d.streams {
-		if s.Kind == "video" {
-			videoCodec = s.CodecID
-			break
-		}
-	}
-	if videoCodec == 0 {
-		videoCodec = CodecH264
+func (d *StreamDemuxer) demuxStream(ctx context.Context, stream StreamInfo) {
+	codec := stream.CodecID
+	ffmpegFormat := codec.FFmpegFormat()
+	if ffmpegFormat == "" {
+		ffmpegFormat = "flv"
 	}
 
-	args := []string{
-		"-re",
-		"-i", d.source,
-		"-c", "copy",
-		"-f", "flv",
-		"pipe:1",
+	var args []string
+	if stream.Kind == "video" && codec.BSF() != "" {
+		args = []string{
+			"-re",
+			"-i", d.source,
+			"-map", fmt.Sprintf("0:%d", stream.ChannelID),
+			"-c:v", "copy",
+			"-bsf:v", codec.BSF(),
+			"-an",
+			"-f", ffmpegFormat,
+			"pipe:1",
+		}
+	} else if stream.Kind == "audio" {
+		args = []string{
+			"-re",
+			"-i", d.source,
+			"-map", fmt.Sprintf("0:%d", stream.ChannelID),
+			"-c:a", "copy",
+			"-vn",
+			"-f", "adts",
+			"pipe:1",
+		}
+	} else {
+		args = []string{
+			"-re",
+			"-i", d.source,
+			"-map", fmt.Sprintf("0:%d", stream.ChannelID),
+			"-c", "copy",
+			"-f", ffmpegFormat,
+			"pipe:1",
+		}
 	}
 
 	cmd := exec.CommandContext(ctx, "ffmpeg", args...)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		logger.Errorf("failed to create stdout pipe: %v", err)
+		logger.Errorf("failed to create stdout pipe for channel %d: %v", stream.ChannelID, err)
 		return
 	}
 
 	cmd.Stderr = nil
 
 	if err := cmd.Start(); err != nil {
-		logger.Errorf("failed to start ffmpeg demuxer: %v", err)
+		logger.Errorf("failed to start ffmpeg for channel %d: %v", stream.ChannelID, err)
 		return
 	}
 
-	logger.Infof("demux started for %s (%d streams)", d.source, len(d.streams))
+	logger.Infof("demux started for channel %d (codec=%s, kind=%s)",
+		stream.ChannelID, codec, stream.Kind)
 
 	buf := make([]byte, 4096)
+	var lastPTS int64
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -138,21 +163,36 @@ func (d *StreamDemuxer) demuxAll(ctx context.Context) {
 			data := make([]byte, n)
 			copy(data, buf[:n])
 
+			isVideo := stream.Kind == "video"
+			isAudio := stream.Kind == "audio"
+
 			pkt := &MediaPacket{
-				StreamID:  "demux",
-				Kind:      "video",
-				CodecID:   videoCodec,
-				CodecType: videoCodec.String(),
-				IsVideo:   true,
+				StreamID:  fmt.Sprintf("ch%d", stream.ChannelID),
+				ChannelID: stream.ChannelID,
+				Kind:      stream.Kind,
+				CodecID:   codec,
+				CodecType: codec.String(),
+				IsVideo:   isVideo,
+				IsAudio:   isAudio,
 				Data:      data,
+				PTS:       lastPTS,
+				DTS:       lastPTS,
 				Timestamp: time.Now().UnixMilli(),
 			}
 
+			if isVideo {
+				lastPTS += 33
+			} else if isAudio {
+				lastPTS += 23
+			}
+
 			d.mu.RLock()
-			for _, handler := range d.handlers {
+			handler, ok := d.handlers[stream.ChannelID]
+			d.mu.RUnlock()
+
+			if ok && handler != nil {
 				handler(pkt)
 			}
-			d.mu.RUnlock()
 		}
 		if err != nil {
 			break
@@ -160,7 +200,7 @@ func (d *StreamDemuxer) demuxAll(ctx context.Context) {
 	}
 
 	cmd.Wait()
-	logger.Infof("demux stopped for %s", d.source)
+	logger.Infof("demux stopped for channel %d", stream.ChannelID)
 }
 
 func ProbeFileStreams(filePath string) ([]StreamInfo, error) {

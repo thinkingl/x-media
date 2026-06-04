@@ -18,6 +18,7 @@ type FileInput struct {
 	cancel  context.CancelFunc
 	demuxer *StreamDemuxer
 	streams []StreamInfo
+	bufCh   chan *MediaPacket
 }
 
 func NewFileInput(config *InputConfig) (*FileInput, error) {
@@ -33,6 +34,7 @@ func NewFileInput(config *InputConfig) (*FileInput, error) {
 		config:  config,
 		status:  StreamStatusStopped,
 		demuxer: NewStreamDemuxer(config.Path),
+		bufCh:   make(chan *MediaPacket, 256),
 	}, nil
 }
 
@@ -69,9 +71,14 @@ func (f *FileInput) Start(ctx context.Context) error {
 		f.demuxer.OnPacket(stream.ChannelID, func(pkt *MediaPacket) {
 			f.mu.RLock()
 			handler := f.handler
+			bufCh := f.bufCh
 			f.mu.RUnlock()
 			if handler != nil {
 				handler(pkt)
+			}
+			select {
+			case bufCh <- pkt:
+			default:
 			}
 		})
 	}
@@ -123,7 +130,20 @@ func (f *FileInput) Stop() error {
 }
 
 func (f *FileInput) ReadPacket() (*MediaPacket, error) {
-	return nil, ErrStreamNotRunning
+	f.mu.RLock()
+	status := f.status
+	bufCh := f.bufCh
+	f.mu.RUnlock()
+
+	if status != StreamStatusRunning {
+		return nil, ErrStreamNotRunning
+	}
+
+	pkt, ok := <-bufCh
+	if !ok {
+		return nil, ErrStreamNotRunning
+	}
+	return pkt, nil
 }
 
 func (f *FileInput) OnPacket(handler PacketHandler) {
