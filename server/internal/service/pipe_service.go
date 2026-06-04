@@ -1,6 +1,8 @@
 package service
 
 import (
+	"encoding/json"
+
 	"github.com/x-media/x-media-server/internal/media"
 	"github.com/x-media/x-media-server/internal/model"
 	"github.com/x-media/x-media-server/internal/repository"
@@ -141,7 +143,6 @@ func (s *PipeService) Delete(id string) error {
 	return s.pipeRepo.Delete(id)
 }
 
-// Start 启动管道
 func (s *PipeService) Start(id string) error {
 	pipe, err := s.pipeRepo.GetByID(id)
 	if err != nil {
@@ -152,12 +153,60 @@ func (s *PipeService) Start(id string) error {
 		return errors.NewValidationError("管道已在运行中")
 	}
 
-	// 连接输入输出流
+	input, err := s.inputRepo.GetByID(pipe.InputID)
+	if err != nil {
+		return errors.NewNotFoundError("输入端", pipe.InputID)
+	}
+
+	output, err := s.outputRepo.GetByID(pipe.OutputID)
+	if err != nil {
+		return errors.NewNotFoundError("输出端", pipe.OutputID)
+	}
+
+	var inputConfig model.InputConfig
+	if err := json.Unmarshal([]byte(input.Config), &inputConfig); err != nil {
+		return errors.NewValidationError("输入端配置格式错误")
+	}
+
+	inputMediaConfig := &media.InputConfig{
+		ID:        input.ID,
+		Type:      input.Type,
+		Path:      inputConfig.Path,
+		URL:       inputConfig.URL,
+		Loop:      inputConfig.Loop != nil && *inputConfig.Loop,
+		Transport: inputConfig.Transport,
+	}
+
+	if _, err := s.engine.CreateInput(inputMediaConfig); err != nil {
+		if err != media.ErrUnsupportedType {
+			logger.Warnf("创建输入流失败(可能已存在): %v", err)
+		}
+	}
+
+	var outputConfig model.OutputConfig
+	if err := json.Unmarshal([]byte(output.Config), &outputConfig); err != nil {
+		return errors.NewValidationError("输出端配置格式错误")
+	}
+
+	outputMediaConfig := &media.OutputConfig{
+		ID:        output.ID,
+		Type:      output.Type,
+		URL:       outputConfig.URL,
+		Addr:      outputConfig.Addr,
+		Mode:      outputConfig.Mode,
+		Transport: outputConfig.Transport,
+	}
+
+	if _, err := s.engine.CreateOutput(outputMediaConfig); err != nil {
+		if err != media.ErrUnsupportedType {
+			logger.Warnf("创建输出流失败(可能已存在): %v", err)
+		}
+	}
+
 	if err := s.engine.Connect(pipe.InputID, pipe.OutputID); err != nil {
 		return errors.NewInternalError(err)
 	}
 
-	// 更新状态
 	return s.pipeRepo.UpdateStatus(id, model.PipeStatusRunning)
 }
 

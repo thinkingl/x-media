@@ -168,18 +168,12 @@ func (m *SimpleMuxer) Start(ctx context.Context, codec CodecID) error {
 		return nil
 	}
 
-	ffmpegFormat := codec.FFmpegFormat()
-	if ffmpegFormat == "" {
-		return fmt.Errorf("unsupported codec: %s", codec)
-	}
-
 	args := []string{
 		"-re",
-		"-analyzeduration", "10000000",
-		"-probesize", "10000000",
-		"-f", ffmpegFormat,
+		"-f", "flv",
 		"-i", "pipe:0",
 		"-c:v", "copy",
+		"-c:a", "copy",
 	}
 
 	if m.format == "rtmp" || m.format == "flv" {
@@ -276,18 +270,12 @@ func (m *HTTPFLVMuxer) Start(ctx context.Context, codec CodecID) error {
 		return nil
 	}
 
-	ffmpegFormat := codec.FFmpegFormat()
-	if ffmpegFormat == "" {
-		return fmt.Errorf("unsupported codec: %s", codec)
-	}
-
 	args := []string{
 		"-re",
-		"-analyzeduration", "10000000",
-		"-probesize", "10000000",
-		"-f", ffmpegFormat,
+		"-f", "flv",
 		"-i", "pipe:0",
 		"-c:v", "copy",
+		"-c:a", "copy",
 		"-f", "flv",
 		"pipe:1",
 	}

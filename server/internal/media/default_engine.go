@@ -131,6 +131,13 @@ func (e *DefaultMediaEngine) Connect(inputID, outputID string) error {
 		return ErrOutputNotFound
 	}
 
+	existing := e.conns[inputID]
+	for _, oid := range existing {
+		if oid == outputID {
+			return nil
+		}
+	}
+
 	input.OnPacket(func(pkt *MediaPacket) {
 		e.mu.RLock()
 		outputIDs := make([]string, len(e.conns[inputID]))
@@ -144,14 +151,13 @@ func (e *DefaultMediaEngine) Connect(inputID, outputID string) error {
 		e.mu.RUnlock()
 		for _, out := range outs {
 			if err := out.WritePacket(pkt); err != nil {
-				logger.Errorf("写入数据包失败 %s: %v", out.ID(), err)
+				logger.Errorf("write packet failed %s: %v", out.ID(), err)
 			}
 		}
 	})
 
-	// 记录连接
 	e.conns[inputID] = append(e.conns[inputID], outputID)
-	logger.Infof("连接输入输出流: %s -> %s", inputID, outputID)
+	logger.Infof("connected input->output: %s -> %s", inputID, outputID)
 	return nil
 }
 
