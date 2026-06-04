@@ -265,3 +265,15 @@ func (e *DefaultMediaEngine) StartInput(id string) error {
 
 	return input.Start(e.ctx)
 }
+
+func (e *DefaultMediaEngine) StartOutput(id string) error {
+	e.mu.RLock()
+	output, ok := e.outputs[id]
+	e.mu.RUnlock()
+
+	if !ok {
+		return ErrOutputNotFound
+	}
+
+	return output.Start(e.ctx)
+}

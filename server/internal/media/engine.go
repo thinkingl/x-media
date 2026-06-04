@@ -15,6 +15,7 @@ type MediaEngine interface {
 	RemoveInput(id string) error
 	RemoveOutput(id string) error
 	StartInput(id string) error
+	StartOutput(id string) error
 }
 
 // InputStream 输入流接口
