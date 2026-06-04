@@ -93,24 +93,15 @@ func (d *StreamDemuxer) Stop() {
 
 func (d *StreamDemuxer) demuxStream(ctx context.Context, stream StreamInfo) {
 	codec := stream.CodecID
-	ffmpegFormat := codec.FFmpegFormat()
-	if ffmpegFormat == "" {
-		logger.Errorf("unsupported codec for demux: %s", codec)
-		return
-	}
 
 	args := []string{
 		"-re",
 		"-i", d.source,
 		"-map", fmt.Sprintf("0:%d", stream.ChannelID),
 		"-c", "copy",
+		"-f", "flv",
+		"pipe:1",
 	}
-
-	if bsf := codec.BSF(); bsf != "" {
-		args = append(args, "-bsf:v", bsf)
-	}
-
-	args = append(args, "-f", ffmpegFormat, "pipe:1")
 
 	cmd := exec.CommandContext(ctx, "ffmpeg", args...)
 	stdout, err := cmd.StdoutPipe()
@@ -131,7 +122,6 @@ func (d *StreamDemuxer) demuxStream(ctx context.Context, stream StreamInfo) {
 
 	reader := bufio.NewReaderSize(stdout, 64*1024)
 	buf := make([]byte, 4096)
-	var pts int64
 
 	for {
 		select {
@@ -146,34 +136,15 @@ func (d *StreamDemuxer) demuxStream(ctx context.Context, stream StreamInfo) {
 			data := make([]byte, n)
 			copy(data, buf[:n])
 
-			_, isKey := ParseNALType(data, codec)
-
-			var kind string
-			if codec.IsVideo() {
-				kind = "video"
-			} else {
-				kind = "audio"
-			}
-
 			pkt := &MediaPacket{
 				StreamID:   fmt.Sprintf("ch%d", stream.ChannelID),
 				ChannelID:  stream.ChannelID,
-				Kind:       kind,
+				Kind:       "video",
 				CodecType:  codec.String(),
 				CodecID:    codec,
-				IsVideo:    codec.IsVideo(),
-				IsAudio:    codec.IsAudio(),
-				IsKeyFrame: isKey,
+				IsVideo:    true,
 				Data:       data,
-				PTS:        pts,
-				DTS:        pts,
 				Timestamp:  time.Now().UnixMilli(),
-			}
-
-			if codec.IsVideo() {
-				pts += 33333
-			} else {
-				pts += 20000
 			}
 
 			d.mu.RLock()
