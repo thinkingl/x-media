@@ -107,13 +107,14 @@ func (r *RTSPOutput) initStream() error {
 	r.videoMedia = videoMedia
 	r.streamReady = true
 
+	streamPath := "live/" + r.id
 	r.rtspHandler.mutex.Lock()
-	r.rtspHandler.paths[r.id] = &rtspPath{
+	r.rtspHandler.paths[streamPath] = &rtspPath{
 		stream: stream,
 	}
 	r.rtspHandler.mutex.Unlock()
 
-	logger.Infof("RTSP stream initialized: %s, SPS: %d bytes, PPS: %d bytes", r.id, len(r.sps), len(r.pps))
+	logger.Infof("RTSP stream initialized: %s, path: %s, SPS: %d bytes, PPS: %d bytes", r.id, streamPath, len(r.sps), len(r.pps))
 	return nil
 }
 
