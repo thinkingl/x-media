@@ -9,12 +9,13 @@ import (
 
 // DefaultMediaEngine 默认媒体引擎实现
 type DefaultMediaEngine struct {
-	mu       sync.RWMutex
-	ctx      context.Context
-	cancel   context.CancelFunc
-	inputs   map[string]InputStream
-	outputs  map[string]OutputStream
-	conns    map[string][]string // inputID -> []outputID
+	mu         sync.RWMutex
+	ctx        context.Context
+	cancel     context.CancelFunc
+	inputs     map[string]InputStream
+	outputs    map[string]OutputStream
+	conns      map[string][]string // inputID -> []outputID
+	mmtxBinary string
 }
 
 // NewMediaEngine 创建媒体引擎
@@ -24,6 +25,11 @@ func NewMediaEngine() *DefaultMediaEngine {
 		outputs: make(map[string]OutputStream),
 		conns:   make(map[string][]string),
 	}
+}
+
+// SetMediamtxBinary 设置 mediamtx 二进制文件路径
+func (e *DefaultMediaEngine) SetMediamtxBinary(path string) {
+	e.mmtxBinary = path
 }
 
 // Start 启动引擎
@@ -101,7 +107,7 @@ func (e *DefaultMediaEngine) CreateOutput(config *OutputConfig) (OutputStream, e
 	case "rtmp":
 		output, err = NewRTMPOutput(config)
 	case "rtsp":
-		output, err = NewRTSPOutput(config)
+		output, err = NewRTSPOutput(config, e.mmtxBinary)
 	case "http-flv":
 		output, err = NewHTTPFLVOutput(config)
 	default:

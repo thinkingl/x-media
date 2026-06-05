@@ -2,6 +2,7 @@ package media
 
 import (
 	"context"
+	"fmt"
 	"sync"
 
 	"github.com/x-media/x-media-server/pkg/logger"
@@ -9,16 +10,18 @@ import (
 )
 
 type RTSPOutput struct {
-	mu     sync.RWMutex
-	id     string
-	config *OutputConfig
-	status StreamStatus
-	cancel context.CancelFunc
-	ctx    context.Context
-	muxer  *SimpleMuxer
+	mu         sync.RWMutex
+	id         string
+	config     *OutputConfig
+	status     StreamStatus
+	cancel     context.CancelFunc
+	ctx        context.Context
+	muxer      *SimpleMuxer
+	mmtxMgr    *MediamtxManager
+	mmtxBinary string
 }
 
-func NewRTSPOutput(config *OutputConfig) (*RTSPOutput, error) {
+func NewRTSPOutput(config *OutputConfig, mmtxBinary string) (*RTSPOutput, error) {
 	if config.Mode == "" {
 		return nil, ErrInvalidConfig
 	}
@@ -29,14 +32,15 @@ func NewRTSPOutput(config *OutputConfig) (*RTSPOutput, error) {
 
 	target := config.URL
 	if config.Mode == "server" {
-		target = "rtsp://0.0.0.0" + config.Addr + "/live"
+		target = fmt.Sprintf("rtsp://localhost%s/live", config.Addr)
 	}
 
 	return &RTSPOutput{
-		id:     id,
-		config: config,
-		status: StreamStatusStopped,
-		muxer:  NewSimpleMuxer(target, "rtsp"),
+		id:         id,
+		config:     config,
+		status:     StreamStatusStopped,
+		muxer:      NewSimpleMuxer(target, "rtsp"),
+		mmtxBinary: mmtxBinary,
 	}, nil
 }
 
@@ -63,7 +67,24 @@ func (r *RTSPOutput) StartWithFile(ctx context.Context, filePath string) error {
 	}
 	r.ctx, r.cancel = context.WithCancel(ctx)
 	r.status = StreamStatusRunning
+
+	if r.config.Mode == "server" {
+		if r.mmtxBinary == "" {
+			r.status = StreamStatusStopped
+			return fmt.Errorf("mediamtx binary not configured")
+		}
+		r.mmtxMgr = NewMediamtxManager(r.mmtxBinary)
+		if err := r.mmtxMgr.Start(r.ctx, r.config.Addr, "live"); err != nil {
+			r.status = StreamStatusStopped
+			return fmt.Errorf("failed to start mediamtx: %w", err)
+		}
+	}
+
 	if err := r.muxer.StartWithFile(r.ctx, filePath); err != nil {
+		if r.mmtxMgr != nil {
+			r.mmtxMgr.Stop()
+			r.mmtxMgr = nil
+		}
 		r.status = StreamStatusStopped
 		return err
 	}
@@ -80,6 +101,10 @@ func (r *RTSPOutput) Stop() error {
 		r.cancel()
 	}
 	r.muxer.Stop()
+	if r.mmtxMgr != nil {
+		r.mmtxMgr.Stop()
+		r.mmtxMgr = nil
+	}
 	r.status = StreamStatusStopped
 	logger.Infof("RTSP output stopped: %s", r.id)
 	return nil
@@ -108,4 +133,3 @@ func (r *RTSPOutput) WritePacket(pkt *MediaPacket) error {
 
 	return muxer.WritePacket(pkt)
 }
-

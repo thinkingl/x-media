@@ -45,6 +45,7 @@ func main() {
 
 	// 初始化媒体引擎
 	engine := media.NewMediaEngine()
+	engine.SetMediamtxBinary("./bin/mediamtx")
 	if err := engine.Start(context.Background()); err != nil {
 		logger.Fatalf("启动媒体引擎失败: %v", err)
 	}
