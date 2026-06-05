@@ -66,7 +66,7 @@ func (h *RTSPServerHandler) OnDescribe(ctx *gortsplib.ServerHandlerOnDescribeCtx
 	h.mutex.RLock()
 	defer h.mutex.RUnlock()
 
-	path := ctx.Path
+	path := trimLeadingSlash(ctx.Path)
 	p, ok := h.paths[path]
 	if !ok {
 		return &base.Response{StatusCode: base.StatusNotFound}, nil, nil
@@ -81,7 +81,7 @@ func (h *RTSPServerHandler) OnAnnounce(ctx *gortsplib.ServerHandlerOnAnnounceCtx
 	h.mutex.Lock()
 	defer h.mutex.Unlock()
 
-	path := ctx.Path
+	path := trimLeadingSlash(ctx.Path)
 	if p, ok := h.paths[path]; ok {
 		p.stream.Close()
 		if p.publisher != nil {
@@ -118,7 +118,7 @@ func (h *RTSPServerHandler) OnSetup(ctx *gortsplib.ServerHandlerOnSetupCtx) (
 	h.mutex.RLock()
 	defer h.mutex.RUnlock()
 
-	path := ctx.Path
+	path := trimLeadingSlash(ctx.Path)
 	p, ok := h.paths[path]
 	if !ok {
 		return &base.Response{StatusCode: base.StatusNotFound}, nil, nil
@@ -137,7 +137,7 @@ func (h *RTSPServerHandler) OnPlay(_ *gortsplib.ServerHandlerOnPlayCtx) (
 func (h *RTSPServerHandler) OnRecord(ctx *gortsplib.ServerHandlerOnRecordCtx) (
 	*base.Response, error,
 ) {
-	path := ctx.Path
+	path := trimLeadingSlash(ctx.Path)
 
 	ctx.Session.OnPacketRTPAny(func(medi *description.Media, _ format.Format, pkt *rtp.Packet) {
 		h.mutex.RLock()
@@ -198,4 +198,11 @@ func (m *RTSPServerManager) StopAll() {
 	}
 	m.servers = make(map[string]*gortsplib.Server)
 	m.handler = make(map[string]*RTSPServerHandler)
+}
+
+func trimLeadingSlash(s string) string {
+	if len(s) > 0 && s[0] == '/' {
+		return s[1:]
+	}
+	return s
 }
