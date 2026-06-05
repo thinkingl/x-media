@@ -1,7 +1,6 @@
 package media
 
 import (
-	"context"
 	"fmt"
 	"sync"
 
@@ -14,15 +13,21 @@ import (
 	"github.com/x-media/x-media-server/pkg/logger"
 )
 
-type RTSPServerHandler struct {
-	server    *gortsplib.Server
-	mutex     sync.RWMutex
+type rtspPath struct {
 	stream    *gortsplib.ServerStream
 	publisher *gortsplib.ServerSession
 }
 
+type RTSPServerHandler struct {
+	server *gortsplib.Server
+	mutex  sync.RWMutex
+	paths  map[string]*rtspPath
+}
+
 func NewRTSPServerHandler() *RTSPServerHandler {
-	return &RTSPServerHandler{}
+	return &RTSPServerHandler{
+		paths: make(map[string]*rtspPath),
+	}
 }
 
 func (h *RTSPServerHandler) SetServer(s *gortsplib.Server) {
@@ -42,30 +47,32 @@ func (h *RTSPServerHandler) OnSessionOpen(_ *gortsplib.ServerHandlerOnSessionOpe
 }
 
 func (h *RTSPServerHandler) OnSessionClose(ctx *gortsplib.ServerHandlerOnSessionCloseCtx) {
-	logger.Debugf("RTSP session closed")
-
 	h.mutex.Lock()
 	defer h.mutex.Unlock()
 
-	if h.stream != nil && ctx.Session == h.publisher {
-		h.stream.Close()
-		h.stream = nil
-		h.publisher = nil
-		logger.Infof("RTSP publisher disconnected, stream closed")
+	for path, p := range h.paths {
+		if p.publisher == ctx.Session {
+			p.stream.Close()
+			delete(h.paths, path)
+			logger.Infof("RTSP publisher disconnected: %s", path)
+			return
+		}
 	}
 }
 
-func (h *RTSPServerHandler) OnDescribe(_ *gortsplib.ServerHandlerOnDescribeCtx) (
+func (h *RTSPServerHandler) OnDescribe(ctx *gortsplib.ServerHandlerOnDescribeCtx) (
 	*base.Response, *gortsplib.ServerStream, error,
 ) {
 	h.mutex.RLock()
 	defer h.mutex.RUnlock()
 
-	if h.stream == nil {
+	path := ctx.Path
+	p, ok := h.paths[path]
+	if !ok {
 		return &base.Response{StatusCode: base.StatusNotFound}, nil, nil
 	}
 
-	return &base.Response{StatusCode: base.StatusOK}, h.stream, nil
+	return &base.Response{StatusCode: base.StatusOK}, p.stream, nil
 }
 
 func (h *RTSPServerHandler) OnAnnounce(ctx *gortsplib.ServerHandlerOnAnnounceCtx) (
@@ -74,26 +81,30 @@ func (h *RTSPServerHandler) OnAnnounce(ctx *gortsplib.ServerHandlerOnAnnounceCtx
 	h.mutex.Lock()
 	defer h.mutex.Unlock()
 
-	if h.stream != nil {
-		h.stream.Close()
-		if h.publisher != nil {
-			h.publisher.Close()
+	path := ctx.Path
+	if p, ok := h.paths[path]; ok {
+		p.stream.Close()
+		if p.publisher != nil {
+			p.publisher.Close()
 		}
-		h.stream = nil
-		h.publisher = nil
-		logger.Infof("RTSP: replaced existing publisher")
+		delete(h.paths, path)
+		logger.Infof("RTSP: replaced existing publisher on %s", path)
 	}
 
-	h.stream = &gortsplib.ServerStream{
+	stream := &gortsplib.ServerStream{
 		Server: h.server,
 		Desc:   ctx.Description,
 	}
-	if err := h.stream.Initialize(); err != nil {
+	if err := stream.Initialize(); err != nil {
 		return &base.Response{StatusCode: base.StatusInternalServerError}, err
 	}
-	h.publisher = ctx.Session
 
-	logger.Infof("RTSP publisher connected, streams: %d", len(ctx.Description.Medias))
+	h.paths[path] = &rtspPath{
+		stream:    stream,
+		publisher: ctx.Session,
+	}
+
+	logger.Infof("RTSP publisher connected: %s, streams: %d", path, len(ctx.Description.Medias))
 	return &base.Response{StatusCode: base.StatusOK}, nil
 }
 
@@ -107,11 +118,13 @@ func (h *RTSPServerHandler) OnSetup(ctx *gortsplib.ServerHandlerOnSetupCtx) (
 	h.mutex.RLock()
 	defer h.mutex.RUnlock()
 
-	if h.stream == nil {
+	path := ctx.Path
+	p, ok := h.paths[path]
+	if !ok {
 		return &base.Response{StatusCode: base.StatusNotFound}, nil, nil
 	}
 
-	return &base.Response{StatusCode: base.StatusOK}, h.stream, nil
+	return &base.Response{StatusCode: base.StatusOK}, p.stream, nil
 }
 
 func (h *RTSPServerHandler) OnPlay(_ *gortsplib.ServerHandlerOnPlayCtx) (
@@ -124,73 +137,65 @@ func (h *RTSPServerHandler) OnPlay(_ *gortsplib.ServerHandlerOnPlayCtx) (
 func (h *RTSPServerHandler) OnRecord(ctx *gortsplib.ServerHandlerOnRecordCtx) (
 	*base.Response, error,
 ) {
+	path := ctx.Path
+
 	ctx.Session.OnPacketRTPAny(func(medi *description.Media, _ format.Format, pkt *rtp.Packet) {
 		h.mutex.RLock()
 		defer h.mutex.RUnlock()
 
-		if h.stream != nil {
-			h.stream.WritePacketRTP(medi, pkt)
+		if p, ok := h.paths[path]; ok {
+			p.stream.WritePacketRTP(medi, pkt)
 		}
 	})
 
-	logger.Infof("RTSP publisher started recording")
+	logger.Infof("RTSP publisher started recording: %s", path)
 	return &base.Response{StatusCode: base.StatusOK}, nil
 }
 
-type RTSPNativeServer struct {
-	mu       sync.RWMutex
-	handler  *RTSPServerHandler
-	server   *gortsplib.Server
-	addr     string
-	pathName string
-	cancel   context.CancelFunc
+type RTSPServerManager struct {
+	mu      sync.RWMutex
+	servers map[string]*gortsplib.Server
+	handler map[string]*RTSPServerHandler
 }
 
-func NewRTSPNativeServer(addr string) *RTSPNativeServer {
-	return &RTSPNativeServer{
-		addr: addr,
-	}
+var globalRTSPManager = &RTSPServerManager{
+	servers: make(map[string]*gortsplib.Server),
+	handler: make(map[string]*RTSPServerHandler),
 }
 
-func (s *RTSPNativeServer) Start(ctx context.Context) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+func (m *RTSPServerManager) GetOrCreate(addr string) (*RTSPServerHandler, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 
-	if s.server != nil {
-		return fmt.Errorf("RTSP server already running")
+	if h, ok := m.handler[addr]; ok {
+		return h, nil
 	}
 
-	s.handler = NewRTSPServerHandler()
-	s.server = &gortsplib.Server{
-		Handler:     s.handler,
-		RTSPAddress: s.addr,
+	h := NewRTSPServerHandler()
+	srv := &gortsplib.Server{
+		Handler:     h,
+		RTSPAddress: addr,
 	}
-	s.handler.SetServer(s.server)
+	h.SetServer(srv)
 
-	if err := s.server.Start(); err != nil {
-		s.server = nil
-		s.handler = nil
-		return fmt.Errorf("failed to start RTSP server on %s: %w", s.addr, err)
+	if err := srv.Start(); err != nil {
+		return nil, fmt.Errorf("failed to start RTSP server on %s: %w", addr, err)
 	}
 
-	logger.Infof("RTSP native server started on %s", s.addr)
-	return nil
+	m.servers[addr] = srv
+	m.handler[addr] = h
+	logger.Infof("RTSP server started on %s", addr)
+	return h, nil
 }
 
-func (s *RTSPNativeServer) Stop() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+func (m *RTSPServerManager) StopAll() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 
-	if s.server != nil {
-		s.server.Close()
-		s.server = nil
-		s.handler = nil
-		logger.Infof("RTSP native server stopped on %s", s.addr)
+	for addr, srv := range m.servers {
+		srv.Close()
+		logger.Infof("RTSP server stopped on %s", addr)
 	}
-}
-
-func (s *RTSPNativeServer) IsRunning() bool {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.server != nil
+	m.servers = make(map[string]*gortsplib.Server)
+	m.handler = make(map[string]*RTSPServerHandler)
 }

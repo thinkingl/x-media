@@ -10,14 +10,13 @@ import (
 )
 
 type RTSPOutput struct {
-	mu         sync.RWMutex
-	id         string
-	config     *OutputConfig
-	status     StreamStatus
-	cancel     context.CancelFunc
-	ctx        context.Context
-	muxer      *SimpleMuxer
-	rtspServer *RTSPNativeServer
+	mu     sync.RWMutex
+	id     string
+	config *OutputConfig
+	status StreamStatus
+	cancel context.CancelFunc
+	ctx    context.Context
+	muxer  *SimpleMuxer
 }
 
 func NewRTSPOutput(config *OutputConfig) (*RTSPOutput, error) {
@@ -31,7 +30,7 @@ func NewRTSPOutput(config *OutputConfig) (*RTSPOutput, error) {
 
 	target := config.URL
 	if config.Mode == "server" {
-		target = fmt.Sprintf("rtsp://localhost%s/live", config.Addr)
+		target = fmt.Sprintf("rtsp://localhost%s/live/%s", config.Addr, id)
 	}
 
 	return &RTSPOutput{
@@ -67,18 +66,14 @@ func (r *RTSPOutput) StartWithFile(ctx context.Context, filePath string) error {
 	r.status = StreamStatusRunning
 
 	if r.config.Mode == "server" {
-		r.rtspServer = NewRTSPNativeServer(r.config.Addr)
-		if err := r.rtspServer.Start(r.ctx); err != nil {
+		_, err := globalRTSPManager.GetOrCreate(r.config.Addr)
+		if err != nil {
 			r.status = StreamStatusStopped
 			return fmt.Errorf("failed to start RTSP server: %w", err)
 		}
 	}
 
 	if err := r.muxer.StartWithFile(r.ctx, filePath); err != nil {
-		if r.rtspServer != nil {
-			r.rtspServer.Stop()
-			r.rtspServer = nil
-		}
 		r.status = StreamStatusStopped
 		return err
 	}
@@ -95,10 +90,6 @@ func (r *RTSPOutput) Stop() error {
 		r.cancel()
 	}
 	r.muxer.Stop()
-	if r.rtspServer != nil {
-		r.rtspServer.Stop()
-		r.rtspServer = nil
-	}
 	r.status = StreamStatusStopped
 	logger.Infof("RTSP output stopped: %s", r.id)
 	return nil
