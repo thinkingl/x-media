@@ -229,7 +229,14 @@ func validateInputConfig(inputType string, configStr string) error {
 }
 
 func (s *InputService) probeAndSave(inputID, filePath string) {
-	probeResult, err := media.ProbeFile(filePath)
+	absPath := filePath
+	if !filepath.IsAbs(absPath) {
+		abs, err := filepath.Abs(absPath)
+		if err == nil {
+			absPath = abs
+		}
+	}
+	probeResult, err := media.ProbeFile(absPath)
 	if err != nil {
 		logger.Warnf("probe file failed for input %s: %v", inputID, err)
 		return

@@ -17,11 +17,10 @@ type RTSPOutput struct {
 	cancel     context.CancelFunc
 	ctx        context.Context
 	muxer      *SimpleMuxer
-	mmtxMgr    *MediamtxManager
-	mmtxBinary string
+	rtspServer *RTSPNativeServer
 }
 
-func NewRTSPOutput(config *OutputConfig, mmtxBinary string) (*RTSPOutput, error) {
+func NewRTSPOutput(config *OutputConfig) (*RTSPOutput, error) {
 	if config.Mode == "" {
 		return nil, ErrInvalidConfig
 	}
@@ -36,11 +35,10 @@ func NewRTSPOutput(config *OutputConfig, mmtxBinary string) (*RTSPOutput, error)
 	}
 
 	return &RTSPOutput{
-		id:         id,
-		config:     config,
-		status:     StreamStatusStopped,
-		muxer:      NewSimpleMuxer(target, "rtsp"),
-		mmtxBinary: mmtxBinary,
+		id:     id,
+		config: config,
+		status: StreamStatusStopped,
+		muxer:  NewSimpleMuxer(target, "rtsp"),
 	}, nil
 }
 
@@ -69,21 +67,17 @@ func (r *RTSPOutput) StartWithFile(ctx context.Context, filePath string) error {
 	r.status = StreamStatusRunning
 
 	if r.config.Mode == "server" {
-		if r.mmtxBinary == "" {
+		r.rtspServer = NewRTSPNativeServer(r.config.Addr)
+		if err := r.rtspServer.Start(r.ctx); err != nil {
 			r.status = StreamStatusStopped
-			return fmt.Errorf("mediamtx binary not configured")
-		}
-		r.mmtxMgr = NewMediamtxManager(r.mmtxBinary)
-		if err := r.mmtxMgr.Start(r.ctx, r.config.Addr, "live"); err != nil {
-			r.status = StreamStatusStopped
-			return fmt.Errorf("failed to start mediamtx: %w", err)
+			return fmt.Errorf("failed to start RTSP server: %w", err)
 		}
 	}
 
 	if err := r.muxer.StartWithFile(r.ctx, filePath); err != nil {
-		if r.mmtxMgr != nil {
-			r.mmtxMgr.Stop()
-			r.mmtxMgr = nil
+		if r.rtspServer != nil {
+			r.rtspServer.Stop()
+			r.rtspServer = nil
 		}
 		r.status = StreamStatusStopped
 		return err
@@ -101,9 +95,9 @@ func (r *RTSPOutput) Stop() error {
 		r.cancel()
 	}
 	r.muxer.Stop()
-	if r.mmtxMgr != nil {
-		r.mmtxMgr.Stop()
-		r.mmtxMgr = nil
+	if r.rtspServer != nil {
+		r.rtspServer.Stop()
+		r.rtspServer = nil
 	}
 	r.status = StreamStatusStopped
 	logger.Infof("RTSP output stopped: %s", r.id)

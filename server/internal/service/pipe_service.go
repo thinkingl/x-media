@@ -2,6 +2,7 @@ package service
 
 import (
 	"encoding/json"
+	"path/filepath"
 
 	"github.com/x-media/x-media-server/internal/media"
 	"github.com/x-media/x-media-server/internal/model"
@@ -208,7 +209,14 @@ func (s *PipeService) Start(id string) error {
 	}
 
 	if input.Type == model.InputTypeFile && inputConfig.Path != "" {
-		if err := s.engine.StartOutputWithFile(pipe.OutputID, inputConfig.Path); err != nil {
+		filePath := inputConfig.Path
+		if !filepath.IsAbs(filePath) {
+			abs, err := filepath.Abs(filePath)
+			if err == nil {
+				filePath = abs
+			}
+		}
+		if err := s.engine.StartOutputWithFile(pipe.OutputID, filePath); err != nil {
 			logger.Warnf("启动输出流失败: %v", err)
 		}
 	} else {
