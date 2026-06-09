@@ -31,6 +31,7 @@ X-Media: Go media streaming platform with Vue3 web UI. Supports MP4/RTSP inputs,
 ```bash
 make build         # CGO_ENABLED=1 required for SQLite
 make test          # go test ./... -v -count=1
+make test-coverage # generates coverage.out and coverage.html
 make lint          # go vet ./...
 make fmt           # go fmt ./...
 make deps          # go mod tidy
@@ -41,8 +42,8 @@ make run           # build + start with -c config.yaml
 
 ```bash
 npm install
-npm run dev        # dev server on :3000, proxies /api to :8080
-npm run build      # outputs to dist/
+npm run dev        # dev server on :18091, proxies /api and /uploads to :18090
+npm run build      # vue-tsc + vite build, outputs to dist/
 ```
 
 ### Docker (from project root)
@@ -63,8 +64,8 @@ docker-compose down
 
 - Tests use testify mocks for repos and media engine
 - Media tests: `TestMain` in `internal/media/engine_test.go` initializes logger before tests
-- File input tests reference `../../test/fixtures/test.mp4` (relative to test file)
-- No integration/E2E tests yet
+- File input tests reference `../../test/fixtures/test.mp4` (relative to test file) via `testFixturePath` helper
+- `integration_test.go` exists but uses `httptest.NewServer` — not a full E2E test requiring external services
 
 ## Architecture notes
 
@@ -81,3 +82,5 @@ docker-compose down
 - This machine has 10GB RAM — avoid running multiple heavy operations simultaneously
 - Swap is often full; run `go build` and `npm install` separately, not in parallel
 - `go vet` is the only linter (no golangci-lint configured)
+- Frontend dev server port is 18091 (not 3000); proxy target is 18090 (not 8080) — see `web/vite.config.ts`
+- Dev config: `server/config_dev.yaml` sets backend to `:18090` (matches frontend proxy); default config uses `:8080`
