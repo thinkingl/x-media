@@ -27,7 +27,7 @@ FROM 172.16.240.100:5001/library/debian:bookworm-slim
 
 RUN sed -i 's|http://deb.debian.org|http://172.16.240.100:3142|g' /etc/apt/sources.list.d/debian.sources && \
     apt-get update && \
-    apt-get install -y --no-install-recommends sqlite3 libsqlite3-0 ca-certificates tzdata && \
+    apt-get install -y --no-install-recommends sqlite3 libsqlite3-0 ca-certificates tzdata ffmpeg && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

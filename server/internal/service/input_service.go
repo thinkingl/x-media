@@ -282,7 +282,15 @@ func (s *InputService) ProbeInput(id string) (*media.MediaInfo, error) {
 		return nil, errors.NewValidationError("配置格式错误")
 	}
 
-	probeResult, err := media.ProbeFile(config.Path)
+	filePath := config.Path
+	if !filepath.IsAbs(filePath) {
+		abs, err := filepath.Abs(filePath)
+		if err == nil {
+			filePath = abs
+		}
+	}
+
+	probeResult, err := media.ProbeFile(filePath)
 	if err != nil {
 		return nil, errors.NewInternalError(err)
 	}
@@ -295,7 +303,7 @@ func (s *InputService) ProbeInput(id string) (*media.MediaInfo, error) {
 	if probeResult.Duration > 2 {
 		seekTime = probeResult.Duration / 10
 	}
-	if err := media.ExtractThumbnail(config.Path, thumbPath, seekTime); err != nil {
+	if err := media.ExtractThumbnail(filePath, thumbPath, seekTime); err != nil {
 		logger.Warnf("extract thumbnail failed: %v", err)
 		thumbPath = ""
 	} else {
