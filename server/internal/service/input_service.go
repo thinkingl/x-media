@@ -242,7 +242,7 @@ func (s *InputService) probeAndSave(inputID, filePath string) {
 		return
 	}
 
-	thumbDir := "./uploads/thumbnails"
+	thumbDir, _ := filepath.Abs("./uploads/thumbnails")
 	_ = os.MkdirAll(thumbDir, 0755)
 	thumbPath := filepath.Join(thumbDir, inputID+".jpg")
 
@@ -250,7 +250,7 @@ func (s *InputService) probeAndSave(inputID, filePath string) {
 	if probeResult.Duration > 2 {
 		seekTime = probeResult.Duration / 10
 	}
-	if err := media.ExtractThumbnail(filePath, thumbPath, seekTime); err != nil {
+	if err := media.ExtractThumbnail(absPath, thumbPath, seekTime); err != nil {
 		logger.Warnf("extract thumbnail failed for input %s: %v", inputID, err)
 		thumbPath = ""
 	} else {
@@ -295,7 +295,7 @@ func (s *InputService) ProbeInput(id string) (*media.MediaInfo, error) {
 		return nil, errors.NewInternalError(err)
 	}
 
-	thumbDir := "./uploads/thumbnails"
+	thumbDir, _ := filepath.Abs("./uploads/thumbnails")
 	_ = os.MkdirAll(thumbDir, 0755)
 	thumbPath := filepath.Join(thumbDir, id+".jpg")
 
