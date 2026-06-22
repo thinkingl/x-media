@@ -254,7 +254,7 @@ func (s *InputService) probeAndSave(inputID, filePath string) {
 		logger.Warnf("extract thumbnail failed for input %s: %v", inputID, err)
 		thumbPath = ""
 	} else {
-		probeResult.ThumbnailPath = thumbPath
+		probeResult.ThumbnailPath = "uploads/thumbnails/" + inputID + ".jpg"
 	}
 
 	infoJSON, err := json.Marshal(probeResult)
@@ -307,7 +307,7 @@ func (s *InputService) ProbeInput(id string) (*media.MediaInfo, error) {
 		logger.Warnf("extract thumbnail failed: %v", err)
 		thumbPath = ""
 	} else {
-		probeResult.ThumbnailPath = thumbPath
+		probeResult.ThumbnailPath = "uploads/thumbnails/" + id + ".jpg"
 	}
 
 	infoJSON, _ := json.Marshal(probeResult)
