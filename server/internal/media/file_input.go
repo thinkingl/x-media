@@ -2,6 +2,7 @@ package media
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"os/exec"
 	"path/filepath"
@@ -85,9 +86,8 @@ func (f *FileInput) readLoop() {
 	args := []string{
 		"-re",
 		"-i", f.config.Path,
-		"-c:v", "copy",
-		"-an",
-		"-f", "h264",
+		"-c", "copy",
+		"-f", "mpegts",
 		"pipe:1",
 	}
 
@@ -126,7 +126,65 @@ func (f *FileInput) readLoop() {
 	}()
 
 	var videoPTS int64
-	var auBuffer []byte
+	var audioPTS int64
+	var tsBuf []byte
+	var videoPID, audioPID uint16
+	pidDetected := false
+
+	demuxer := NewTSDemuxer(0, 0)
+
+	var audioCfg []byte
+	for _, s := range f.streams {
+		if s.Kind == "audio" && s.CodecID == CodecAAC {
+			audioCfg = buildAACSpecificConfig(s)
+			demuxer.SetAudioConfig(audioCfg)
+			logger.Infof("AAC AudioSpecificConfig from probe: %02x%02x", audioCfg[0], audioCfg[1])
+			break
+		}
+	}
+
+	demuxer.OnVideo(func(data []byte, isKey bool) {
+		f.mu.RLock()
+		handler := f.handler
+		f.mu.RUnlock()
+		if handler == nil {
+			return
+		}
+		handler(&MediaPacket{
+			StreamID:   f.id,
+			Kind:       "video",
+			CodecID:    CodecH264,
+			CodecType:  "h264",
+			IsVideo:    true,
+			IsKeyFrame: isKey,
+			Data:       data,
+			PTS:        videoPTS,
+			DTS:        videoPTS,
+			Timestamp:  videoPTS / 1000,
+		})
+		videoPTS += 33000
+	})
+	demuxer.OnAudio(func(data []byte, config []byte) {
+		f.mu.RLock()
+		handler := f.handler
+		f.mu.RUnlock()
+		if handler == nil {
+			return
+		}
+		handler(&MediaPacket{
+			StreamID:    f.id,
+			Kind:        "audio",
+			CodecID:     CodecAAC,
+			CodecType:   "aac",
+			IsAudio:     true,
+			Data:        data,
+			CodecConfig: config,
+			PTS:         audioPTS,
+			DTS:         audioPTS,
+			Timestamp:   audioPTS / 1000,
+		})
+		audioPTS += 23000
+	})
 
 	buf := make([]byte, 64*1024)
 	for {
@@ -139,39 +197,23 @@ func (f *FileInput) readLoop() {
 
 		n, err := stdout.Read(buf)
 		if n > 0 {
-			auBuffer = append(auBuffer, buf[:n]...)
+			tsBuf = append(tsBuf, buf[:n]...)
 
-			for {
-				au, remaining := extractAccessUnit(auBuffer)
-				if au == nil {
-					auBuffer = remaining
-					break
+			if !pidDetected && len(tsBuf) >= tsPacketSize*100 {
+				videoPID, audioPID = DetectTSPIDs(tsBuf)
+				if videoPID > 0 {
+					demuxer.videoPID = videoPID
+					demuxer.audioPID = audioPID
+					pidDetected = true
+					logger.Infof("TS PIDs detected: video=%d audio=%d", videoPID, audioPID)
 				}
-				auBuffer = remaining
+			}
 
-				isKey := containsIDR(au)
-
-				pkt := &MediaPacket{
-					StreamID:   f.id,
-					Kind:       "video",
-					CodecID:    CodecH264,
-					CodecType:  "h264",
-					IsVideo:    true,
-					IsKeyFrame: isKey,
-					Data:       au,
-					PTS:        videoPTS,
-					DTS:        videoPTS,
-					Timestamp:  videoPTS / 1000,
-				}
-				videoPTS += 33000
-
-				f.mu.RLock()
-				handler := f.handler
-				f.mu.RUnlock()
-
-				if handler != nil {
-					handler(pkt)
-				}
+			if pidDetected {
+				demuxer.Feed(tsBuf)
+				tsBuf = nil
+			} else if len(tsBuf) > 1024*1024 {
+				tsBuf = nil
 			}
 		}
 		if err != nil {
@@ -269,4 +311,66 @@ func (f *FileInput) OnPacket(handler PacketHandler) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.handler = handler
+}
+
+func buildAACSpecificConfig(s StreamInfo) []byte {
+	sampleRate := 44100
+	channels := 2
+	if sr, ok := s.Parameters["sample_rate"].(int); ok && sr > 0 {
+		sampleRate = sr
+	}
+	if sr, ok := s.Parameters["sample_rate"].(string); ok {
+		fmt.Sscanf(sr, "%d", &sampleRate)
+	}
+	if ch, ok := s.Parameters["channels"].(int); ok && ch > 0 {
+		channels = ch
+	}
+
+	objectType := 2 // AAC-LC
+	if prof, ok := s.Parameters["profile"].(string); ok {
+		switch prof {
+		case "HE-AAC", "HE-AACv2":
+			objectType = 5
+		case "LC":
+			objectType = 2
+		}
+	}
+
+	sampleRateIndex := 4 // default 44100Hz
+	switch sampleRate {
+	case 96000:
+		sampleRateIndex = 0
+	case 88200:
+		sampleRateIndex = 1
+	case 64000:
+		sampleRateIndex = 2
+	case 48000:
+		sampleRateIndex = 3
+	case 44100:
+		sampleRateIndex = 4
+	case 32000:
+		sampleRateIndex = 5
+	case 24000:
+		sampleRateIndex = 6
+	case 22050:
+		sampleRateIndex = 7
+	case 16000:
+		sampleRateIndex = 8
+	case 12000:
+		sampleRateIndex = 9
+	case 11025:
+		sampleRateIndex = 10
+	case 8000:
+		sampleRateIndex = 11
+	case 7350:
+		sampleRateIndex = 12
+	}
+
+	if channels > 2 {
+		channels = 2
+	}
+
+	byte0 := byte(objectType<<3 | sampleRateIndex>>1)
+	byte1 := byte((sampleRateIndex&0x01)<<7 | channels<<3)
+	return []byte{byte0, byte1}
 }

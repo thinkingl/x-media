@@ -10,6 +10,7 @@ import (
 	"github.com/bluenviron/gortsplib/v5/pkg/description"
 	"github.com/bluenviron/gortsplib/v5/pkg/format"
 	"github.com/bluenviron/gortsplib/v5/pkg/format/rtph264"
+	"github.com/pion/rtp"
 
 	"github.com/x-media/x-media-server/pkg/logger"
 	"github.com/x-media/x-media-server/pkg/utils"
@@ -25,9 +26,11 @@ type RTSPOutput struct {
 	stream       *gortsplib.ServerStream
 	h264Enc      *rtph264.Encoder
 	videoMedia   *description.Media
+	audioMedia   *description.Media
 	startTime    time.Time
 	sps          []byte
 	pps          []byte
+	audioConfig  []byte
 	streamReady  bool
 	rtspHandler  *RTSPServerHandler
 }
@@ -79,6 +82,8 @@ func (r *RTSPOutput) StartWithFile(ctx context.Context, filePath string) error {
 }
 
 func (r *RTSPOutput) initStream() error {
+	medias := []*description.Media{}
+
 	videoMedia := &description.Media{
 		Type: description.MediaTypeVideo,
 		Formats: []format.Format{
@@ -90,9 +95,46 @@ func (r *RTSPOutput) initStream() error {
 			},
 		},
 	}
+	medias = append(medias, videoMedia)
+
+	var audioMedia *description.Media
+	if len(r.audioConfig) >= 2 {
+		audioObjectType := int(r.audioConfig[0] >> 3)
+		sampleRateIndex := int((r.audioConfig[0] & 0x07) << 1 | r.audioConfig[1] >> 7)
+		channelConfig := int((r.audioConfig[1] >> 3) & 0x0F)
+
+		sampleRates := []int{96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000, 7350}
+		sampleRate := 44100
+		if sampleRateIndex < len(sampleRates) {
+			sampleRate = sampleRates[sampleRateIndex]
+		}
+
+		configHex := fmt.Sprintf("%02x%02x", r.audioConfig[0], r.audioConfig[1])
+
+		audioMedia = &description.Media{
+			Type: description.MediaTypeAudio,
+			Formats: []format.Format{
+				&format.Generic{
+					PayloadTyp: 97,
+					RTPMa:      fmt.Sprintf("MPEG4-GENERIC/%d/%d", sampleRate, channelConfig),
+					ClockRat:   sampleRate,
+					FMT: map[string]string{
+						"streamtype":       "5",
+						"profile-level-id": fmt.Sprintf("%d", audioObjectType),
+						"mode":             "AAC-hbr",
+						"sizelength":       "13",
+						"indexlength":      "3",
+						"indexdeltalength": "3",
+						"config":           configHex,
+					},
+				},
+			},
+		}
+		medias = append(medias, audioMedia)
+	}
 
 	desc := &description.Session{
-		Medias: []*description.Media{videoMedia},
+		Medias: medias,
 	}
 
 	stream := &gortsplib.ServerStream{
@@ -105,6 +147,7 @@ func (r *RTSPOutput) initStream() error {
 
 	r.stream = stream
 	r.videoMedia = videoMedia
+	r.audioMedia = audioMedia
 	r.streamReady = true
 
 	streamPath := "live/" + r.id
@@ -114,7 +157,7 @@ func (r *RTSPOutput) initStream() error {
 	}
 	r.rtspHandler.mutex.Unlock()
 
-	logger.Infof("RTSP stream initialized: %s, path: %s, SPS: %d bytes, PPS: %d bytes", r.id, streamPath, len(r.sps), len(r.pps))
+	logger.Infof("RTSP stream initialized: %s, path: %s, video SPS:%d PPS:%d, audio:%v", r.id, streamPath, len(r.sps), len(r.pps), audioMedia != nil)
 	return nil
 }
 
@@ -127,10 +170,18 @@ func (r *RTSPOutput) WritePacket(pkt *MediaPacket) error {
 		return nil
 	}
 
+	if pkt.IsAudio {
+		return r.writeAudio(pkt)
+	}
+
 	if !pkt.IsVideo {
 		return nil
 	}
 
+	return r.writeVideo(pkt)
+}
+
+func (r *RTSPOutput) writeVideo(pkt *MediaPacket) error {
 	nalUnits := splitAnnexB(pkt.Data)
 	if len(nalUnits) == 0 {
 		return nil
@@ -200,6 +251,73 @@ func (r *RTSPOutput) WritePacket(pkt *MediaPacket) error {
 		p.Timestamp = pts
 		stream.WritePacketRTP(videoMedia, p)
 	}
+
+	return nil
+}
+
+func (r *RTSPOutput) writeAudio(pkt *MediaPacket) error {
+	r.mu.Lock()
+	if !r.streamReady && r.sps != nil && r.pps != nil {
+		if err := r.initStream(); err != nil {
+			r.mu.Unlock()
+			logger.Errorf("failed to init stream: %v", err)
+			return nil
+		}
+	}
+
+	if len(r.audioConfig) == 0 && len(pkt.CodecConfig) > 0 {
+		r.audioConfig = pkt.CodecConfig
+		logger.Infof("RTSP output got audio config: %02x%02x", pkt.CodecConfig[0], pkt.CodecConfig[1])
+
+		if r.streamReady && r.audioMedia == nil {
+			logger.Infof("RTSP stream reinitializing with audio")
+			if r.stream != nil {
+				r.stream.Close()
+			}
+			r.streamReady = false
+			if err := r.initStream(); err != nil {
+				r.mu.Unlock()
+				logger.Errorf("failed to reinit stream with audio: %v", err)
+				return nil
+			}
+		}
+		r.mu.Unlock()
+		return nil
+	}
+
+	stream := r.stream
+	audioMedia := r.audioMedia
+	ready := r.streamReady
+	r.mu.Unlock()
+
+	if !ready || stream == nil || audioMedia == nil {
+		return nil
+	}
+
+	elapsed := time.Since(r.startTime)
+	pts := uint32(elapsed.Seconds() * 44100)
+
+	auSize := len(pkt.Data)
+	headerLen := uint16(1)
+	auHeader := uint16(auSize) << 3
+
+	payload := make([]byte, 2+2+len(pkt.Data))
+	payload[0] = byte(headerLen >> 8)
+	payload[1] = byte(headerLen)
+	payload[2] = byte(auHeader >> 8)
+	payload[3] = byte(auHeader)
+	copy(payload[4:], pkt.Data)
+
+	rtpPkt := &rtp.Packet{
+		Header: rtp.Header{
+			Version:     2,
+			PayloadType: 97,
+			Timestamp:   pts,
+			SSRC:        0x12345678,
+		},
+		Payload: payload,
+	}
+	stream.WritePacketRTP(audioMedia, rtpPkt)
 
 	return nil
 }
