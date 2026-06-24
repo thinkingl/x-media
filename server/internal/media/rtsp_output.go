@@ -271,9 +271,6 @@ func (r *RTSPOutput) writeAudio(pkt *MediaPacket) error {
 
 		if r.streamReady && r.audioMedia == nil {
 			logger.Infof("RTSP stream reinitializing with audio")
-			if r.stream != nil {
-				r.stream.Close()
-			}
 			r.streamReady = false
 			if err := r.initStream(); err != nil {
 				r.mu.Unlock()
@@ -298,12 +295,12 @@ func (r *RTSPOutput) writeAudio(pkt *MediaPacket) error {
 	pts := uint32(elapsed.Seconds() * 44100)
 
 	auSize := len(pkt.Data)
-	headerLen := uint16(1)
+	auHeaderBits := uint16(16) // 1 AU-header = 16 bits
 	auHeader := uint16(auSize) << 3
 
 	payload := make([]byte, 2+2+len(pkt.Data))
-	payload[0] = byte(headerLen >> 8)
-	payload[1] = byte(headerLen)
+	payload[0] = byte(auHeaderBits >> 8)
+	payload[1] = byte(auHeaderBits)
 	payload[2] = byte(auHeader >> 8)
 	payload[3] = byte(auHeader)
 	copy(payload[4:], pkt.Data)
