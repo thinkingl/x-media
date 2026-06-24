@@ -51,34 +51,35 @@ func (d *TSDemuxer) Feed(data []byte) {
 			continue
 		}
 
-		if pkt[1]&0x40 != 0 {
-			if pid == d.videoPID && len(d.videoBuf) > 0 {
-				d.flushVideo()
-			}
-			if pid == d.audioPID && len(d.audioBuf) > 0 {
-				d.flushAudio()
-			}
-		}
-
 		payload := pkt[payloadStart:]
 		switch pid {
 		case d.videoPID:
-			if pkt[1]&0x40 != 0 && len(payload) > 0 && payload[0] != 0 {
-				payload = payload[1+int(payload[0]):]
+			if pkt[1]&0x40 != 0 && len(payload) > 0 {
+				pointerField := int(payload[0])
+				if pointerField > 0 && pointerField < len(payload) {
+					d.videoBuf = append(d.videoBuf, payload[1:1+pointerField]...)
+				}
+				d.flushVideo()
+				payload = payload[1+pointerField:]
 			}
 			d.videoBuf = append(d.videoBuf, payload...)
 		case d.audioPID:
-			if pkt[1]&0x40 != 0 && len(payload) > 0 && payload[0] != 0 {
-				payload = payload[1+int(payload[0]):]
+			if pkt[1]&0x40 != 0 && len(payload) > 0 {
+				pointerField := int(payload[0])
+				if pointerField > 0 && pointerField < len(payload) {
+					d.audioBuf = append(d.audioBuf, payload[1:1+pointerField]...)
+				}
+				d.flushAudio()
+				payload = payload[1+pointerField:]
 			}
 			d.audioBuf = append(d.audioBuf, payload...)
 		}
 	}
 
-	if len(d.videoBuf) > 65536 {
+	if len(d.videoBuf) > 10*1024*1024 {
 		d.flushVideo()
 	}
-	if len(d.audioBuf) > 65536 {
+	if len(d.audioBuf) > 1024*1024 {
 		d.flushAudio()
 	}
 }
@@ -90,19 +91,24 @@ func (d *TSDemuxer) flushVideo() {
 		return
 	}
 
+	payload := stripPESHeader(data)
+	if len(payload) == 0 {
+		return
+	}
+
 	isKey := false
-	for i := 0; i < len(data)-4; i++ {
-		if data[i] == 0 && data[i+1] == 0 {
+	for i := 0; i < len(payload)-4; i++ {
+		if payload[i] == 0 && payload[i+1] == 0 {
 			var nalStart int
-			if data[i+2] == 0 && data[i+3] == 1 {
+			if payload[i+2] == 0 && payload[i+3] == 1 {
 				nalStart = i + 4
-			} else if data[i+2] == 1 {
+			} else if payload[i+2] == 1 {
 				nalStart = i + 3
 			} else {
 				continue
 			}
-			if nalStart < len(data) {
-				nalType := data[nalStart] & 0x1F
+			if nalStart < len(payload) {
+				nalType := payload[nalStart] & 0x1F
 				if nalType == 5 || nalType == 7 || nalType == 8 {
 					isKey = true
 					break
@@ -112,7 +118,7 @@ func (d *TSDemuxer) flushVideo() {
 	}
 
 	if d.onVideo != nil {
-		d.onVideo(data, isKey)
+		d.onVideo(payload, isKey)
 	}
 }
 
@@ -123,10 +129,15 @@ func (d *TSDemuxer) flushAudio() {
 		return
 	}
 
-	if len(data) > 7 && data[0] == 0xFF && (data[1]&0xF0) == 0xF0 {
-		profile := int((data[2] >> 6) & 0x03)
-		sampleRateIndex := int((data[2] >> 2) & 0x0F)
-		channelConfig := int((data[2]&0x01)<<2 | (data[3] >> 6))
+	payload := stripPESHeader(data)
+	if len(payload) == 0 {
+		return
+	}
+
+	if len(payload) > 7 && payload[0] == 0xFF && (payload[1]&0xF0) == 0xF0 {
+		profile := int((payload[2] >> 6) & 0x03)
+		sampleRateIndex := int((payload[2] >> 2) & 0x0F)
+		channelConfig := int((payload[2]&0x01)<<2 | (payload[3] >> 6))
 
 		audioObjectType := profile + 1
 		if len(d.audioConfig) == 0 {
@@ -139,17 +150,36 @@ func (d *TSDemuxer) flushAudio() {
 		}
 
 		adtsHeaderLen := 7
-		if data[1]&0x01 == 0 {
+		if payload[1]&0x01 == 0 {
 			adtsHeaderLen = 9
 		}
-		if len(data) > adtsHeaderLen {
-			data = data[adtsHeaderLen:]
+		if len(payload) > adtsHeaderLen {
+			payload = payload[adtsHeaderLen:]
 		}
 	}
 
 	if d.onAudio != nil {
-		d.onAudio(data, d.audioConfig)
+		d.onAudio(payload, d.audioConfig)
 	}
+}
+
+func stripPESHeader(data []byte) []byte {
+	if len(data) < 9 {
+		return data
+	}
+	if data[0] != 0 || data[1] != 0 || data[2] != 1 {
+		return data
+	}
+	streamID := data[3]
+	if streamID < 0xC0 || streamID > 0xEF {
+		return data
+	}
+	pesHeaderLen := int(data[8])
+	totalHeaderLen := 9 + pesHeaderLen
+	if totalHeaderLen >= len(data) {
+		return nil
+	}
+	return data[totalHeaderLen:]
 }
 
 func DetectTSPIDs(data []byte) (videoPID uint16, audioPID uint16) {
