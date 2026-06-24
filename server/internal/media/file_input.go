@@ -83,13 +83,16 @@ func (f *FileInput) Start(ctx context.Context) error {
 }
 
 func (f *FileInput) readLoop() {
-	args := []string{
-		"-re",
+	args := []string{"-re"}
+	if f.config.Loop {
+		args = append(args, "-stream_loop", "-1")
+	}
+	args = append(args,
 		"-i", f.config.Path,
 		"-c", "copy",
 		"-f", "mpegts",
 		"pipe:1",
-	}
+	)
 
 	f.cmd = exec.CommandContext(f.ctx, "ffmpeg", args...)
 	stdout, err := f.cmd.StdoutPipe()
