@@ -1,21 +1,31 @@
 package media
 
 import (
+	"fmt"
+
 	"github.com/x-media/x-media-server/pkg/logger"
 )
 
 const tsPacketSize = 188
 
 type TSDemuxer struct {
-	videoPID     uint16
-	audioPID     uint16
-	videoBuf     []byte
-	audioBuf     []byte
-	videoReady   bool
-	audioReady   bool
-	audioConfig  []byte
-	onVideo      func(data []byte, isKey bool)
-	onAudio      func(data []byte, config []byte)
+	videoPID      uint16
+	audioPID      uint16
+	videoBuf      []byte
+	audioBuf      []byte
+	videoReady    bool
+	audioReady    bool
+	audioConfig   []byte
+	onVideo       func(data []byte, isKey bool)
+	onAudio       func(data []byte, config []byte)
+	totalPkts     int
+	videoPkts     int
+	audioPkts     int
+	otherPkts     int
+	videoFrameCount int
+	audioFrameCount int
+	flushCount      int
+	totalFlushed    int64
 }
 
 func NewTSDemuxer(videoPID, audioPID uint16) *TSDemuxer {
@@ -37,6 +47,7 @@ func (d *TSDemuxer) Feed(data []byte) {
 			continue
 		}
 		pid := uint16(pkt[1]&0x1F)<<8 | uint16(pkt[2])
+		d.totalPkts++
 
 		af := (pkt[3] >> 5) & 0x03
 		payloadStart := 4
@@ -54,61 +65,132 @@ func (d *TSDemuxer) Feed(data []byte) {
 		payload := pkt[payloadStart:]
 		switch pid {
 		case d.videoPID:
-			if pkt[1]&0x40 != 0 && len(payload) > 0 {
+			d.videoPkts++
+			isPESStart := pkt[1]&0x40 != 0
+			if isPESStart && len(payload) > 0 {
 				pointerField := int(payload[0])
-				if pointerField > 0 && pointerField < len(payload) {
+				if pointerField > 0 && pointerField < len(payload) && len(d.videoBuf) > 0 {
 					d.videoBuf = append(d.videoBuf, payload[1:1+pointerField]...)
 				}
-				d.flushVideo()
 				payload = payload[1+pointerField:]
+				payload = d.stripPESHeaderInPlace(payload)
 			}
 			d.videoBuf = append(d.videoBuf, payload...)
+
+			d.flushVideo()
 		case d.audioPID:
-			if pkt[1]&0x40 != 0 && len(payload) > 0 {
+			d.audioPkts++
+			isPESStart := pkt[1]&0x40 != 0
+			if isPESStart && len(payload) > 0 {
 				pointerField := int(payload[0])
-				if pointerField > 0 && pointerField < len(payload) {
+				if pointerField > 0 && pointerField < len(payload) && len(d.audioBuf) > 0 {
 					d.audioBuf = append(d.audioBuf, payload[1:1+pointerField]...)
 				}
-				d.flushAudio()
 				payload = payload[1+pointerField:]
+				payload = d.stripPESHeaderInPlace(payload)
 			}
 			d.audioBuf = append(d.audioBuf, payload...)
+
+			if len(d.audioBuf) > 1024*1024 {
+				d.flushAudio()
+			}
+		default:
+			d.otherPkts++
 		}
 	}
 
 	if len(d.videoBuf) > 10*1024*1024 {
 		d.flushVideo()
 	}
-	if len(d.audioBuf) > 1024*1024 {
-		d.flushAudio()
+
+	if d.totalPkts%10000 == 0 && d.totalPkts > 0 {
+		logger.Infof("TS demuxer stats: total=%d video=%d audio=%d other=%d flushed=%d totalBytes=%d",
+			d.totalPkts, d.videoPkts, d.audioPkts, d.otherPkts, d.flushCount, d.totalFlushed)
 	}
 }
 
-func (d *TSDemuxer) flushVideo() {
-	data := d.videoBuf
-	d.videoBuf = nil
-	if len(data) == 0 {
-		return
+func (d *TSDemuxer) stripPESHeaderInPlace(data []byte) []byte {
+	if len(data) < 9 {
+		return data
 	}
-
-	payload := stripPESHeader(data)
-	if len(payload) == 0 {
-		return
+	if data[0] != 0 || data[1] != 0 || data[2] != 1 {
+		return data
 	}
+	streamID := data[3]
+	if streamID < 0xC0 || streamID > 0xEF {
+		return data
+	}
+	pesHeaderLen := int(data[8])
+	totalHeaderLen := 9 + pesHeaderLen
+	if totalHeaderLen >= len(data) {
+		return nil
+	}
+	return data[totalHeaderLen:]
+}
 
-	isKey := false
-	for i := 0; i < len(payload)-4; i++ {
-		if payload[i] == 0 && payload[i+1] == 0 {
+
+// findFrameSplit finds the byte offset where a new access unit begins.
+// It looks for AUD (type 9) after existing slice data, which marks a frame boundary.
+func (d *TSDemuxer) findFrameSplit() int {
+	hasSlice := false
+	for i := 0; i < len(d.videoBuf)-4; i++ {
+		if d.videoBuf[i] == 0 && d.videoBuf[i+1] == 0 {
 			var nalStart int
-			if payload[i+2] == 0 && payload[i+3] == 1 {
+			if i+3 < len(d.videoBuf) && d.videoBuf[i+2] == 0 && d.videoBuf[i+3] == 1 {
 				nalStart = i + 4
-			} else if payload[i+2] == 1 {
+			} else if d.videoBuf[i+2] == 1 {
 				nalStart = i + 3
 			} else {
 				continue
 			}
-			if nalStart < len(payload) {
-				nalType := payload[nalStart] & 0x1F
+			if nalStart >= len(d.videoBuf) {
+				continue
+			}
+			nalType := d.videoBuf[nalStart] & 0x1F
+			switch nalType {
+			case 5, 1: // IDR / non-IDR slice
+				hasSlice = true
+			case 9: // AUD - access unit delimiter
+				if hasSlice {
+					return i
+				}
+			}
+		}
+	}
+	return -1
+}
+
+func (d *TSDemuxer) flushVideo() {
+	splitAt := d.findFrameSplit()
+	if splitAt < 0 {
+		return
+	}
+
+	frameData := make([]byte, splitAt)
+	copy(frameData, d.videoBuf[:splitAt])
+	d.videoBuf = d.videoBuf[splitAt:]
+
+	if len(frameData) == 0 {
+		return
+	}
+
+	d.flushCount++
+	d.totalFlushed += int64(len(frameData))
+	d.videoFrameCount++
+
+	isKey := false
+	for i := 0; i < len(frameData)-4; i++ {
+		if frameData[i] == 0 && frameData[i+1] == 0 {
+			var nalStart int
+			if frameData[i+2] == 0 && frameData[i+3] == 1 {
+				nalStart = i + 4
+			} else if frameData[i+2] == 1 {
+				nalStart = i + 3
+			} else {
+				continue
+			}
+			if nalStart < len(frameData) {
+				nalType := frameData[nalStart] & 0x1F
 				if nalType == 5 || nalType == 7 || nalType == 8 {
 					isKey = true
 					break
@@ -117,8 +199,17 @@ func (d *TSDemuxer) flushVideo() {
 		}
 	}
 
+	if d.videoFrameCount <= 25 {
+		h := ""
+		for i := 0; i < len(frameData) && i < 16; i++ {
+			h += fmt.Sprintf("%02x ", frameData[i])
+		}
+		logger.Infof("[TRACE-1] TS→Input #%d: size=%d key=%v head=[%s]",
+			d.videoFrameCount, len(frameData), isKey, h)
+	}
+
 	if d.onVideo != nil {
-		d.onVideo(payload, isKey)
+		d.onVideo(frameData, isKey)
 	}
 }
 
@@ -129,10 +220,7 @@ func (d *TSDemuxer) flushAudio() {
 		return
 	}
 
-	payload := stripPESHeader(data)
-	if len(payload) == 0 {
-		return
-	}
+	payload := data
 
 	if len(payload) > 7 && payload[0] == 0xFF && (payload[1]&0xF0) == 0xF0 {
 		profile := int((payload[2] >> 6) & 0x03)
@@ -165,18 +253,23 @@ func (d *TSDemuxer) flushAudio() {
 
 func stripPESHeader(data []byte) []byte {
 	if len(data) < 9 {
+		logger.Debugf("stripPES: too short len=%d", len(data))
 		return data
 	}
 	if data[0] != 0 || data[1] != 0 || data[2] != 1 {
+		logger.Debugf("stripPES: no start code, first3=%02x%02x%02x", data[0], data[1], data[2])
 		return data
 	}
 	streamID := data[3]
 	if streamID < 0xC0 || streamID > 0xEF {
+		logger.Debugf("stripPES: not audio/video streamID=0x%02x", streamID)
 		return data
 	}
 	pesHeaderLen := int(data[8])
 	totalHeaderLen := 9 + pesHeaderLen
+	logger.Debugf("stripPES: streamID=0x%02x pesHeaderLen=%d totalHeaderLen=%d dataLen=%d", streamID, pesHeaderLen, totalHeaderLen, len(data))
 	if totalHeaderLen >= len(data) {
+		logger.Debugf("stripPES: header >= data, returning nil")
 		return nil
 	}
 	return data[totalHeaderLen:]

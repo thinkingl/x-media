@@ -17,22 +17,23 @@ import (
 )
 
 type RTSPOutput struct {
-	mu           sync.RWMutex
-	id           string
-	config       *OutputConfig
-	status       StreamStatus
-	cancel       context.CancelFunc
-	ctx          context.Context
-	stream       *gortsplib.ServerStream
-	h264Enc      *rtph264.Encoder
-	videoMedia   *description.Media
-	audioMedia   *description.Media
-	startTime    time.Time
-	sps          []byte
-	pps          []byte
-	audioConfig  []byte
-	streamReady  bool
-	rtspHandler  *RTSPServerHandler
+	mu              sync.RWMutex
+	id              string
+	config          *OutputConfig
+	status          StreamStatus
+	cancel          context.CancelFunc
+	ctx             context.Context
+	stream          *gortsplib.ServerStream
+	h264Enc         *rtph264.Encoder
+	videoMedia      *description.Media
+	audioMedia      *description.Media
+	startTime       time.Time
+	sps             []byte
+	pps             []byte
+	audioConfig     []byte
+	streamReady     bool
+	rtspHandler     *RTSPServerHandler
+	videoFrameCount int
 }
 
 func NewRTSPOutput(config *OutputConfig) (*RTSPOutput, error) {
@@ -182,9 +183,31 @@ func (r *RTSPOutput) WritePacket(pkt *MediaPacket) error {
 }
 
 func (r *RTSPOutput) writeVideo(pkt *MediaPacket) error {
+	r.videoFrameCount++
 	nalUnits := splitAnnexB(pkt.Data)
 	if len(nalUnits) == 0 {
 		return nil
+	}
+
+	if r.videoFrameCount <= 25 {
+		h := ""
+		for i := 0; i < len(pkt.Data) && i < 16; i++ {
+			h += fmt.Sprintf("%02x ", pkt.Data[i])
+		}
+		nalSummary := ""
+		for i, nal := range nalUnits {
+			if i >= 5 {
+				nalSummary += "..."
+				break
+			}
+			nt := byte(0)
+			if len(nal) > 0 {
+				nt = nal[0] & 0x1F
+			}
+			nalSummary += fmt.Sprintf("[type=%d size=%d]", nt, len(nal))
+		}
+		logger.Infof("[TRACE-3] Input→RTSP #%d: pktSize=%d nals=%d head=[%s] %s",
+			r.videoFrameCount, len(pkt.Data), len(nalUnits), h, nalSummary)
 	}
 
 	for _, nal := range nalUnits {
