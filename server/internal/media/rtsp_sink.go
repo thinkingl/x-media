@@ -217,14 +217,13 @@ func (r *RTSPSink) configureLocked(streams []StreamInfo) error {
 	r.stream = stream
 
 	path := "live/" + r.id
+	// 新 reader PLAY 后按路径注册回调（多 sink 共用同一 server 时互不覆盖）。
 	r.handler.mutex.Lock()
-	r.handler.paths[path] = &rtspPath{stream: stream}
+	r.handler.paths[path] = &rtspPath{
+		stream: stream,
+		onPlay: func(s *gortsplib.ServerStream) { r.sendParamsToStream(s) },
+	}
 	r.handler.mutex.Unlock()
-
-	// 新 reader PLAY 后异步重放完整 GOP，保证其探测窗口内拿到从关键帧开始的完整数据。
-	r.handler.SetOnReaderPlay(func(s *gortsplib.ServerStream) {
-		r.sendParamsToStream(s)
-	})
 
 	r.ready = true
 	logger.Infof("RTSP sink configured: %s, path: %s, medias: %d", r.id, path, len(medias))
@@ -238,6 +237,12 @@ func (r *RTSPSink) configureLocked(streams []StreamInfo) error {
 func (r *RTSPSink) sendParamsToStream(stream *gortsplib.ServerStream) {
 	if stream == nil {
 		return
+	}
+	r.mu.RLock()
+	own := r.stream
+	r.mu.RUnlock()
+	if own != stream {
+		return // 非本 sink 的 stream，防止向不匹配流发包
 	}
 	r.mu.RLock()
 	h265 := r.h265

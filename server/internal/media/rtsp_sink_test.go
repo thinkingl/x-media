@@ -411,3 +411,41 @@ func TestRTSPSink_HevcKeyframeIncludesParams(t *testing.T) {
 	assert.True(t, hasSPS, "cached keyframe should include SPS")
 	assert.True(t, hasPPS, "cached keyframe should include PPS")
 }
+
+// TestRTSPSink_MultiSinkSameServerPerPathCallback 回归：多 sink 共用同一 addr 的
+// RTSP server 时，PLAY 回调必须按 path 注册且互不覆盖；错误 stream 触发应被拦截。
+// 曾因全局 SetOnReaderPlay 被覆盖，导致向不匹配 stream 发包 nil 崩溃。
+func TestRTSPSink_MultiSinkSameServerPerPathCallback(t *testing.T) {
+	spsPps := []byte{
+		0x00, 0x00, 0x00, 0x01, 0x67, 0x42, 0x00, 0x0a, 0xe9, 0x40, 0x50, 0x1e, 0xd0, 0x80,
+		0x00, 0x00, 0x00, 0x01, 0x68, 0xce, 0x38, 0x80,
+	}
+	streams := []StreamInfo{
+		{ChannelID: 0, Kind: "video", CodecID: CodecH264, CodecName: "H264", ClockRate: 90000, CodecConfig: spsPps},
+	}
+
+	s1 := newRTSPTestSink(t)
+	defer s1.Stop()
+	s2 := newRTSPTestSink(t)
+	defer s2.Stop()
+
+	// 同一 addr → 共享同一个 handler/server
+	assert.Same(t, s1.handler, s2.handler, "same addr should share RTSP server")
+
+	require.NoError(t, s1.Configure(streams))
+	require.NoError(t, s2.Configure(streams))
+
+	s1.handler.mutex.RLock()
+	p1 := s1.handler.paths["live/"+s1.ID()]
+	p2 := s1.handler.paths["live/"+s2.ID()]
+	s1.handler.mutex.RUnlock()
+	require.NotNil(t, p1, "s1 path registered")
+	require.NotNil(t, p2, "s2 path registered")
+	require.NotNil(t, p1.onPlay, "s1 path has own callback")
+	require.NotNil(t, p2.onPlay, "s2 path has own callback")
+
+	// 防御：用 s1 的回调触发 s2 的 stream 不得 panic（sendParamsToStream 拦截非本流）
+	require.NotPanics(t, func() {
+		p1.onPlay(p2.stream)
+	}, "wrong-stream callback must be guarded")
+}

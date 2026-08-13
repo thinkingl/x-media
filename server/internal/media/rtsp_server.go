@@ -18,15 +18,15 @@ import (
 type rtspPath struct {
 	stream    *gortsplib.ServerStream
 	publisher *gortsplib.ServerSession
+	// onPlay 该路径新 reader PLAY 后的回调（按路径注册，避免多 sink 共用
+	// server 时全局回调被覆盖、错误 sink 向不匹配 stream 发包导致崩溃）。
+	onPlay func(stream *gortsplib.ServerStream)
 }
 
 type RTSPServerHandler struct {
 	server *gortsplib.Server
 	mutex  sync.RWMutex
 	paths  map[string]*rtspPath
-
-	// onReaderPlay 在新 reader 发起 PLAY 后回调（异步重放完整 GOP，保证 reader 立即能解码）。
-	onReaderPlay func(stream *gortsplib.ServerStream)
 }
 
 func NewRTSPServerHandler() *RTSPServerHandler {
@@ -37,13 +37,6 @@ func NewRTSPServerHandler() *RTSPServerHandler {
 
 func (h *RTSPServerHandler) SetServer(s *gortsplib.Server) {
 	h.server = s
-}
-
-// SetOnReaderPlay 注册新 reader PLAY 后的回调。
-func (h *RTSPServerHandler) SetOnReaderPlay(fn func(stream *gortsplib.ServerStream)) {
-	h.mutex.Lock()
-	defer h.mutex.Unlock()
-	h.onReaderPlay = fn
 }
 
 func (h *RTSPServerHandler) OnConnOpen(_ *gortsplib.ServerHandlerOnConnOpenCtx) {
@@ -156,12 +149,13 @@ func (h *RTSPServerHandler) OnPlay(ctx *gortsplib.ServerHandlerOnPlayCtx) (
 	// 延迟等待 PLAY 响应发出、reader 激活后再发送，保证 ffmpeg/VLC 探测窗口内收到关键帧。
 	h.mutex.RLock()
 	p, ok := h.paths[path]
-	fn := h.onReaderPlay
 	h.mutex.RUnlock()
-	if ok && p.stream != nil && fn != nil {
+	if ok && p.stream != nil && p.onPlay != nil {
+		fn := p.onPlay
+		st := p.stream
 		go func() {
 			time.Sleep(200 * time.Millisecond)
-			fn(p.stream)
+			fn(st)
 		}()
 	}
 
