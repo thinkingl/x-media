@@ -216,7 +216,7 @@ func (r *RTSPSink) configureLocked(streams []StreamInfo) error {
 	return nil
 }
 
-// sendParamsToStream 向指定 stream 发送 SPS/PPS 参数集。
+// sendParamsToStream 向指定 stream 发送 VPS/SPS/PPS 参数集。
 // 参数集 RTP 包极小，不会污染解码流；ffmpeg/VLC 收到后能初始化解码器，
 // 后续等下一个自然关键帧（≤GOP 间隔）即可完整解码。
 // 在新 reader PLAY 后调用。
@@ -358,11 +358,25 @@ func (r *RTSPSink) writeVideo(f *Frame, stream *gortsplib.ServerStream) error {
 	}
 
 	// 累积 GOP 缓存：关键帧开启新 GOP，其余帧追加。供新 reader 重放完整 GOP。
+	// H.265 关键帧需前置 VPS/SPS/PPS（HEVC 参数集只存在于 hvcC，不在 sample 数据里）。
 	r.mu.Lock()
 	r.lastVideoPTS = f.Header.PTS
 	if f.Header.Flags&FlagKeyframe != 0 {
-		r.gopFrames = []gopFrame{{payload: f.Payload, pts: f.Header.PTS}}
-		r.lastKeyframe = f.Payload
+		if h265 {
+			paramNals := make([][]byte, 0, 3+len(nalUnits))
+			if len(r.vps) > 0 {
+				paramNals = append(paramNals, r.vps)
+			}
+			if len(r.sps) > 0 {
+				paramNals = append(paramNals, r.sps)
+			}
+			if len(r.pps) > 0 {
+				paramNals = append(paramNals, r.pps)
+			}
+			nalUnits = append(paramNals, nalUnits...)
+		}
+		r.gopFrames = []gopFrame{{payload: joinNals(nalUnits), pts: f.Header.PTS}}
+		r.lastKeyframe = joinNals(nalUnits)
 		r.lastKeyframePTS = f.Header.PTS
 	} else if len(r.gopFrames) > 0 {
 		// 限制 GOP 缓存大小（约 2.5s GOP，几十帧）

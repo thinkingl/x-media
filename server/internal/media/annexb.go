@@ -57,3 +57,13 @@ func splitCodecConfigHevc(config []byte) (vps, sps, pps []byte) {
 	}
 	return vps, sps, pps
 }
+
+// joinNals 将 NAL 单元集合拼成 AnnexB(start code) 字节流。
+func joinNals(nals [][]byte) []byte {
+	var out []byte
+	for _, n := range nals {
+		out = append(out, 0x00, 0x00, 0x00, 0x01)
+		out = append(out, n...)
+	}
+	return out
+}

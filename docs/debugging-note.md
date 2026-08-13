@@ -147,6 +147,15 @@ SPS/PPS 参数集 RTP 包极小，不污染解码流：
 
 **验证**：同一 sink 在 H.264(1920x1080) 与 H.265(1280x720) 之间双向切换，均正常解码。
 
+**补充发现（H.265 参数集缺失）**：
+- H.265 的 VPS/SPS/PPS 只存在于 `hvcC` box，**不在 sample 数据里**；
+  而 H.264 文件常把 SPS/PPS 内嵌进每个 GOP 的 sample。
+- 仅做 H.265 格式协商还不够——RTSP 数据流里若不带 VPS/SPS/PPS，
+  HEVC 解码器无法初始化解码 → 黑屏 + `Could not find ref with POC`。
+- 修复：`RTSPSink.writeVideo` 在 H.265 **关键帧**时，把缓存的 VPS/SPS/PPS
+  前置到该帧 NAL 集合（`joinNals`）一起编码发送，保证每个 GOP 起点带参数集。
+- 验证：RTSP 流 NAL 分布含 VPS/SPS/PPS（每 GOP 前），frame=210 正常解码。
+
 ## 经验教训
 
 1. **不要甩锅给播放器/ffmpeg**。`h264 none`、花屏几乎总是服务端数据流问题。

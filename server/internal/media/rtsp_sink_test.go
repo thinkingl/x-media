@@ -338,3 +338,76 @@ func TestSplitCodecConfigHevc(t *testing.T) {
 		}
 	}
 }
+
+// TestRTSPSink_HevcKeyframeIncludesParams 验证 H.265 关键帧写流时前置 VPS/SPS/PPS。
+// HEVC 参数集只存在于 hvcC，不在 sample 数据；若关键帧不带参数集，解码器无法初始化 → 黑屏。
+func TestRTSPSink_HevcKeyframeIncludesParams(t *testing.T) {
+	src, err := NewMP4Source(&InputConfig{
+		ID:   "hevc_kf_" + t.Name(),
+		Type: "file",
+		Path: testFixturePath(t, "../../test/fixtures/h265_test.mp4"),
+		Loop: true,
+	})
+	require.NoError(t, err)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer func() { cancel(); src.Stop() }()
+	require.NoError(t, src.Start(ctx))
+
+	streams, _ := src.Streams()
+	var hevc *StreamInfo
+	for i := range streams {
+		if streams[i].Kind == "video" {
+			hevc = &streams[i]
+			break
+		}
+	}
+	require.NotNil(t, hevc)
+
+	sink := newRTSPTestSink(t)
+	defer sink.Stop()
+	require.NoError(t, sink.Configure([]StreamInfo{*hevc}))
+
+	// 写一个 H.265 关键帧（MP4Source 产出的首帧：只有 IDR slice，无参数集）
+	// 直接构造一个 IDR 帧（模拟 MP4Source 输出：不含 VPS/SPS/PPS）
+	idrFrame := &Frame{
+		Header: FrameHeader{
+			Magic:     FrameMagic,
+			Version:   FrameVersion,
+			ChannelID: 0,
+			FrameType: FrameTypeVideo,
+			Codec:     CodecH265,
+			Flags:     FlagKeyframe,
+			PTS:       1024,
+			DTS:       1024,
+		},
+		Payload: []byte{0x00, 0x00, 0x00, 0x01, 0x26, 0x01, 0xAF, 0x00}, // IDR_W_RADL 类型19 (26>>1=19)
+	}
+	require.NoError(t, sink.WriteFrame(idrFrame))
+
+	// writeVideo 内部在关键帧时前置 VPS/SPS/PPS。
+	// 验证 gopFrames 缓存的首帧含 VPS/SPS/PPS。
+	sink.mu.RLock()
+	require.NotEmpty(t, sink.gopFrames, "should cache GOP")
+	cached := sink.gopFrames[0].payload
+	sink.mu.RUnlock()
+
+	nals := splitAnnexB(cached)
+	var hasVPS, hasSPS, hasPPS bool
+	for _, n := range nals {
+		if len(n) < 2 {
+			continue
+		}
+		nt := (n[0] >> 1) & 0x3F
+		switch nt {
+		case 32:
+			hasVPS = true
+		case 33:
+			hasSPS = true
+		case 34:
+			hasPPS = true
+		}
+	}
+	assert.True(t, hasVPS, "cached keyframe should include VPS")
+	assert.True(t, hasSPS, "cached keyframe should include SPS")
+	assert.True(t, hasPPS, "cached keyframe should include PPS")
+}
