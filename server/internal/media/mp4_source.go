@@ -253,7 +253,65 @@ func selectBaseTrack(tracks []*mp4Track) *mp4Track {
 	return base
 }
 
-// readLoop 逐轨道推进一帧并推送到帧回调。
+// emitNext 推进 tr 一个 sample 并发出。返回是否产帧、是否读完。
+func (m *MP4Source) emitNext(tr *mp4Track, ws []byte, tick *int, first *bool) (emitted, done bool, err error) {
+	f, done, err := m.nextSample(tr)
+	if done || err != nil {
+		return false, done, err
+	}
+	if f == nil {
+		return false, false, nil
+	}
+	data, err := m.readSampleData(tr, ws)
+	if err != nil {
+		return false, false, err
+	}
+	if f.Header.FrameType == FrameTypeVideo {
+		data = avccToAnnexB(data)
+	}
+	f.Payload = data
+	f.Header.PayloadLen = uint32(len(data))
+	*tick++
+	if *first {
+		logger.Infof("MP4 source first frame [%s] type=%d ch=%d pts=%d size=%d", m.id, f.Header.FrameType, f.Header.ChannelID, f.Header.PTS, len(data))
+		*first = false
+	}
+	if *tick%300 == 0 {
+		logger.Infof("MP4 source heartbeat [%s] frames=%d", m.id, *tick)
+	}
+	m.emit(f)
+	return true, false, nil
+}
+
+// peekMediaAbs 返回 tr 下一个 sample 的绝对媒体时间（µs）；已读完或无 stts 返回 -1。
+// 用于非基准 track 按各自帧率对齐补发。
+func (m *MP4Source) peekMediaAbs(tr *mp4Track) int64 {
+	m.mu.RLock()
+	trak := tr.trak
+	sampleNr := tr.sampleNr
+	loopDur := tr.loopDur
+	ts := int(tr.timescale)
+	m.mu.RUnlock()
+	if trak == nil || trak.Mdia == nil || trak.Mdia.Minf == nil || trak.Mdia.Minf.Stbl == nil {
+		return -1
+	}
+	if sampleNr > trak.GetNrSamples() {
+		return -1
+	}
+	stts := trak.Mdia.Minf.Stbl.Stts
+	if stts == nil {
+		return -1
+	}
+	dts, _ := stts.GetDecodeTime(sampleNr)
+	media := int64(dts) + loopDur
+	if ts <= 0 {
+		ts = 90000
+	}
+	return ConvertClock(media, ts, 1000000)
+}
+
+// readLoop 逐轨道按各自帧率推进并推送帧：基准轨道每迭代一个 sample 驱动节流，
+// 其他轨道按媒体时间对齐补发，使音视频各按自身帧率平滑输出（避免同频突发/停顿）。
 func (m *MP4Source) readLoop(ctx context.Context) {
 	defer close(m.done)
 	ws := make([]byte, 0, 512*1024)
@@ -293,6 +351,14 @@ func (m *MP4Source) readLoop(ctx context.Context) {
 
 		baseDone = false
 		emitted := false
+
+		// 迭代时钟：基准 track 下一个 sample 的绝对媒体时间（µs）。
+		// 非基准 track 在本迭代内补发到媒体时间追上该时钟，保持各自帧率。
+		baseClock := int64(-1)
+		if base != nil {
+			baseClock = m.peekMediaAbs(base)
+		}
+
 		for _, tr := range tracks {
 			m.mu.RLock()
 			play := tr.play
@@ -301,42 +367,39 @@ func (m *MP4Source) readLoop(ctx context.Context) {
 				continue
 			}
 
-			f, done, err := m.nextSample(tr)
-			if done {
-				// 仅基准 track 读完触发回绕；其他 track 读完静默等待基准。
-				if tr == base {
-					baseDone = true
+			if tr != base {
+				// 非基准 track：按自身帧率补发，直到媒体时间追上基准时钟。
+				for {
+					media := m.peekMediaAbs(tr)
+					if media < 0 || (baseClock >= 0 && media > baseClock) {
+						break
+					}
+					e, done, err := m.emitNext(tr, ws, &tick, &first)
+					if err != nil {
+						logger.Errorf("MP4 source read error [%s]: %v", m.id, err)
+						exitReason = "nextSample error: " + err.Error()
+						return
+					}
+					if done {
+						break // 防御：peek 已返回 -1
+					}
+					emitted = emitted || e
 				}
 				continue
 			}
+
+			// 基准 track：每迭代一个 sample。
+			e, done, err := m.emitNext(tr, ws, &tick, &first)
 			if err != nil {
 				logger.Errorf("MP4 source read error [%s]: %v", m.id, err)
 				exitReason = "nextSample error: " + err.Error()
 				return
 			}
-			if f != nil {
-				data, err := m.readSampleData(tr, ws)
-				if err != nil {
-					logger.Errorf("MP4 source sample read error [%s] track=%s sampleNr=%d: %v", m.id, tr.info.Kind, tr.sampleNr, err)
-					exitReason = "readSampleData error: " + err.Error()
-					return
-				}
-				if f.Header.FrameType == FrameTypeVideo {
-					data = avccToAnnexB(data)
-				}
-				f.Payload = data
-				f.Header.PayloadLen = uint32(len(data))
-				tick++
-				emitted = true
-				if first {
-					logger.Infof("MP4 source first frame [%s] type=%d ch=%d pts=%d size=%d", m.id, f.Header.FrameType, f.Header.ChannelID, f.Header.PTS, len(data))
-					first = false
-				}
-				if tick%300 == 0 {
-					logger.Infof("MP4 source heartbeat [%s] frames=%d", m.id, tick)
-				}
-				m.emit(f)
+			if done {
+				baseDone = true
+				continue
 			}
+			emitted = emitted || e
 		}
 
 		if !emitted && !baseDone {

@@ -150,13 +150,13 @@ func TestE2E_RTSP_VideoIntegrity(t *testing.T) {
 	args := []string{
 		"-rtsp_transport", "tcp",
 		"-i", p.rtspURL(),
-		"-t", "10",
+		"-t", "30", // 3 个 10s 循环周期，覆盖多次 loop 回绕
 		"-an",
 		"-vf", "crop=720:64:0:0,format=gray",
 		"-pix_fmt", "gray",
 		"-f", "rawvideo", "-",
 	}
-	data := runFFmpeg(t, args, 60*time.Second)
+	data := runFFmpeg(t, args, 90*time.Second)
 
 	crop := meta.Video.Crop
 	frameSize := crop.W * crop.H
@@ -169,15 +169,16 @@ func TestE2E_RTSP_VideoIntegrity(t *testing.T) {
 	}
 
 	rep := verify.VerifyVideo(frames, meta, true)
-	t.Logf("视频报告: 解码=%d 有效=%d 损坏=%d join遗漏=%d 丢帧=%d 重复=%d 主色不符=%d 首帧=%d 末帧=%d",
+	t.Logf("视频报告: 解码=%d 有效=%d 损坏=%d join遗漏=%d 丢帧=%d 重复=%d 回绕=%d 主色不符=%d 首帧=%d 末帧=%d",
 		rep.TotalDecoded, rep.OKFrames, rep.CorruptFrames, rep.JoinMissed,
-		rep.LostFrames, rep.DuplicateFrames, rep.BgMismatch, rep.FirstOKFrame, rep.LastOKFrame)
+		rep.LostFrames, rep.DuplicateFrames, rep.WrapCount, rep.BgMismatch, rep.FirstOKFrame, rep.LastOKFrame)
 
 	if !rep.Pass {
-		t.Fatalf("视频序列校验失败: 丢帧=%d 重复=%d", rep.LostFrames, rep.DuplicateFrames)
+		t.Fatalf("视频序列校验失败: 丢帧=%d 重复=%d (回绕=%d, 允许 %d)",
+			rep.LostFrames, rep.DuplicateFrames, rep.WrapCount, rep.WrapCount*2)
 	}
-	if rep.OKFrames < 200 {
-		t.Fatalf("有效帧过少: %d (应 >=200)", rep.OKFrames)
+	if rep.OKFrames < 700 {
+		t.Fatalf("有效帧过少: %d (3 周期应 >=700)", rep.OKFrames)
 	}
 	if rep.CorruptFrames > 10 {
 		t.Fatalf("损坏帧过多: %d (应 <=10)", rep.CorruptFrames)
