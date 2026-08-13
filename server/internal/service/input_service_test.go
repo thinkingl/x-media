@@ -53,7 +53,6 @@ func (m *MockInputRepo) UpdateMediaInfo(id string, mediaInfo string) error {
 	return args.Error(0)
 }
 
-
 // MockMediaEngine 模拟媒体引擎
 type MockMediaEngine struct {
 	mock.Mock
@@ -138,7 +137,7 @@ func TestInputService_Create(t *testing.T) {
 		// Arrange
 		mockRepo := new(MockInputRepo)
 		mockEngine := new(MockMediaEngine)
-		svc := NewInputService(mockRepo, mockEngine)
+		svc := NewInputService(mockRepo, mockEngine, new(MockPipeRepo), new(MockOutputRepo))
 
 		req := &CreateInputRequest{
 			Name:   "测试MP4",
@@ -165,7 +164,7 @@ func TestInputService_Create(t *testing.T) {
 		// Arrange
 		mockRepo := new(MockInputRepo)
 		mockEngine := new(MockMediaEngine)
-		svc := NewInputService(mockRepo, mockEngine)
+		svc := NewInputService(mockRepo, mockEngine, new(MockPipeRepo), new(MockOutputRepo))
 
 		req := &CreateInputRequest{
 			Name:   "测试RTSP",
@@ -189,7 +188,7 @@ func TestInputService_Create(t *testing.T) {
 		// Arrange
 		mockRepo := new(MockInputRepo)
 		mockEngine := new(MockMediaEngine)
-		svc := NewInputService(mockRepo, mockEngine)
+		svc := NewInputService(mockRepo, mockEngine, new(MockPipeRepo), new(MockOutputRepo))
 
 		req := &CreateInputRequest{
 			Type:   "file",
@@ -209,7 +208,7 @@ func TestInputService_Create(t *testing.T) {
 		// Arrange
 		mockRepo := new(MockInputRepo)
 		mockEngine := new(MockMediaEngine)
-		svc := NewInputService(mockRepo, mockEngine)
+		svc := NewInputService(mockRepo, mockEngine, new(MockPipeRepo), new(MockOutputRepo))
 
 		req := &CreateInputRequest{
 			Name:   "测试",
@@ -232,7 +231,7 @@ func TestInputService_GetByID(t *testing.T) {
 		// Arrange
 		mockRepo := new(MockInputRepo)
 		mockEngine := new(MockMediaEngine)
-		svc := NewInputService(mockRepo, mockEngine)
+		svc := NewInputService(mockRepo, mockEngine, new(MockPipeRepo), new(MockOutputRepo))
 
 		expected := &model.Input{
 			ID:   "input_001",
@@ -255,7 +254,7 @@ func TestInputService_GetByID(t *testing.T) {
 		// Arrange
 		mockRepo := new(MockInputRepo)
 		mockEngine := new(MockMediaEngine)
-		svc := NewInputService(mockRepo, mockEngine)
+		svc := NewInputService(mockRepo, mockEngine, new(MockPipeRepo), new(MockOutputRepo))
 
 		mockRepo.On("GetByID", "nonexistent").Return(nil, assert.AnError)
 
@@ -274,7 +273,7 @@ func TestInputService_Delete(t *testing.T) {
 		// Arrange
 		mockRepo := new(MockInputRepo)
 		mockEngine := new(MockMediaEngine)
-		svc := NewInputService(mockRepo, mockEngine)
+		svc := NewInputService(mockRepo, mockEngine, new(MockPipeRepo), new(MockOutputRepo))
 
 		existing := &model.Input{
 			ID:     "input_001",
@@ -299,7 +298,7 @@ func TestInputService_Delete(t *testing.T) {
 		// Arrange
 		mockRepo := new(MockInputRepo)
 		mockEngine := new(MockMediaEngine)
-		svc := NewInputService(mockRepo, mockEngine)
+		svc := NewInputService(mockRepo, mockEngine, new(MockPipeRepo), new(MockOutputRepo))
 
 		existing := &model.Input{
 			ID:     "input_001",

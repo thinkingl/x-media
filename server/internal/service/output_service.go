@@ -1,7 +1,6 @@
 package service
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 
@@ -15,13 +14,15 @@ import (
 
 // OutputService 输出端服务
 type OutputService struct {
-	repo   repository.OutputRepository
-	engine media.Engine
+	repo      repository.OutputRepository
+	engine    media.Engine
+	pipeRepo  repository.PipeRepository
+	inputRepo repository.InputRepository
 }
 
 // NewOutputService 创建输出端服务
-func NewOutputService(repo repository.OutputRepository, engine media.Engine) *OutputService {
-	return &OutputService{repo: repo, engine: engine}
+func NewOutputService(repo repository.OutputRepository, engine media.Engine, pipeRepo repository.PipeRepository, inputRepo repository.InputRepository) *OutputService {
+	return &OutputService{repo: repo, engine: engine, pipeRepo: pipeRepo, inputRepo: inputRepo}
 }
 
 // CreateOutputRequest 创建输出端请求
@@ -130,34 +131,7 @@ func (s *OutputService) Start(id string) error {
 		return errors.NewValidationError("输出端已在运行中")
 	}
 
-	// 解析配置
-	var config model.OutputConfig
-	if err := json.Unmarshal([]byte(output.Config), &config); err != nil {
-		return errors.NewValidationError("配置格式错误")
-	}
-
-	// 创建媒体输出流
-	outputConfig := &media.OutputConfig{
-		ID:        output.ID,
-		Type:      output.Type,
-		URL:       config.URL,
-		Addr:      config.Addr,
-		Mode:      config.Mode,
-		Transport: config.Transport,
-	}
-
-	mediaOutput, err := s.engine.CreateOutput(outputConfig)
-	if err != nil {
-		return errors.NewInternalError(err)
-	}
-
-	// 启动输出流
-	if err := mediaOutput.Start(context.Background()); err != nil {
-		return errors.NewInternalError(err)
-	}
-
-	// 更新状态
-	return s.repo.UpdateStatus(id, model.OutputStatusRunning)
+	return startOutputOnly(s.engine, s.repo, id)
 }
 
 // Stop 停止输出端
@@ -171,13 +145,33 @@ func (s *OutputService) Stop(id string) error {
 		return errors.NewValidationError("输出端已停止")
 	}
 
-	// 从媒体引擎移除
+	// 从媒体引擎移除（同时断开其所有管道）
 	if err := s.engine.RemoveOutput(id); err != nil {
 		logger.Warnf("从媒体引擎移除输出端失败: %v", err)
 	}
 
 	// 更新状态
-	return s.repo.UpdateStatus(id, model.OutputStatusStopped)
+	if err := s.repo.UpdateStatus(id, model.OutputStatusStopped); err != nil {
+		return err
+	}
+
+	// 级联：其管道全部置 stopped；相应输入若无其他运行管道引用则一并停止。
+	pipes, err := s.pipeRepo.GetByOutputID(id)
+	if err != nil {
+		logger.Warnf("查询输出管道失败 %s: %v", id, err)
+		return nil
+	}
+	for i := range pipes {
+		p := &pipes[i]
+		if p.Status != model.PipeStatusRunning {
+			continue
+		}
+		if err := s.pipeRepo.UpdateStatus(p.ID, model.PipeStatusStopped); err != nil {
+			logger.Warnf("更新管道状态失败 %s: %v", p.ID, err)
+		}
+		stopOrphanedInput(s.engine, s.inputRepo, s.pipeRepo, p.InputID)
+	}
+	return nil
 }
 
 // 辅助函数

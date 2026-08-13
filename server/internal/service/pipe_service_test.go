@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -296,6 +297,8 @@ func TestPipeService_Start(t *testing.T) {
 		mockEngine.On("StartInput", "input_001").Return(nil)
 		mockEngine.On("StartPipe", "input_001", "output_001").Return(nil)
 		mockPipeRepo.On("UpdateStatus", "pipe_001", model.PipeStatusRunning).Return(nil)
+		mockInputRepo.On("UpdateStatus", "input_001", model.InputStatusRunning).Return(nil)
+		mockOutputRepo.On("UpdateStatus", "output_001", model.OutputStatusRunning).Return(nil)
 
 		err := svc.Start("pipe_001")
 
@@ -328,4 +331,131 @@ func TestPipeService_Start(t *testing.T) {
 		assert.Error(t, err)
 		mockPipeRepo.AssertNotCalled(t, "UpdateStatus")
 	})
+}
+
+// TestPipeService_Stop_StopsOrphanedIO 停止管道后，无其他运行管道引用的输入/输出应被停止并同步状态。
+func TestPipeService_Stop_StopsOrphanedIO(t *testing.T) {
+	mockPipeRepo := new(MockPipeRepo)
+	mockInputRepo := new(MockInputRepo)
+	mockOutputRepo := new(MockOutputRepo)
+	mockEngine := new(MockMediaEngine)
+	svc := NewPipeService(mockPipeRepo, mockInputRepo, mockOutputRepo, mockEngine)
+
+	pipe := &model.Pipe{ID: "pipe_001", InputID: "input_001", OutputID: "output_001", Status: model.PipeStatusRunning}
+	mockPipeRepo.On("GetByID", "pipe_001").Return(pipe, nil)
+	mockEngine.On("Disconnect", "input_001", "output_001").Return(nil)
+	mockPipeRepo.On("UpdateStatus", "pipe_001", model.PipeStatusStopped).Return(nil)
+	mockPipeRepo.On("GetByInputID", "input_001").Return([]model.Pipe{{ID: "pipe_001", InputID: "input_001", OutputID: "output_001", Status: model.PipeStatusStopped}}, nil)
+	mockPipeRepo.On("GetByOutputID", "output_001").Return([]model.Pipe{{ID: "pipe_001", InputID: "input_001", OutputID: "output_001", Status: model.PipeStatusStopped}}, nil)
+	mockEngine.On("RemoveInput", "input_001").Return(nil)
+	mockEngine.On("RemoveOutput", "output_001").Return(nil)
+	mockInputRepo.On("UpdateStatus", "input_001", model.InputStatusStopped).Return(nil)
+	mockOutputRepo.On("UpdateStatus", "output_001", model.OutputStatusStopped).Return(nil)
+
+	err := svc.Stop("pipe_001")
+	assert.NoError(t, err)
+	mockEngine.AssertCalled(t, "RemoveInput", "input_001")
+	mockEngine.AssertCalled(t, "RemoveOutput", "output_001")
+	mockInputRepo.AssertCalled(t, "UpdateStatus", "input_001", model.InputStatusStopped)
+	mockOutputRepo.AssertCalled(t, "UpdateStatus", "output_001", model.OutputStatusStopped)
+}
+
+// TestPipeService_Stop_KeepsSharedIO 输入/输出仍被其他运行管道引用时不应被停止。
+func TestPipeService_Stop_KeepsSharedIO(t *testing.T) {
+	mockPipeRepo := new(MockPipeRepo)
+	mockInputRepo := new(MockInputRepo)
+	mockOutputRepo := new(MockOutputRepo)
+	mockEngine := new(MockMediaEngine)
+	svc := NewPipeService(mockPipeRepo, mockInputRepo, mockOutputRepo, mockEngine)
+
+	pipe := &model.Pipe{ID: "pipe_001", InputID: "input_001", OutputID: "output_001", Status: model.PipeStatusRunning}
+	other := &model.Pipe{ID: "pipe_002", InputID: "input_001", OutputID: "output_002", Status: model.PipeStatusRunning}
+	mockPipeRepo.On("GetByID", "pipe_001").Return(pipe, nil)
+	mockEngine.On("Disconnect", "input_001", "output_001").Return(nil)
+	mockPipeRepo.On("UpdateStatus", "pipe_001", model.PipeStatusStopped).Return(nil)
+	// input 仍有另一运行管道；output_001 无其他运行管道 → 只停 output
+	mockPipeRepo.On("GetByInputID", "input_001").Return([]model.Pipe{{ID: "pipe_001", InputID: "input_001", OutputID: "output_001", Status: model.PipeStatusStopped}, *other}, nil)
+	mockPipeRepo.On("GetByOutputID", "output_001").Return([]model.Pipe{{ID: "pipe_001", InputID: "input_001", OutputID: "output_001", Status: model.PipeStatusStopped}}, nil)
+	mockEngine.On("RemoveOutput", "output_001").Return(nil)
+	mockOutputRepo.On("UpdateStatus", "output_001", model.OutputStatusStopped).Return(nil)
+
+	err := svc.Stop("pipe_001")
+	assert.NoError(t, err)
+	mockEngine.AssertNotCalled(t, "RemoveInput", "input_001")
+	mockEngine.AssertCalled(t, "RemoveOutput", "output_001")
+}
+
+// TestPipeService_Stop_AlreadyStopped 重复停止报错。
+func TestPipeService_Stop_AlreadyStopped(t *testing.T) {
+	mockPipeRepo := new(MockPipeRepo)
+	mockInputRepo := new(MockInputRepo)
+	mockOutputRepo := new(MockOutputRepo)
+	mockEngine := new(MockMediaEngine)
+	svc := NewPipeService(mockPipeRepo, mockInputRepo, mockOutputRepo, mockEngine)
+
+	pipe := &model.Pipe{ID: "pipe_001", Status: model.PipeStatusStopped}
+	mockPipeRepo.On("GetByID", "pipe_001").Return(pipe, nil)
+
+	err := svc.Stop("pipe_001")
+	assert.Error(t, err)
+	mockEngine.AssertNotCalled(t, "Disconnect")
+}
+
+// TestInputService_Stop_CascadePipes 停止输入后其运行中的管道应置 stopped，输出级联停止。
+func TestInputService_Stop_CascadePipes(t *testing.T) {
+	mockInputRepo := new(MockInputRepo)
+	mockPipeRepo := new(MockPipeRepo)
+	mockOutputRepo := new(MockOutputRepo)
+	mockEngine := new(MockMediaEngine)
+	svc := NewInputService(mockInputRepo, mockEngine, mockPipeRepo, mockOutputRepo)
+
+	input := &model.Input{ID: "input_001", Status: model.InputStatusRunning}
+	pipe := &model.Pipe{ID: "pipe_001", InputID: "input_001", OutputID: "output_001", Status: model.PipeStatusRunning}
+	mockInputRepo.On("GetByID", "input_001").Return(input, nil)
+	mockEngine.On("RemoveInput", "input_001").Return(nil)
+	mockInputRepo.On("UpdateStatus", "input_001", model.InputStatusStopped).Return(nil)
+	mockPipeRepo.On("GetByInputID", "input_001").Return([]model.Pipe{*pipe}, nil)
+	mockPipeRepo.On("UpdateStatus", "pipe_001", model.PipeStatusStopped).Return(nil)
+	mockPipeRepo.On("GetByOutputID", "output_001").Return([]model.Pipe{{ID: "pipe_001", InputID: "input_001", OutputID: "output_001", Status: model.PipeStatusStopped}}, nil)
+	mockEngine.On("RemoveOutput", "output_001").Return(nil)
+	mockOutputRepo.On("UpdateStatus", "output_001", model.OutputStatusStopped).Return(nil)
+
+	err := svc.Stop("input_001")
+	assert.NoError(t, err)
+	mockPipeRepo.AssertCalled(t, "UpdateStatus", "pipe_001", model.PipeStatusStopped)
+	mockOutputRepo.AssertCalled(t, "UpdateStatus", "output_001", model.OutputStatusStopped)
+}
+
+// TestPipeService_Restore 恢复运行中的管道并同步状态。
+func TestPipeService_Restore(t *testing.T) {
+	mockPipeRepo := new(MockPipeRepo)
+	mockInputRepo := new(MockInputRepo)
+	mockOutputRepo := new(MockOutputRepo)
+	mockEngine := new(MockMediaEngine)
+	svc := NewPipeService(mockPipeRepo, mockInputRepo, mockOutputRepo, mockEngine)
+
+	runningPipe := &model.Pipe{ID: "pipe_001", InputID: "input_001", OutputID: "output_001", Status: model.PipeStatusRunning}
+	stoppedPipe := &model.Pipe{ID: "pipe_002", InputID: "input_002", OutputID: "output_002", Status: model.PipeStatusStopped}
+	input := &model.Input{ID: "input_001", Name: "输入", Type: "file", Config: `{"path":"/tmp/t.mp4"}`}
+	output := &model.Output{ID: "output_001", Name: "输出", Type: "http-flv", Config: `{"addr":":8080"}`}
+
+	mockPipeRepo.On("GetAll").Return([]model.Pipe{*runningPipe, *stoppedPipe}, nil)
+	mockInputRepo.On("GetByID", "input_001").Return(input, nil).Twice() // startPipe + 独立检查
+	mockOutputRepo.On("GetByID", "output_001").Return(output, nil).Twice()
+	mockEngine.On("CreateInput", mock.Anything).Return(nil, nil)
+	mockEngine.On("CreateOutput", mock.Anything).Return(nil, nil)
+	mockEngine.On("Connect", "input_001", "output_001").Return(nil)
+	mockEngine.On("StartOutput", "output_001").Return(nil)
+	mockEngine.On("StartInput", "input_001").Return(nil)
+	mockEngine.On("StartPipe", "input_001", "output_001").Return(nil)
+	mockInputRepo.On("UpdateStatus", "input_001", model.InputStatusRunning).Return(nil)
+	mockOutputRepo.On("UpdateStatus", "output_001", model.OutputStatusRunning).Return(nil)
+	// 独立 input/output 循环的 GetAll
+	mockInputRepo.On("GetAll").Return([]model.Input{}, nil)
+	mockOutputRepo.On("GetAll").Return([]model.Output{}, nil)
+
+	err := svc.Restore(context.Background())
+	assert.NoError(t, err)
+	mockEngine.AssertCalled(t, "StartPipe", "input_001", "output_001")
+	mockInputRepo.AssertCalled(t, "UpdateStatus", "input_001", model.InputStatusRunning)
 }

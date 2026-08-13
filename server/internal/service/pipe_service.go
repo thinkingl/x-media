@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"encoding/json"
 
 	"github.com/x-media/x-media-server/internal/media"
@@ -153,6 +154,22 @@ func (s *PipeService) Start(id string) error {
 		return errors.NewValidationError("管道已在运行中")
 	}
 
+	if err := s.startPipe(pipe); err != nil {
+		return err
+	}
+
+	// 同步上下游状态：输入/输出已随管道启动，DB 与引擎保持一致。
+	if err := s.inputRepo.UpdateStatus(pipe.InputID, model.InputStatusRunning); err != nil {
+		logger.Warnf("更新输入状态失败 %s: %v", pipe.InputID, err)
+	}
+	if err := s.outputRepo.UpdateStatus(pipe.OutputID, model.OutputStatusRunning); err != nil {
+		logger.Warnf("更新输出状态失败 %s: %v", pipe.OutputID, err)
+	}
+	return s.pipeRepo.UpdateStatus(id, model.PipeStatusRunning)
+}
+
+// startPipe 执行管道引擎级启动（不做 DB 状态校验），供 Start 与启动恢复复用。
+func (s *PipeService) startPipe(pipe *model.Pipe) error {
 	input, err := s.inputRepo.GetByID(pipe.InputID)
 	if err != nil {
 		return errors.NewNotFoundError("输入端", pipe.InputID)
@@ -218,8 +235,7 @@ func (s *PipeService) Start(id string) error {
 		// 配置失败（如 source 编码与 sink 不兼容）时返回错误，让前端/用户感知。
 		return errors.NewInternalError(err)
 	}
-
-	return s.pipeRepo.UpdateStatus(id, model.PipeStatusRunning)
+	return nil
 }
 
 // Stop 停止管道
@@ -239,5 +255,69 @@ func (s *PipeService) Stop(id string) error {
 	}
 
 	// 更新状态
-	return s.pipeRepo.UpdateStatus(id, model.PipeStatusStopped)
+	if err := s.pipeRepo.UpdateStatus(id, model.PipeStatusStopped); err != nil {
+		return err
+	}
+
+	// 停止不再被任何运行管道引用的输入/输出，保持 DB 与引擎一致。
+	stopOrphanedInput(s.engine, s.inputRepo, s.pipeRepo, pipe.InputID)
+	stopOrphanedOutput(s.engine, s.outputRepo, s.pipeRepo, pipe.OutputID)
+	return nil
+}
+
+// Restore 启动时根据 DB 中标记 running 的状态恢复媒体链路：
+//   - 恢复所有运行中的管道（连带创建并启动其输入/输出）；
+//   - 恢复无管道引用的独立运行输入/输出；
+//   - 恢复失败的项目置为 stopped，避免下次重启重复尝试。
+func (s *PipeService) Restore(ctx context.Context) error {
+	pipes, err := s.pipeRepo.GetAll()
+	if err != nil {
+		return errors.NewInternalError(err)
+	}
+	for i := range pipes {
+		p := &pipes[i]
+		if p.Status != model.PipeStatusRunning {
+			continue
+		}
+		if err := s.startPipe(p); err != nil {
+			logger.Warnf("恢复管道失败 %s(%s->%s): %v", p.ID, p.InputID, p.OutputID, err)
+			_ = s.pipeRepo.UpdateStatus(p.ID, model.PipeStatusStopped)
+			stopOrphanedInput(s.engine, s.inputRepo, s.pipeRepo, p.InputID)
+			stopOrphanedOutput(s.engine, s.outputRepo, s.pipeRepo, p.OutputID)
+			continue
+		}
+		_ = s.inputRepo.UpdateStatus(p.InputID, model.InputStatusRunning)
+		_ = s.outputRepo.UpdateStatus(p.OutputID, model.OutputStatusRunning)
+	}
+
+	inputs, err := s.inputRepo.GetAll()
+	if err != nil {
+		return errors.NewInternalError(err)
+	}
+	for i := range inputs {
+		in := &inputs[i]
+		if in.Status != model.InputStatusRunning || hasRunningPipeByInput(s.pipeRepo, in.ID) {
+			continue
+		}
+		if err := startInputOnly(s.engine, s.inputRepo, in.ID); err != nil {
+			logger.Warnf("恢复输入失败 %s: %v", in.ID, err)
+			_ = s.inputRepo.UpdateStatus(in.ID, model.InputStatusStopped)
+		}
+	}
+
+	outputs, err := s.outputRepo.GetAll()
+	if err != nil {
+		return errors.NewInternalError(err)
+	}
+	for i := range outputs {
+		out := &outputs[i]
+		if out.Status != model.OutputStatusRunning || hasRunningPipeByOutput(s.pipeRepo, out.ID) {
+			continue
+		}
+		if err := startOutputOnly(s.engine, s.outputRepo, out.ID); err != nil {
+			logger.Warnf("恢复输出失败 %s: %v", out.ID, err)
+			_ = s.outputRepo.UpdateStatus(out.ID, model.OutputStatusStopped)
+		}
+	}
+	return nil
 }

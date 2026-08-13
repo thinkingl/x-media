@@ -51,7 +51,7 @@ func TestOutputService_Create(t *testing.T) {
 		// Arrange
 		mockRepo := new(MockOutputRepo)
 		mockEngine := new(MockMediaEngine)
-		svc := NewOutputService(mockRepo, mockEngine)
+		svc := NewOutputService(mockRepo, mockEngine, new(MockPipeRepo), new(MockInputRepo))
 
 		req := &CreateOutputRequest{
 			Name:   "测试RTMP",
@@ -78,7 +78,7 @@ func TestOutputService_Create(t *testing.T) {
 		// Arrange
 		mockRepo := new(MockOutputRepo)
 		mockEngine := new(MockMediaEngine)
-		svc := NewOutputService(mockRepo, mockEngine)
+		svc := NewOutputService(mockRepo, mockEngine, new(MockPipeRepo), new(MockInputRepo))
 
 		req := &CreateOutputRequest{
 			Name:   "测试RTSP",
@@ -102,7 +102,7 @@ func TestOutputService_Create(t *testing.T) {
 		// Arrange
 		mockRepo := new(MockOutputRepo)
 		mockEngine := new(MockMediaEngine)
-		svc := NewOutputService(mockRepo, mockEngine)
+		svc := NewOutputService(mockRepo, mockEngine, new(MockPipeRepo), new(MockInputRepo))
 
 		req := &CreateOutputRequest{
 			Name:   "测试HTTP-FLV",
@@ -126,7 +126,7 @@ func TestOutputService_Create(t *testing.T) {
 		// Arrange
 		mockRepo := new(MockOutputRepo)
 		mockEngine := new(MockMediaEngine)
-		svc := NewOutputService(mockRepo, mockEngine)
+		svc := NewOutputService(mockRepo, mockEngine, new(MockPipeRepo), new(MockInputRepo))
 
 		req := &CreateOutputRequest{
 			Name:   "测试",
@@ -149,7 +149,7 @@ func TestOutputService_GetByID(t *testing.T) {
 		// Arrange
 		mockRepo := new(MockOutputRepo)
 		mockEngine := new(MockMediaEngine)
-		svc := NewOutputService(mockRepo, mockEngine)
+		svc := NewOutputService(mockRepo, mockEngine, new(MockPipeRepo), new(MockInputRepo))
 
 		expected := &model.Output{
 			ID:   "output_001",
@@ -172,7 +172,7 @@ func TestOutputService_GetByID(t *testing.T) {
 		// Arrange
 		mockRepo := new(MockOutputRepo)
 		mockEngine := new(MockMediaEngine)
-		svc := NewOutputService(mockRepo, mockEngine)
+		svc := NewOutputService(mockRepo, mockEngine, new(MockPipeRepo), new(MockInputRepo))
 
 		mockRepo.On("GetByID", "nonexistent").Return(nil, assert.AnError)
 
@@ -191,7 +191,7 @@ func TestOutputService_Delete(t *testing.T) {
 		// Arrange
 		mockRepo := new(MockOutputRepo)
 		mockEngine := new(MockMediaEngine)
-		svc := NewOutputService(mockRepo, mockEngine)
+		svc := NewOutputService(mockRepo, mockEngine, new(MockPipeRepo), new(MockInputRepo))
 
 		existing := &model.Output{
 			ID:     "output_001",
@@ -216,7 +216,7 @@ func TestOutputService_Delete(t *testing.T) {
 		// Arrange
 		mockRepo := new(MockOutputRepo)
 		mockEngine := new(MockMediaEngine)
-		svc := NewOutputService(mockRepo, mockEngine)
+		svc := NewOutputService(mockRepo, mockEngine, new(MockPipeRepo), new(MockInputRepo))
 
 		existing := &model.Output{
 			ID:     "output_001",

@@ -59,8 +59,8 @@ func main() {
 	pipeRepo := repository.NewPipeRepo(db)
 
 	// 初始化服务层
-	inputSvc := service.NewInputService(inputRepo, engine)
-	outputSvc := service.NewOutputService(outputRepo, engine)
+	inputSvc := service.NewInputService(inputRepo, engine, pipeRepo, outputRepo)
+	outputSvc := service.NewOutputService(outputRepo, engine, pipeRepo, inputRepo)
 	pipeSvc := service.NewPipeService(pipeRepo, inputRepo, outputRepo, engine)
 	statsSvc := service.NewStatsService(inputRepo, outputRepo, pipeRepo)
 	logSvc := service.NewLogService(&cfg.Log)
@@ -82,6 +82,11 @@ func main() {
 	}()
 
 	logger.Info(fmt.Sprintf("HTTP 服务已启动: %s", cfg.Server.HTTPAddr))
+
+	// 恢复上次运行状态：根据 DB 中标记 running 的管道/输入/输出重建媒体链路。
+	if err := pipeSvc.Restore(context.Background()); err != nil {
+		logger.Warnf("恢复运行状态失败: %v", err)
+	}
 
 	// 等待中断信号
 	quit := make(chan os.Signal, 1)
