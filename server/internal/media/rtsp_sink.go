@@ -4,12 +4,12 @@ import (
 	"context"
 	"fmt"
 	"sync"
-	"time"
 
 	"github.com/bluenviron/gortsplib/v5"
 	"github.com/bluenviron/gortsplib/v5/pkg/description"
 	"github.com/bluenviron/gortsplib/v5/pkg/format"
 	"github.com/bluenviron/gortsplib/v5/pkg/format/rtph264"
+	"github.com/bluenviron/gortsplib/v5/pkg/format/rtph265"
 	"github.com/pion/rtp"
 
 	"github.com/x-media/x-media-server/pkg/logger"
@@ -37,6 +37,8 @@ type RTSPSink struct {
 	handler *RTSPServerHandler
 	stream  *gortsplib.ServerStream
 	h264Enc *rtph264.Encoder
+	h265Enc *rtph265.Encoder
+	h265    bool         // 当前视频是否为 HEVC
 	vMedia  *description.Media
 	aMedia  *description.Media
 	videoClockRate int
@@ -45,9 +47,9 @@ type RTSPSink struct {
 	ready          bool
 	videoFrameCount int
 
-	sps           []byte     // 缓存的 SPS（周期性重发，供新 reader 快速解码）
+	sps           []byte     // 缓存的 SPS（供新 reader PLAY 时初始化）
 	pps           []byte
-	lastParamSend time.Time  // 上次发送 SPS/PPS 的时间
+	vps           []byte     // HEVC VPS（h265 时使用）
 	lastVideoPTS  int64      // 最近视频帧 PTS（供参数集 RTP 时间戳）
 	lastKeyframe  []byte     // 最近完整关键帧（含 SPS/PPS/IDR），新 reader 重放
 	lastKeyframePTS int64    // 关键帧原始 PTS
@@ -107,33 +109,66 @@ func (r *RTSPSink) configureLocked(streams []StreamInfo) error {
 	for _, s := range streams {
 		switch s.Kind {
 		case "video":
-			sps, pps := splitCodecConfigVideo(s.CodecConfig)
-			if len(sps) == 0 || len(pps) == 0 {
-				return fmt.Errorf("video stream %d missing SPS/PPS in codec config", s.ChannelID)
-			}
-			vMedia := &description.Media{
-				Type: description.MediaTypeVideo,
-				Formats: []format.Format{
-					&format.H264{
-						PayloadTyp:        96,
-						PacketizationMode: 1,
-						SPS:               sps,
-						PPS:               pps,
+			switch s.CodecID {
+			case CodecH265:
+				vps, sps, pps := splitCodecConfigHevc(s.CodecConfig)
+				if len(vps) == 0 || len(sps) == 0 || len(pps) == 0 {
+					return fmt.Errorf("video stream %d missing VPS/SPS/PPS in HEVC codec config", s.ChannelID)
+				}
+				vMedia := &description.Media{
+					Type: description.MediaTypeVideo,
+					Formats: []format.Format{
+						&format.H265{
+							PayloadTyp: 96,
+							VPS:        vps,
+							SPS:        sps,
+							PPS:        pps,
+						},
 					},
-				},
+				}
+				medias = append(medias, vMedia)
+				r.vMedia = vMedia
+				r.videoClockRate = s.ClockRate
+				if r.videoClockRate <= 0 {
+					r.videoClockRate = 90000
+				}
+				r.h265 = true
+				if err := r.initEncoder(); err != nil {
+					return err
+				}
+				r.vps = vps
+				r.sps = sps
+				r.pps = pps
+			default: // H.264 及默认
+				sps, pps := splitCodecConfigVideo(s.CodecConfig)
+				if len(sps) == 0 || len(pps) == 0 {
+					return fmt.Errorf("video stream %d missing SPS/PPS in codec config", s.ChannelID)
+				}
+				vMedia := &description.Media{
+					Type: description.MediaTypeVideo,
+					Formats: []format.Format{
+						&format.H264{
+							PayloadTyp:        96,
+							PacketizationMode: 1,
+							SPS:               sps,
+							PPS:               pps,
+						},
+					},
+				}
+				medias = append(medias, vMedia)
+				r.vMedia = vMedia
+				r.videoClockRate = s.ClockRate
+				if r.videoClockRate <= 0 {
+					r.videoClockRate = 90000
+				}
+				r.h265 = false
+				if err := r.initEncoder(); err != nil {
+					return err
+				}
+				r.vps = nil
+				r.sps = sps
+				r.pps = pps
 			}
-			medias = append(medias, vMedia)
-			r.vMedia = vMedia
-			r.videoClockRate = s.ClockRate
-			if r.videoClockRate <= 0 {
-				r.videoClockRate = 90000
-			}
-			if err := r.initEncoder(); err != nil {
-				return err
-			}
-			r.sps = sps
-			r.pps = pps
-			r.lastParamSend = time.Time{} // 下次 WriteFrame 时立即重发
 		case "audio":
 			aMedia, clockRate, sampleRate, err := buildAudioMedia(s)
 			if err != nil {
@@ -190,14 +225,22 @@ func (r *RTSPSink) sendParamsToStream(stream *gortsplib.ServerStream) {
 		return
 	}
 	r.mu.RLock()
-	enc := r.h264Enc
+	h265 := r.h265
+	var enc any
+	if h265 {
+		enc = r.h265Enc
+	} else {
+		enc = r.h264Enc
+	}
 	vMedia := r.vMedia
 	clock := r.videoClockRate
 	sps := r.sps
 	pps := r.pps
+	vps := r.vps
+	basePTS := r.lastVideoPTS
 	r.mu.RUnlock()
 
-	if enc == nil || vMedia == nil || len(sps) == 0 || len(pps) == 0 {
+	if enc == nil || vMedia == nil {
 		return
 	}
 	if clock <= 0 {
@@ -205,14 +248,30 @@ func (r *RTSPSink) sendParamsToStream(stream *gortsplib.ServerStream) {
 	}
 
 	// 参数集使用最近视频帧 PTS 作为时间戳基准（仅初始化用途，实际帧 PTS 由正常流提供）。
-	r.mu.RLock()
-	basePTS := r.lastVideoPTS
-	r.mu.RUnlock()
-
+	pts := uint32(To90k(basePTS, clock))
 	r.encodeMu.Lock()
 	defer r.encodeMu.Unlock()
-	pts := uint32(To90k(basePTS, clock))
-	pkts, err := enc.Encode([][]byte{sps, pps})
+
+	var params [][]byte
+	if h265 {
+		if len(vps) == 0 || len(sps) == 0 || len(pps) == 0 {
+			return
+		}
+		params = [][]byte{vps, sps, pps}
+	} else {
+		if len(sps) == 0 || len(pps) == 0 {
+			return
+		}
+		params = [][]byte{sps, pps}
+	}
+
+	var pkts []*rtp.Packet
+	var err error
+	if h265 {
+		pkts, err = enc.(*rtph265.Encoder).Encode(params)
+	} else {
+		pkts, err = enc.(*rtph264.Encoder).Encode(params)
+	}
 	if err != nil {
 		logger.Warnf("RTSP sink send params encode: %v", err)
 		return
@@ -221,10 +280,21 @@ func (r *RTSPSink) sendParamsToStream(stream *gortsplib.ServerStream) {
 		p.Timestamp = pts
 		stream.WritePacketRTP(vMedia, p)
 	}
-	logger.Infof("RTSP sink sent SPS/PPS to new reader [%s] pts=%d", r.id, pts)
+	logger.Infof("RTSP sink sent params to new reader [%s] h265=%v pts=%d", r.id, h265, pts)
 }
 
 func (r *RTSPSink) initEncoder() error {
+	if r.h265 {
+		if r.h265Enc != nil {
+			return nil
+		}
+		enc := &rtph265.Encoder{PayloadType: 96}
+		if err := enc.Init(); err != nil {
+			return fmt.Errorf("init H265 encoder: %w", err)
+		}
+		r.h265Enc = enc
+		return nil
+	}
 	if r.h264Enc != nil {
 		return nil
 	}
@@ -267,7 +337,13 @@ func (r *RTSPSink) WriteFrame(f *Frame) error {
 
 func (r *RTSPSink) writeVideo(f *Frame, stream *gortsplib.ServerStream) error {
 	r.mu.RLock()
-	enc := r.h264Enc
+	h265 := r.h265
+	var enc any
+	if h265 {
+		enc = r.h265Enc
+	} else {
+		enc = r.h264Enc
+	}
 	vMedia := r.vMedia
 	clock := r.videoClockRate
 	r.mu.RUnlock()
@@ -294,34 +370,17 @@ func (r *RTSPSink) writeVideo(f *Frame, stream *gortsplib.ServerStream) error {
 			r.gopFrames = append(r.gopFrames, gopFrame{payload: f.Payload, pts: f.Header.PTS})
 		}
 	}
-	needReplay := r.lastParamSend.IsZero() || time.Since(r.lastParamSend) > 2*time.Second
 	r.mu.Unlock()
-
-	// 周期性重发 SPS/PPS 参数集，保证新 reader 探测窗口内能初始化解码器。
-	// 只发参数集（极小），不重放数据帧（避免污染实时流导致花屏）。
-	if needReplay {
-		r.mu.RLock()
-		sps, pps := r.sps, r.pps
-		r.mu.RUnlock()
-		if len(sps) > 0 && len(pps) > 0 {
-			r.encodeMu.Lock()
-			paramPTS := uint32(To90k(f.Header.PTS, clock))
-			if pkts, err := enc.Encode([][]byte{sps, pps}); err == nil {
-				for _, p := range pkts {
-					p.Timestamp = paramPTS
-					stream.WritePacketRTP(vMedia, p)
-				}
-			}
-			r.encodeMu.Unlock()
-			r.mu.Lock()
-			r.lastParamSend = time.Now()
-			r.mu.Unlock()
-		}
-	}
 
 	pts := uint32(To90k(f.Header.PTS, clock))
 	r.encodeMu.Lock()
-	pkts, err := enc.Encode(nalUnits)
+	var pkts []*rtp.Packet
+	var err error
+	if h265 {
+		pkts, err = enc.(*rtph265.Encoder).Encode(nalUnits)
+	} else {
+		pkts, err = enc.(*rtph264.Encoder).Encode(nalUnits)
+	}
 	r.encodeMu.Unlock()
 	if err != nil {
 		logger.Errorf("RTSP sink H264 encode: %v", err)

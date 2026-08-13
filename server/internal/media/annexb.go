@@ -35,3 +35,25 @@ func splitAnnexB(data []byte) [][]byte {
 
 	return nalUnits
 }
+
+// splitCodecConfigHevc 从 HEVC CodecConfig(AnnexB) 分离 VPS/SPS/PPS。
+// HEVC NAL header 为 2 字节，nal_unit_type 取第 1 字节低 6 位：
+//
+//	32=VPS, 33=SPS, 34=PPS
+func splitCodecConfigHevc(config []byte) (vps, sps, pps []byte) {
+	for _, nal := range splitAnnexB(config) {
+		if len(nal) < 2 {
+			continue
+		}
+		nalType := nal[0]>>1 & 0x3F
+		switch nalType {
+		case 32:
+			vps = nal
+		case 33:
+			sps = nal
+		case 34:
+			pps = nal
+		}
+	}
+	return vps, sps, pps
+}

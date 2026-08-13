@@ -440,6 +440,10 @@ GET    /api/v1/logs/stream     WebSocket日志流
 - **fan-out（一对多）** 由 source 端管理多个 sink：每个 sink 独立缓冲队列 + 独立慢消费/丢帧策略，一个慢 sink 不阻塞其他 sink，也不阻塞输入 readLoop。
 - 缓冲满时丢帧并计数/上报，输入侧永不阻塞。
 
+**source 切换重新协商**：pipe.Start 时把 source 的 StreamInfo 传给 sink.Configure（重建 SDP/编码器）。
+切 source（如 H.264→H.265）时，重新 Configure 按新编码协商；Configure 失败则 pipe 启动失败并返回错误，
+避免 sink 用旧参数运行导致黑屏/解码失败。RTSPSink 支持 H.264 与 H.265 两种视频编码自动切换。
+
 ### 12.8 适配器
 
 **输入（媒体 → 标准）**
@@ -491,7 +495,8 @@ GET    /api/v1/logs/stream     WebSocket日志流
 
 - 转码（保留 ffmpeg 转码作为未来模块，不在数据通路上）。
 - 录制、集群、负载均衡。
-- 非 MP4 容器输入（FLV/TS 文件）与 H.265 之外的多编解码深度适配（mp4ff 对 H.265 支持良好，本期以 H.264 + AAC 为验收基线）。
+- 非 MP4 容器输入（FLV/TS 文件）与 H.264/H.265/AAC 之外的多编解码深度适配。
+- 已支持：文件输入 H.264（含 AAC）+ H.265（纯视频）；RTSP 输出端支持 H.264/H.265 自动协商（切 source 时按新编码重新配置 SDP/编码器）。
 
 ---
 

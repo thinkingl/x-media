@@ -215,7 +215,8 @@ func (s *PipeService) Start(id string) error {
 		logger.Warnf("启动输入流失败(可能已启动): %v", err)
 	}
 	if err := s.engine.StartPipe(pipe.InputID, pipe.OutputID); err != nil {
-		logger.Warnf("启动管道失败: %v", err)
+		// 配置失败（如 source 编码与 sink 不兼容）时返回错误，让前端/用户感知。
+		return errors.NewInternalError(err)
 	}
 
 	return s.pipeRepo.UpdateStatus(id, model.PipeStatusRunning)

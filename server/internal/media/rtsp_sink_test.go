@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/bluenviron/gortsplib/v5/pkg/description"
+	"github.com/bluenviron/gortsplib/v5/pkg/format"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -192,11 +193,12 @@ func TestRTSPSink_EndToEndPipe(t *testing.T) {
 	}, "frames written")
 }
 
-// TestRTSPSink_NoGOPDataReplay 验证 writeVideo 不重放历史 GOP 数据帧。
+// TestRTSPSink_NoGOPDataReplay 验证 writeVideo 不重放 GOP 数据帧、也不周期重发参数集。
 //
-// 曾修复的花屏 bug：RTSPSink 周期性重放整个 GOP（含 IDR + 后续 P 帧），
-// 历史数据帧与实时流交错，导致 ffmpeg/VLC 解码参考帧错位 → corrupted macroblock。
-// 修复后：只周期性重发 SPS/PPS 参数集，不重放数据帧。
+// 曾修复的花屏 bug：RTSPSink 周期性重发 SPS/PPS 参数集（每 2s），
+// 参数集作为独立 RTP AU 插入实时流，解码器收到后重新初始化但无 IDR，
+// 后续 P 帧参考失效 → 花屏/黑帧直到下个 IDR。
+// 修复后：只在 reader PLAY 时发一次参数集（sendParamsToStream），数据面不再插入。
 func TestRTSPSink_NoGOPDataReplay(t *testing.T) {
 	spsPps := []byte{
 		0x00, 0x00, 0x00, 0x01, 0x67, 0x42, 0x00, 0x0a, 0xe9, 0x40, 0x50, 0x1e, 0xd0, 0x80,
@@ -210,29 +212,26 @@ func TestRTSPSink_NoGOPDataReplay(t *testing.T) {
 	}))
 	require.True(t, sink.ready)
 
-	// 重置 lastParamSend，确保写首帧时周期参数集触发（与首帧一起发）。
-	sink.mu.Lock()
-	sink.lastParamSend = time.Time{}
-	sink.mu.Unlock()
+	// 写多个 P 帧（模拟数据面持续推送），验证不会因周期参数集/GOP 重放产生多余 RTP 包。
+	for i := 0; i < 5; i++ {
+		pFrame := testFrame(0, FrameTypeVideo, CodecH264, int64(i)*3000, []byte{0x00, 0x00, 0x00, 0x01, 0x41, 0x9a, 0x20})
+		require.NoError(t, sink.WriteFrame(pFrame))
+	}
 
-	// 写一个 P 帧
-	pFrame := testFrame(0, FrameTypeVideo, CodecH264, 3000, []byte{0x00, 0x00, 0x00, 0x01, 0x41, 0x9a, 0x20})
-	require.NoError(t, sink.WriteFrame(pFrame))
-
-	// 首帧 + 参数集：包数应很小（≤5）。
-	// 若错误地重放 GOP（几十帧），包数会远大于此。
 	sink.mu.RLock()
 	stream := sink.stream
 	sink.mu.RUnlock()
 	require.NotNil(t, stream)
 
+	// 5 个 P 帧，每个 1 个 RTP 包 = 5（无 reader 时 gortsplib 丢弃，可能 0）。
+	// 核心断言：无 GOP 重放/周期参数集产生的额外包（那会是几十到几百）。
 	total := stream.Stats().OutboundRTPPackets
 	assert.LessOrEqual(t, total, uint64(5),
-		"should only send frame + SPS/PPS, not replay GOP (got %d RTP packets)", total)
+		"should send only 5 P-frame RTP packets, no extra param/GOP replay (got %d)", total)
 }
 
-// TestRTSPSink_PeriodicParamSend 验证周期重发 SPS/PPS（而非数据帧）。
-func TestRTSPSink_PeriodicParamSend(t *testing.T) {
+// TestRTSPSink_NewReaderParams 验证新 reader PLAY 时 sendParamsToStream 只发 SPS/PPS。
+func TestRTSPSink_NewReaderParams(t *testing.T) {
 	spsPps := []byte{
 		0x00, 0x00, 0x00, 0x01, 0x67, 0x42, 0x00, 0x0a, 0xe9, 0x40, 0x50, 0x1e, 0xd0, 0x80,
 		0x00, 0x00, 0x00, 0x01, 0x68, 0xce, 0x38, 0x80,
@@ -244,24 +243,98 @@ func TestRTSPSink_PeriodicParamSend(t *testing.T) {
 		{ChannelID: 0, Kind: "video", CodecID: CodecH264, CodecName: "H264", ClockRate: 90000, CodecConfig: spsPps},
 	}))
 
-	// 已触发过一次参数集，设 lastParamSend 为过去时间，使下次 writeVideo 触发周期参数集。
-	sink.mu.Lock()
-	sink.lastParamSend = time.Now().Add(-3 * time.Second)
-	sink.mu.Unlock()
-
-	// 写一帧，触发周期参数集（SPS/PPS）+ 该帧本身
-	pFrame := testFrame(0, FrameTypeVideo, CodecH264, 3000, []byte{0x00, 0x00, 0x00, 0x01, 0x41, 0x9a, 0x20})
-	require.NoError(t, sink.WriteFrame(pFrame))
-
+	// 模拟新 reader PLAY：直接调用 sendParamsToStream
 	sink.mu.RLock()
 	stream := sink.stream
-	lastSend := sink.lastParamSend
 	sink.mu.RUnlock()
 	require.NotNil(t, stream)
 
-	// lastParamSend 应被更新（周期参数集确实触发了）
-	assert.False(t, lastSend.IsZero(), "periodic param send should update lastParamSend")
+	sink.sendParamsToStream(stream)
 
+	// 只发 SPS/PPS 参数集：≤2 个 RTP 包（不重放 GOP）
 	total := stream.Stats().OutboundRTPPackets
-	assert.LessOrEqual(t, total, uint64(5), "should send frame + SPS/PPS only, not GOP")
+	assert.LessOrEqual(t, total, uint64(2),
+		"new reader should get only SPS/PPS param packets, not GOP (got %d)", total)
+}
+
+// TestRTSPSink_ConfigureHevc 验证 RTSPSink 支持 HEVC 视频配置（source 切换场景）。
+func TestRTSPSink_ConfigureHevc(t *testing.T) {
+	// 用真实 H.265 文件提取 CodecConfig（VPS+SPS+PPS AnnexB）
+	src, err := NewMP4Source(&InputConfig{
+		ID:   "hevc_cfg_" + t.Name(),
+		Type: "file",
+		Path: testFixturePath(t, "../../test/fixtures/h265_test.mp4"),
+		Loop: true,
+	})
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer func() { cancel(); src.Stop() }()
+	require.NoError(t, src.Start(ctx))
+
+	streams, err := src.Streams()
+	require.NoError(t, err)
+	var hevcStream *StreamInfo
+	for i := range streams {
+		if streams[i].Kind == "video" {
+			hevcStream = &streams[i]
+			break
+		}
+	}
+	require.NotNil(t, hevcStream)
+	require.Equal(t, CodecH265, hevcStream.CodecID, "h265_test.mp4 should be HEVC")
+	require.NotEmpty(t, hevcStream.CodecConfig, "should extract HEVC config")
+
+	// 用提取的 HEVC 配置 RTSPSink
+	sink := newRTSPTestSink(t)
+	defer sink.Stop()
+	require.NoError(t, sink.Configure([]StreamInfo{*hevcStream}))
+	assert.True(t, sink.ready, "HEVC configure should succeed")
+	assert.True(t, sink.h265, "sink should be in H265 mode")
+
+	// SDP 应为 HEVC 媒体
+	sink.mu.RLock()
+	desc := sink.stream.Desc
+	sink.mu.RUnlock()
+	require.NotNil(t, desc)
+	var hevcFound bool
+	for _, m := range desc.Medias {
+		if m.Type == description.MediaTypeVideo {
+			for _, f := range m.Formats {
+				if _, ok := f.(*format.H265); ok {
+					hevcFound = true
+				}
+			}
+		}
+	}
+	assert.True(t, hevcFound, "SDP should contain H265 format")
+}
+
+// TestSplitCodecConfigHevc 验证 HEVC CodecConfig 参数集分离。
+func TestSplitCodecConfigHevc(t *testing.T) {
+	src, err := NewMP4Source(&InputConfig{
+		ID:   "hevc_split_" + t.Name(),
+		Type: "file",
+		Path: testFixturePath(t, "../../test/fixtures/h265_test.mp4"),
+		Loop: true,
+	})
+	require.NoError(t, err)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer func() { cancel(); src.Stop() }()
+	require.NoError(t, src.Start(ctx))
+
+	streams, _ := src.Streams()
+	for _, s := range streams {
+		if s.Kind == "video" {
+			vps, sps, pps := splitCodecConfigHevc(s.CodecConfig)
+			assert.NotEmpty(t, vps, "should extract VPS")
+			assert.NotEmpty(t, sps, "should extract SPS")
+			assert.NotEmpty(t, pps, "should extract PPS")
+			// VPS/SPS/PPS 的 HEVC NAL type
+			assert.Equal(t, byte(32), vps[0]>>1&0x3F, "VPS type 32")
+			assert.Equal(t, byte(33), sps[0]>>1&0x3F, "SPS type 33")
+			assert.Equal(t, byte(34), pps[0]>>1&0x3F, "PPS type 34")
+			break
+		}
+	}
 }

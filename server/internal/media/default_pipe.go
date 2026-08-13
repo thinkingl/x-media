@@ -90,12 +90,16 @@ func (p *DefaultPipe) Start(ctx context.Context) error {
 	p.stopped.Store(false)
 
 	// 协商：把 source 的媒体信息传给 sink 用于协议初始化。
-	if streams, err := p.source.Streams(); err == nil {
-		if err := p.sink.Configure(streams); err != nil {
-			logger.Warnf("pipe configure failed %s -> %s: %v", p.source.ID(), p.sink.ID(), err)
-		}
-	} else {
+	// 失败时回滚 started 并返回错误，避免 sink 用旧参数运行导致解码失败
+	//（如切换了不同编码的 source）。
+	if streams, err := p.source.Streams(); err != nil {
+		p.started = false
 		logger.Warnf("pipe streams fetch failed %s: %v", p.source.ID(), err)
+		return err
+	} else if err := p.sink.Configure(streams); err != nil {
+		p.started = false
+		logger.Errorf("pipe configure failed %s -> %s: %v", p.source.ID(), p.sink.ID(), err)
+		return err
 	}
 
 	go p.sinkWriter(ctx)
