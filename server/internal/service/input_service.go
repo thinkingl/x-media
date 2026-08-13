@@ -18,11 +18,11 @@ import (
 // InputService 输入端服务
 type InputService struct {
 	repo   repository.InputRepository
-	engine media.MediaEngine
+	engine media.Engine
 }
 
 // NewInputService 创建输入端服务
-func NewInputService(repo repository.InputRepository, engine media.MediaEngine) *InputService {
+func NewInputService(repo repository.InputRepository, engine media.Engine) *InputService {
 	return &InputService{repo: repo, engine: engine}
 }
 

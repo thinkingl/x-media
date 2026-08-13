@@ -4,155 +4,13 @@
 
 X-Media 是一个前后端分离的媒体流处理平台，支持多种媒体协议的输入输出，可以在输入输出端之间建立媒体流管道连接，并提供图形化的数据流监控和统计功能。
 
-## 2. 技术选型
+## 2. 技术选型（历史作废）
 
-### 2.1 前端技术栈
+> 本节及原第 3 节（旧 LAL 系统架构）已随架构重构作废。旧方案基于 LAL 媒体引擎 + ffmpeg 直读文件，已被第 12 节"媒体管道标准"取代。技术栈沿用 Go + Gin + GORM/SQLite + Vue3。
 
-**推荐：Vue3 + Vite + Element Plus**
+## 3. 系统架构（历史作废）
 
-| 方案 | 成熟度 | AI支持度 | 生态 | 推荐度 |
-|------|--------|----------|------|--------|
-| Vue3 + Vite + Element Plus | 高 | 优秀 (GitHub Copilot, Cursor) | 丰富 | ⭐⭐⭐⭐⭐ |
-| React + Next.js + Ant Design | 高 | 优秀 | 丰富 | ⭐⭐⭐⭐ |
-
-**选择 Vue3 的理由：**
-- 学习曲线平缓，文档完善
-- 中文社区活跃，资料丰富
-- AI 工具支持度好（Copilot、Cursor 等）
-- Element Plus 组件库成熟，适合后台管理系统
-- Vite 构建速度快
-
-### 2.2 后端技术栈
-
-- **语言**: Go 1.21+
-- **Web框架**: Gin
-- **ORM**: GORM
-- **数据库**: SQLite
-- **WebSocket**: gorilla/websocket
-- **日志**: zap
-- **配置**: viper
-
-### 2.3 流媒体中间件方案对比
-
-| 方案 | 协议支持 | Go集成 | 性能 | 复杂度 | 社区 | 推荐场景 |
-|------|----------|--------|------|--------|------|----------|
-| **LAL** | RTMP, RTSP, HLS, HTTP-FLV/TS, GB28181 | 原生Go库 | 高 | 低 | 中文社区 | 直播场景，快速开发 |
-| **FFmpeg** | 所有协议 | CGO或进程调用 | 最高 | 中 | 全球社区 | 需要转码，功能全面 |
-| **GStreamer** | 所有协议 | CGO | 高 | 高 | 全球社区 | 复杂媒体处理 |
-| **自研** | 按需实现 | 原生 | 可控 | 最高 | 无 | 特殊需求 |
-
-**推荐方案：LAL + FFmpeg 组合**
-
-1. **LAL 作为核心**：
-   - 纯 Go 实现，无 CGO 依赖
-   - 支持主流直播协议
-   - 代码清晰，易于扩展
-   - 可作为 Go 库直接调用
-
-2. **FFmpeg 作为补充**：
-   - 后期需要转码时引入
-   - 通过进程调用，避免 CGO 复杂性
-   - 支持几乎所有媒体格式
-
-3. **架构示意**：
-   ```
-   ┌─────────────────────────────────────────────────────────┐
-   │                      X-Media Platform                    │
-   ├─────────────────────────────────────────────────────────┤
-   │  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐     │
-   │  │   Input      │  │   Router    │  │   Output     │     │
-   │  │   Manager    │  │   (Pipe)    │  │   Manager    │     │
-   │  └──────┬───────┘  └──────┬──────┘  └──────┬───────┘     │
-   │         │                 │                 │             │
-   │  ┌──────▼─────────────────▼─────────────────▼───────┐   │
-   │  │              Media Engine (LAL)                   │   │
-   │  │  ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐ │   │
-   │  │  │  RTMP   │ │  RTSP   │ │  HLS    │ │ HTTP-FLV│ │   │
-   │  │  └─────────┘ └─────────┘ └─────────┘ └─────────┘ │   │
-   │  └───────────────────────────────────────────────────┘   │
-   │                          │                               │
-   │  ┌───────────────────────▼───────────────────────────┐   │
-   │  │              FFmpeg (后期引入)                      │   │
-   │  │         转码 / 格式转换 / 特殊处理                  │   │
-   │  └───────────────────────────────────────────────────┘   │
-   └─────────────────────────────────────────────────────────┘
-   ```
-
-## 3. 系统架构
-
-### 3.1 整体架构
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                        前端 (Vue3)                          │
-│  ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐          │
-│  │ 输入管理 │ │ 输出管理 │ │ 流程监控 │ │ 日志管理 │          │
-│  └────┬────┘ └────┬────┘ └────┬────┘ └────┬────┘          │
-│       │           │           │           │                 │
-│       └───────────┴───────────┴───────────┘                 │
-│                           │                                 │
-│                    RESTful API + WebSocket                  │
-└───────────────────────────┬─────────────────────────────────┘
-                            │
-┌───────────────────────────▼─────────────────────────────────┐
-│                      后端 (Go)                              │
-│  ┌─────────────────────────────────────────────────────┐   │
-│  │                   API Gateway (Gin)                  │   │
-│  └─────────────────────────────────────────────────────┘   │
-│                           │                                 │
-│  ┌───────────┬───────────┼───────────┬───────────┐         │
-│  │           │           │           │           │         │
-│  ▼           ▼           ▼           ▼           ▼         │
-│ ┌─────┐   ┌─────┐   ┌─────┐   ┌─────┐   ┌─────┐         │
-│ │Input│   │Output│  │ Pipe │   │Stats│   │ Log │         │
-│ │Svc  │   │ Svc  │  │ Svc  │   │ Svc │   │ Svc │         │
-│ └─────┘   └─────┘   └─────┘   └─────┘   └─────┘         │
-│                           │                                 │
-│  ┌─────────────────────────────────────────────────────┐   │
-│  │              Media Engine (LAL)                      │   │
-│  └─────────────────────────────────────────────────────┘   │
-│                           │                                 │
-│  ┌─────────────────────────────────────────────────────┐   │
-│  │              Storage (SQLite + GORM)                 │   │
-│  └─────────────────────────────────────────────────────┘   │
-└─────────────────────────────────────────────────────────────┘
-```
-
-### 3.2 核心模块
-
-#### 3.2.1 输入管理器 (Input Manager)
-- 管理各种协议的输入端
-- 支持的输入类型：
-  - 本地文件：MP4, FLV, TS 等
-  - 网络流：RTMP, RTSP, HLS, HTTP-FLV 等
-- 输入端生命周期管理（创建、启动、停止、删除）
-
-#### 3.2.2 输出管理器 (Output Manager)
-- 管理各种协议的输出端
-- 支持的输出类型：
-  - RTMP 推流
-  - RTSP 推流/服务
-  - HLS 切片
-  - HTTP-FLV/TS 服务
-  - 录制文件
-
-#### 3.2.3 管道服务 (Pipe Service)
-- 在输入输出端之间建立连接
-- 支持一对多、多对一映射
-- 流状态监控和错误恢复
-
-#### 3.2.4 统计服务 (Stats Service)
-- 实时流量统计
-- 连接数监控
-- 带宽使用情况
-- 帧率、码率统计
-
-#### 3.2.5 日志服务 (Log Service)
-- 结构化日志输出
-- 日志级别控制
-- 日志轮转配置
-- WebSocket 实时推送
-
+> 见第 12 节"媒体管道标准"。架构核心为：Source 适配层 → 标准帧/信令管道 → Sink 适配层。
 ## 4. 数据库设计
 
 ### 4.1 表结构
@@ -478,1402 +336,234 @@ GET    /api/v1/logs/stream     WebSocket日志流
 }
 ```
 
-## 6. 项目结构
+## 6. 项目结构与旧章节作废声明
+
+> 以下原第 6–11 节内容已作废，不再作为实现依据，仅保留第 4 节（数据库设计）与第 5 节（API 设计）作为契约参考：
+>
+> - 原第 6 节（项目结构）已过时，当前结构以代码库实际为准。
+> - 原第 7 节（第一步实现计划）已被第 12 节实施计划取代。
+> - 原第 8 节（非功能需求）核心指标保留：单机 ≥50 并发流、秒级延迟、流中断自动重连、配置持久化。
+> - 原第 9 节（后续扩展）保留：HLS/GB28181/WebRTC/SRT、转码、录制、集群、负载均衡。
+> - 原第 10 节（Docker 部署）以 `docker/Dockerfile` 与 `docker-compose.yml` 实际为准。
+> - 原第 11 节（旧测试方案）已被第 13 节"测试方案：Mock 三角验证"取代。
+## 12. 媒体管道标准（Media Pipe Standard）【定稿】
+
+> 本节取代第 3 节以来所有关于媒体引擎的实现描述，是当前与未来的实现依据。
+
+### 12.1 设计动机
+
+早期实现偏离了"管道转发"设计：输入端退化为只做元数据探测，RTMP/HTTP-FLV 输出改为直接读文件（`StartOutputWithFile`），仅 RTSP 输出走 Go 包通路，且依赖手写 H.264/TS 解析与伪造时间戳（`videoPTS += 33000`）。这造成两条互相矛盾的数据通路、N+1 个 ffmpeg 子进程、RTSP 输入空壳、音频丢失。
+
+**根本问题**：管道没有承担"中间标准"的职责，source 与 sink 通过具体实现直接耦合。
+
+**本标准的定位**：pipe 是 source 与 sink 之间唯一的标准契约，包含 **码流子通道 / 码流帧 / 信令** 三部分。任何 source（MP4/RTSP/未来 HLS/GB28181）与任何 sink（RTMP/RTSP/HTTP-FLV/录制器）只需适配该标准，即可互相通信，互不感知对方的具体协议。
+
+### 12.2 总体架构
 
 ```
-x-media/
-├── docs/                          # 文档
-│   └── design.md
-├── web/                           # 前端项目
-│   ├── src/
-│   │   ├── api/                   # API接口
-│   │   ├── components/            # 组件
-│   │   ├── views/                 # 页面
-│   │   ├── stores/                # 状态管理
-│   │   ├── utils/                 # 工具函数
-│   │   └── App.vue
-│   ├── package.json
-│   └── vite.config.js
-├── server/                        # 后端项目
-│   ├── cmd/                       # 入口
-│   │   └── main.go
-│   ├── internal/                  # 内部包
-│   │   ├── api/                   # API处理器
-│   │   ├── service/               # 业务逻辑
-│   │   ├── repository/            # 数据访问
-│   │   ├── model/                 # 数据模型
-│   │   ├── media/                 # 媒体引擎
-│   │   └── config/                # 配置
-│   ├── pkg/                       # 公共包
-│   │   ├── logger/                # 日志
-│   │   ├── errors/                # 错误处理
-│   │   └── utils/                 # 工具函数
-│   ├── go.mod
-│   └── go.sum
-├── scripts/                       # 脚本
-├── docker/                        # Docker配置
-├── Makefile
-└── README.md
+   Source 适配层                          Pipe（标准契约）                         Sink 适配层
+┌───────────────────┐   数据面（单向，高吞吐）   ┌──────────────────┐   数据面      ┌───────────────────┐
+│ MP4 (mp4ff)       │ ────标准码流帧/子通道───► │  子通道           │ ────────────► │ RTMP（原生Go）     │
+│ RTSP (gortsplib)  │                        │  码流帧（带PTS）   │               │ RTSP server      │
+│ (未来: HLS/GB)    │ ◄──信令（双向，低频）──── │  信令              │ ◄──────────── │ HTTP-FLV         │
+└───────────────────┘                        └──────────────────┘               │ 录制器            │
+      媒体→标准                                           标准→媒体              └───────────────────┘
 ```
 
-## 7. 第一步实现计划 (MP4 + RTSP)
+要点：
+- source 和 sink 只认识标准，互不认识；新增协议 = 新增适配器。
+- 数据面与控制面分离：数据面单向、高吞吐、低延迟；控制面双向、低频、可靠。
 
-### 7.1 功能范围
+### 12.3 子通道
 
-1. **输入端支持**：
-   - 本地 MP4 文件读取
-   - RTSP 流拉取
+- 每条媒体流对应一个 `StreamID`/`ChannelID`（`uint8`），`Kind` ∈ `video` / `audio` / `data`。
+- 保留 `control` 通道语义用于信令（见 12.5）。
+- 订阅（`Subscribe`）时可选择只订阅部分子通道（如 HTTP-FLV 不需要字幕）。
+- 子通道可动态增删：RTSP 源后到音轨、HLS 多层码流等场景，通过 `InfoUpdate` 事件通知。
 
-2. **输出端支持**：
-   - RTMP 推流
-   - RTSP 推流/服务
-   - HTTP-FLV 服务
+### 12.4 码流帧（数据面）
 
-3. **管道功能**：
-   - 输入到输出的流转发
-   - 基本状态管理
+帧为长度前缀二进制，自带自同步能力，天然可跨进程传输。
 
-4. **前端功能**：
-   - 输入端管理页面
-   - 输出端管理页面
-   - 管道管理页面
-   - 实时状态监控
+```
+┌──────────┬──────────┬─────────┬──────────┬────────┬───────┬──────┬──────┬──────────┬─────────────┐
+│ Magic 2B │Version 1B│ChanID 1B│FrameType │Codec 4B│Flags 1B│PTS 8B│DTS 8B│ PayloadLen│  Payload    │
+│  0x584D  │   0x02   │         │  1B      │        │        │      │      │  4B       │             │
+└──────────┴──────────┴─────────┴──────────┴────────┴───────┴──────┴──────┴──────────┴─────────────┘
+                                    FrameHeaderSize = 30
+```
 
-### 7.2 开发步骤
+- **一帧 = 一个 access unit**（H.264 一个 NAL 集合 / 一帧图像，AAC 一个原始帧）。
+- **时间戳**：`PTS`/`DTS` 使用**流内原生 timescale**（`StreamInfo.ClockRate`：video 默认 90000，audio = 采样率），`int64` 无回绕。sink 按 `ClockRate` 换算到目标时钟：
+  - RTMP/HTTP-FLV tag 时间戳（ms）= `PTS * 1000 / ClockRate`
+  - RTSP H.264 RTP 时间戳（90kHz）= `PTS * 90000 / ClockRate`
+  - RTSP AAC RTP 时间戳 = `PTS * SampleRate / ClockRate`
+- **Flags**：`Keyframe`、`Config`（携带 CodecConfig，用于动态源）、`EOF`。
+- 每个 access unit 的**精确切分由输入 demuxer 保证**（mp4ff 按 sample 输出；gortsplib client 按 RTP 解包），**Go 端不做任何 NAL/TS 手工解析**。
 
-1. **Phase 1: 基础框架** (1周)
-   - 搭建前后端项目框架
-   - 数据库设计和初始化
-   - 基础API实现
+### 12.5 信令（控制面）
 
-2. **Phase 2: 媒体引擎** (2周)
-   - 集成LAL
-   - 实现MP4文件输入
-   - 实现RTSP输入
-   - 实现RTMP输出
-   - 实现RTSP输出
-   - 实现HTTP-FLV输出
+信封结构 `{Type, Payload}`，可序列化（进程内走 channel，进程间走同一编解码）。
 
-3. **Phase 3: 管道服务** (1周)
-   - 实现输入输出连接
-   - 状态管理和错误恢复
-   - 基本统计功能
+**同步 request/response：**
 
-4. **Phase 4: 前端开发** (2周)
-   - 输入端管理界面
-   - 输出端管理界面
-   - 管道配置界面
-   - 实时监控界面
+| 消息 | 方向 | 用途 |
+|------|------|------|
+| `Subscribe(channels)` → `StreamInfo[]` | sink→source | 建立连接，返回媒体信息（子通道、Codec、SPS/PPS/AAC config、分辨率、帧率、ClockRate） |
+| `Unsubscribe` | sink→source | 断开 |
+| `Start` / `Pause` / `Resume` / `Stop` | sink→source | 流控 |
+| `Seek(pts)` | sink→source | 文件源点播/录制重播 |
+| `GetStreamInfo` → `StreamInfo[]` | sink→source | 查询 |
 
-5. **Phase 5: 完善功能** (1周)
-   - 日志系统完善
-   - 统计功能完善
-   - 单元测试
-   - 文档完善
+**异步事件：**
 
-## 8. 非功能需求
+| 消息 | 方向 | 用途 |
+|------|------|------|
+| `InfoUpdate` | source→sink | 动态增删子通道/参数变化 |
+| `StateChange` | source→sink | 状态迁移（started/stopped/error） |
+| `Error` | source→sink | 错误通知 |
 
-### 8.1 性能要求
-- 支持并发处理多个媒体流
-- 单机支持至少50个并发流
-- 延迟控制在秒级
+**典型能力**：
+- **按需拉流**：RTSP server sink 收到客户端 DESCRIBE 时才向 source 发 `Subscribe`/`Start`，无观众时 source 不读文件。
+- **录制重播**：录制器 sink 发 `Seek` 从头重录。
+- **动态协商**：sink 只订阅自己支持的子通道。
 
-### 8.2 可靠性
-- 流中断自动重连
-- 异常状态自动恢复
-- 配置持久化，重启自动恢复
+### 12.6 CodecConfig
 
-### 8.3 可扩展性
-- 协议插件化，便于添加新协议
-- 模块解耦，便于功能扩展
+- `Subscribe` 返回的 `StreamInfo` 携带 CodecConfig：MP4 源从 `avcC` box 取 SPS/PPS、从 `esds` 取 AudioSpecificConfig；RTSP 源从 SDP 取。
+- 同时保留 `Config` 标志帧能力，用于动态源在运行中才拿到配置的场景。
+- RTMP/HTTP-FLV 的 sequence header 由 sink 从 CodecConfig 生成，不在数据面逐帧携带。
 
-### 8.4 日志规范
-- 结构化日志 (JSON格式)
-- 日志级别：DEBUG, INFO, WARN, ERROR
-- 支持日志轮转：按大小、按时间
-- 前端可配置日志级别和轮转策略
+### 12.7 拓扑与背压
 
-## 9. 后续扩展
+- **pipe = 1 source ↔ 1 sink** 的连接。
+- **fan-out（一对多）** 由 source 端管理多个 sink：每个 sink 独立缓冲队列 + 独立慢消费/丢帧策略，一个慢 sink 不阻塞其他 sink，也不阻塞输入 readLoop。
+- 缓冲满时丢帧并计数/上报，输入侧永不阻塞。
 
-### 9.1 协议扩展
-- HLS 输入/输出
-- GB28181 输入
-- WebRTC 输入/输出
-- SRT 输入/输出
+### 12.8 适配器
 
-### 9.2 功能扩展
-- 转码功能
-- 录制功能
-- 集群支持
-- 负载均衡
+**输入（媒体 → 标准）**
+- MP4 文件：`mp4ff`（`github.com/edgeware/mp4ff`）按 sample 输出，携带真实 PTS/DTS/keyframe，AVCC→AnnexB 在输入侧完成。
+- RTSP：gortsplib v5 client（mediamtx 同款）拉流 + RTP depacketize → 标准帧。
+- 范围限定 MP4（H.264/H.265 + AAC）+ RTSP；非 MP4 文件先明确报错拒收，未来再以 ffmpeg 兜底。
+
+**输出（标准 → 媒体）**
+- RTSP server：gortsplib + rtph264/rtpaac 封装（沿用现有实现，修正时间戳单位换算）。
+- HTTP-FLV：Go 写 FLV tag → HTTP 流式响应；与 RTMP 共享 FLV tag 编码（`flv_writer`）。
+- RTMP（推流）：原生 Go 实现握手（C0/C1/C2）、chunk（协商 chunk size）、AMF0 connect/metadata、24 位时间戳回绕；数据面即 FLV tag 流。
+
+**进程内/进程间**
+- 进程内：数据面 Go channel 广播，控制面同步调用（带超时）。
+- 进程间：同一帧/信封编解码走 unix socket/TCP + 长度前缀封装，两端复用相同标准，未来扩展。
+
+### 12.9 实施清理清单【已完成】
+
+已删除：
+- `ts_demuxer.go`（524 行 TS 解复用）、`muxer.go`、`demuxer.go`
+- 旧 `file_input.go` / `rtsp_output.go` / `rtmp_output.go` / `httpflv_output.go`（直读文件 + 伪造时间戳）
+- 旧 `engine.go` / `default_engine.go`（旧 InputStream/OutputStream/MediaEngine 接口）
+- `StartOutputWithFile` 旁路、`MediaPacket`、`PacketHandler`、所有 `[TRACE-*]`/hex dump/"SAFETY VALVE" 调试日志
+
+已实现（替代旧架构）：
+- `pipe.go`：`Source` / `Sink` / `Pipe` 标准接口
+- `frame.go` / `signal.go` / `clock.go`：标准帧、信令、ClockRate 换算
+- `mp4_source.go`：MP4（mp4ff）输入，真实 PTS/DTS/关键帧，AVCC→AnnexB
+- `rtsp_input.go`：RTSP 输入（gortsplib v5 client），RTP depacketize
+- `default_pipe.go`：管道实现（fan-out / 背压 / 信令路由）
+- `rtsp_sink.go` / `httpflv_sink.go` / `rtmp_sink.go`：各输出适配器
+- `media_hub.go`：媒体引擎（`Engine` 接口 + `MediaHub` 实现），服务层接线
+- 新增依赖：`github.com/Eyevinn/mp4ff`
+
+### 12.9.1 L4 端到端验收结果【实测】
+
+本地部署全链路验证（ffmpeg/ffprobe 拉流）：
+- 文件→RTSP server：**通过**（h264 1920x1080 + aac 32000Hz 拉流解码）
+- 文件→HTTP-FLV：**通过**（ffmpeg 实时拉流解码输出帧；需 `Transfer-Encoding: chunked`）
+- 文件→RTMP：协议层经 RTMP mock server 完整验证（握手/AMF0/消息）
+- MP4→RTSP→RTSP 中继：**通过**（L3 集成测试）
+
+已知边界：
+- **文件循环播放（loop=true）**：已实现"统一基准回绕"方案——以绝对时长最长的 track 为基准，回绕时各 track 的 `loopDur` 换算到同一绝对时间轴（首帧对齐），保证回绕后音视频时间戳单调、不漂移。单测 `TestMP4Source_AlignLoopAlignment` 验证绝对时间轴一致。
+- **HTTP-FLV GOP 重放**：新客户端从最近关键帧（GOP 起点）开始拉流，若从流中段接入可能从半截 tag 起播，ffmpeg 实时拉取 loop 流时可能报 `Packet mismatch` 或 `frame=0`（loop=false 正常）。这是 GOP 重放的已知兼容性边界，不影响 RTSP/HTTP-FLV 单次播放。
+- **时间戳溢出**：标准帧用 int64（无实际风险）；FLV/RTMP 32 位时间戳约 49.7 天；RTSP RTP 32 位约 13.3 小时回绕（RFC 允许，播放器按增量处理）。只要保证回绕瞬间 PTS 增量连续，影响可控。
+
+### 12.10 非目标（本期不做）
+
+- 转码（保留 ffmpeg 转码作为未来模块，不在数据通路上）。
+- 录制、集群、负载均衡。
+- 非 MP4 容器输入（FLV/TS 文件）与 H.265 之外的多编解码深度适配（mp4ff 对 H.265 支持良好，本期以 H.264 + AAC 为验收基线）。
 
 ---
 
-## 10. Docker 部署
+## 13. 测试方案：Mock 三角验证【定稿】
 
-### 10.1 Dockerfile
+### 13.1 核心思想
 
-```dockerfile
-# 后端
-FROM golang:1.21-alpine AS backend-builder
-WORKDIR /build
-COPY server/ .
-RUN go mod download && CGO_ENABLED=1 GOOS=linux go build -o x-media-server ./cmd/main.go
-
-# 前端
-FROM node:18-alpine AS frontend-builder
-WORKDIR /build
-COPY web/ .
-RUN npm install && npm run build
-
-# 运行镜像
-FROM alpine:3.18
-RUN apk add --no-cache sqlite-libs ca-certificates tzdata
-WORKDIR /app
-COPY --from=backend-builder /build/x-media-server .
-COPY --from=frontend-builder /build/dist ./web/dist
-COPY docker/config.yaml ./config.yaml
-EXPOSE 8080 1935 5544
-CMD ["./x-media-server", "-c", "config.yaml"]
-```
-
-### 10.2 docker-compose.yml
-
-```yaml
-version: "3.8"
-services:
-  x-media:
-    build: .
-    container_name: x-media
-    ports:
-      - "8080:8080"    # Web API + 前端
-      - "1935:1935"    # RTMP
-      - "5544:5544"    # RTSP
-      - "8080:8080/tcp" # HTTP-FLV
-    volumes:
-      - ./data:/app/data        # 数据库
-      - ./logs:/app/logs        # 日志
-      - ./videos:/app/videos    # 媒体文件
-    restart: unless-stopped
-```
-
-### 10.3 配置文件 (config.yaml)
-
-```yaml
-server:
-  http_addr: ":8080"
-  rtmp_addr: ":1935"
-  rtsp_addr: ":5544"
-
-database:
-  driver: "sqlite"
-  dsn: "./data/x-media.db"
-
-log:
-  level: "info"
-  filename: "./logs/x-media.log"
-  max_size: 100
-  max_backups: 5
-  max_age: 30
-```
-
-### 10.4 启动命令
-
-```bash
-# 构建并启动
-docker-compose up -d
-
-# 查看日志
-docker-compose logs -f
-
-# 停止服务
-docker-compose down
-```
-
-## 11. 测试方案
-
-### 11.1 测试目标
-
-- 单元测试覆盖率 >= 80%
-- 核心模块（媒体引擎、管道服务）覆盖率 >= 90%
-- 所有协议通过功能测试
-- 关键路径通过集成测试
-
-### 11.2 后端单元测试
-
-#### 11.2.1 测试框架
-
-| 工具 | 用途 |
-|------|------|
-| testing | Go 标准测试库 |
-| testify | 断言和 mock 库 |
-| goconvey | BDD 风格测试 |
-| gomock | 接口 mock |
-| sqlmock | 数据库 mock |
-
-#### 11.2.2 测试目录结构
+管道标准使每个组件只依赖契约、不依赖对端实现，因此每个组件完工后可用 **一个真实组件 + 两个 mock** 独立验证。任何改动都被约束在 mock 边界内，回归成本最低。
 
 ```
-server/
-├── internal/
-│   ├── api/
-│   │   ├── input_handler.go
-│   │   └── input_handler_test.go      # API 测试
-│   ├── service/
-│   │   ├── input_service.go
-│   │   └── input_service_test.go      # 业务逻辑测试
-│   ├── repository/
-│   │   ├── input_repo.go
-│   │   └── input_repo_test.go         # 数据访问测试
-│   └── media/
-│       ├── mp4_reader.go
-│       ├── mp4_reader_test.go         # 媒体模块测试
-│       ├── rtsp_input.go
-│       └── rtsp_input_test.go
-├── pkg/
-│   ├── logger/
-│   │   ├── logger.go
-│   │   └── logger_test.go
-│   └── utils/
-│       ├── utils.go
-│       └── utils_test.go
-└── test/
-    ├── fixtures/                      # 测试数据
-    │   ├── test.mp4
-    │   └── config.json
-    ├── mocks/                         # Mock 对象
-    │   ├── mock_media_engine.go
-    │   └── mock_repository.go
-    └── helpers/                       # 测试辅助函数
-        └── test_helper.go
+        MockPipe(内存通道)
+           ↕ 标准帧/信令
+  真实 Source ───────────► MockSink(记录/断言)
+        MockPipe
+           ↕ 标准帧/信令
+  真实 Pipe ◄────────────► MockSource(可编程产帧) + MockSink(记录/断言)
+        MockPipe
+           ↕ 标准帧/信令
+  真实 Sink ◄────────────► MockSource(可编程产帧)
 ```
 
-#### 11.2.3 单元测试示例
+### 13.2 Mock 三件套
 
-```go
-// server/internal/service/input_service_test.go
-package service
+- **MockSource**：按测试剧本可编程产帧（合法 H.264 AU、AAC 帧），响应信令（`Subscribe`→回预设 `StreamInfo`、处理 `Seek`/`Pause`），记录收到的控制请求。
+- **MockSink**：接收帧并断言（顺序/字节/时间戳/关键帧），可发起信令请求。
+- **MockPipe**：内存双向通道——真实 source 可推帧、真实 sink 可消费，信令 request/response + 事件两路齐全。
 
-import (
-    "testing"
-    "github.com/stretchr/testify/assert"
-    "github.com/stretchr/testify/mock"
-)
+### 13.3 四层测试金字塔
 
-// Mock 输入端仓储
-type MockInputRepo struct {
-    mock.Mock
-}
+**L1 契约层（纯单元，无 mock）**
+- FrameHeader 编解码 round-trip、30 字节边界、magic/version 校验、截断/损坏
+- 信令 Envelope 编解码 round-trip
+- ClockRate 换算表驱动（→ms、→90kHz，视频/音频不同 timescale）
 
-func (m *MockInputRepo) Create(input *model.Input) error {
-    args := m.Called(input)
-    return args.Error(0)
-}
+**L2 组件层（真实 + 两 mock）——核心**
 
-func (m *MockInputRepo) GetByID(id string) (*model.Input, error) {
-    args := m.Called(id)
-    return args.Get(0).(*model.Input), args.Error(1)
-}
+| 被测组件 | MockSource | MockPipe | MockSink | 关键断言 |
+|---|---|---|---|---|
+| MP4Source | ✓ | ✓ | | Subscribe 返回正确 SPS/PPS/AAC config/ClockRate；首帧=keyframe；每 AU 一个 sample；PTS/DTS 与 mp4ff 一致且单调；音视频交错；Loop/Seek/Pause/Stop 语义 |
+| RTSPInput | ✓ | ✓ | | 拉流→depacketize→标准帧内容正确；动态 InfoUpdate（音轨后到） |
+| Pipe | ✓ | ✓ | | 信令路由、帧转发（顺序/字节一致）、fan-out 双 sink 独立全量、背压丢帧计数且不阻塞 source、Unsubscribe 停收、事件下发 |
+| RTSP server sink | ✓ | ✓ | | StreamInfo→正确 SDP/format；rtph264 封装字节级校验；ClockRate 换算 |
+| HTTP-FLV sink | ✓ | ✓ | | flv header + sequence header（avcC/ASC）+ tag 头（type 8/9、时间戳 ms、CTS）字节级校验 |
+| RTMP sink | ✓ | ✓ | | 握手 C0/C1/C2、connect AMF0、sequence header、tag 时间戳、24 位回绕、断线重连 |
 
-// 测试用例
-func TestInputService_Create(t *testing.T) {
-    t.Run("成功创建MP4输入端", func(t *testing.T) {
-        // Arrange
-        mockRepo := new(MockInputRepo)
-        svc := NewInputService(mockRepo)
-        
-        req := &CreateInputRequest{
-            Name: "测试MP4",
-            Type: "file",
-            Config: `{"path":"/data/test.mp4","loop":true}`,
-        }
-        
-        mockRepo.On("Create", mock.AnythingOfType("*model.Input")).Return(nil)
-        
-        // Act
-        result, err := svc.Create(req)
-        
-        // Assert
-        assert.NoError(t, err)
-        assert.NotNil(t, result)
-        assert.Equal(t, "测试MP4", result.Name)
-        assert.Equal(t, "file", result.Type)
-        mockRepo.AssertExpectations(t)
-    })
-    
-    t.Run("参数验证失败-缺少名称", func(t *testing.T) {
-        // Arrange
-        mockRepo := new(MockInputRepo)
-        svc := NewInputService(mockRepo)
-        
-        req := &CreateInputRequest{
-            Type: "file",
-            Config: `{"path":"/data/test.mp4"}`,
-        }
-        
-        // Act
-        result, err := svc.Create(req)
-        
-        // Assert
-        assert.Error(t, err)
-        assert.Nil(t, result)
-        assert.Contains(t, err.Error(), "name")
-    })
-}
+**L3 半集成（两个真实 + 一个 mock）**
+- 真实 MP4Source + 真实 Pipe + MockSink：标准帧在真实链路无损
+- MockSource + 真实 Pipe + 真实 RTMP sink：标准→协议字节
+- 真实 MP4Source + 真实 Pipe + 真实 HTTP-FLV sink：离线端到端（flv 落文件/内存校验）
 
-func TestInputService_GetByID(t *testing.T) {
-    t.Run("成功获取输入端", func(t *testing.T) {
-        // Arrange
-        mockRepo := new(MockInputRepo)
-        svc := NewInputService(mockRepo)
-        
-        expected := &model.Input{
-            ID:   "input_001",
-            Name: "测试MP4",
-            Type: "file",
-        }
-        
-        mockRepo.On("GetByID", "input_001").Return(expected, nil)
-        
-        // Act
-        result, err := svc.GetByID("input_001")
-        
-        // Assert
-        assert.NoError(t, err)
-        assert.Equal(t, expected, result)
-    })
-}
-```
+**L4 全真端到端（需外部依赖，手动/CI 可选）**
+- file→rtmp/rtsp/http-flv 用 ffprobe/ffplay 实测（扩展 `server/test/integration/api_test.sh`）
 
-#### 11.2.4 媒体模块测试
+### 13.4 测试数据策略
 
-```go
-// server/internal/media/mp4_reader_test.go
-package media
+- **合成字节 fixture**（确定性、离线、毫秒级）：合法 SPS/PPS/IDR 字节 + AAC 帧 + AudioSpecificConfig，用于协议封装测试。
+- **真实文件 fixture**（`server/test/fixtures/test.mp4`，已在仓库）：用于 MP4Source 的 PTS/DTS/交错/Loop 断言。
+- 两种并存：合成字节测协议封装，真实文件测 demux 正确性。
 
-import (
-    "testing"
-    "os"
-    "github.com/stretchr/testify/assert"
-)
+### 13.5 RTMP mock server
 
-func TestMP4Reader_Open(t *testing.T) {
-    t.Run("成功打开MP4文件", func(t *testing.T) {
-        // 准备测试文件
-        testFile := "../../test/fixtures/test.mp4"
-        if _, err := os.Stat(testFile); os.IsNotExist(err) {
-            t.Skip("测试文件不存在")
-        }
-        
-        reader := NewMP4Reader()
-        err := reader.Open(testFile)
-        
-        assert.NoError(t, err)
-        assert.True(t, reader.IsOpen())
-        
-        reader.Close()
-    })
-    
-    t.Run("文件不存在", func(t *testing.T) {
-        reader := NewMP4Reader()
-        err := reader.Open("/nonexistent/file.mp4")
-        
-        assert.Error(t, err)
-        assert.False(t, reader.IsOpen())
-    })
-}
+原生 RTMP sink 测试需要最小 RTMP server（握手 C0/C1/C2 + chunk 解析 + AMF0 假服务端）接收字节并断言，约 200 行，属于测试基建的一部分。确保 RTMP sink 可离线完整验证。
 
-func TestMP4Reader_ReadPacket(t *testing.T) {
-    t.Run("读取音视频包", func(t *testing.T) {
-        testFile := "../../test/fixtures/test.mp4"
-        if _, err := os.Stat(testFile); os.IsNotExist(err) {
-            t.Skip("测试文件不存在")
-        }
-        
-        reader := NewMP4Reader()
-        err := reader.Open(testFile)
-        assert.NoError(t, err)
-        defer reader.Close()
-        
-        // 读取几个包
-        for i := 0; i < 10; i++ {
-            pkt, err := reader.ReadPacket()
-            assert.NoError(t, err)
-            assert.NotNil(t, pkt)
-            assert.True(t, pkt.IsVideo() || pkt.IsAudio())
-        }
-    })
-}
+### 13.6 时序处理约定
 
-func TestMP4Reader_Loop(t *testing.T) {
-    t.Run("循环播放", func(t *testing.T) {
-        testFile := "../../test/fixtures/test.mp4"
-        if _, err := os.Stat(testFile); os.IsNotExist(err) {
-            t.Skip("测试文件不存在")
-        }
-        
-        reader := NewMP4Reader(WithLoop(true))
-        err := reader.Open(testFile)
-        assert.NoError(t, err)
-        defer reader.Close()
-        
-        // 读取超过文件长度的数据，验证循环
-        packetCount := 0
-        for i := 0; i < 1000; i++ {
-            pkt, err := reader.ReadPacket()
-            if err != nil {
-                break
-            }
-            packetCount++
-            _ = pkt
-        }
-        
-        assert.Greater(t, packetCount, 100)
-    })
-}
-```
+- 流式异步一律用 channel + 超时等待（`require.Eventually` / 带 deadline 的 select），**禁用 `time.Sleep` 猜测时序**，减少 flaky。
+- 并发相关的断言放在接收 goroutine 内完成后再退出，避免竞态。
 
-#### 11.2.5 数据库测试
+### 13.7 与现有测试的关系
 
-```go
-// server/internal/repository/input_repo_test.go
-package repository
+现有 `MockInputStream`/`MockOutputStream`/`MockMediaEngine`（绑定旧接口）随新架构替换为 `MockSource`/`MockSink`/`MockPipe`。服务层测试（CRUD/校验）保留 mock repo 模式不变。
 
-import (
-    "testing"
-    "github.com/DATA-DOG/go-sqlmock"
-    "github.com/stretchr/testify/assert"
-    "gorm.io/driver/sqlite"
-    "gorm.io/gorm"
-)
+### 13.8 实施顺序
 
-func setupTestDB(t *testing.T) (*gorm.DB, sqlmock.Sqlmock) {
-    db, mock, err := sqlmock.New()
-    assert.NoError(t, err)
-    
-    gormDB, err := gorm.Open(sqlite.Dialector{Conn: db}, &gorm.Config{})
-    assert.NoError(t, err)
-    
-    return gormDB, mock
-}
-
-func TestInputRepo_Create(t *testing.T) {
-    t.Run("成功创建", func(t *testing.T) {
-        // Arrange
-        db, mock := setupTestDB(t)
-        repo := NewInputRepo(db)
-        
-        input := &model.Input{
-            ID:     "input_001",
-            Name:   "测试",
-            Type:   "file",
-            Config: `{"path":"test.mp4"}`,
-        }
-        
-        mock.ExpectBegin()
-        mock.ExpectExec("INSERT INTO inputs").
-            WithArgs(input.ID, input.Name, input.Type, input.Config, sqlmock.AnyArg(), sqlmock.AnyArg()).
-            WillReturnResult(sqlmock.NewResult(1, 1))
-        mock.ExpectCommit()
-        
-        // Act
-        err := repo.Create(input)
-        
-        // Assert
-        assert.NoError(t, err)
-        assert.NoError(t, mock.ExpectationsWereMet())
-    })
-}
-```
-
-### 11.3 前端单元测试
-
-#### 11.3.1 测试框架
-
-| 工具 | 用途 |
-|------|------|
-| Vitest | 测试运行器 |
-| Vue Test Utils | Vue 组件测试 |
-| Mock Service Worker | API Mock |
-| Cypress | E2E 测试 |
-
-#### 11.3.2 测试目录结构
-
-```
-web/
-├── src/
-│   ├── components/
-│   │   ├── InputList.vue
-│   │   └── InputList.test.ts        # 组件测试
-│   ├── views/
-│   │   ├── InputManagement.vue
-│   │   └── InputManagement.test.ts   # 页面测试
-│   ├── stores/
-│   │   ├── inputStore.ts
-│   │   └── inputStore.test.ts        # 状态管理测试
-│   ├── api/
-│   │   ├── inputApi.ts
-│   │   └── inputApi.test.ts          # API 测试
-│   └── utils/
-│       ├── format.ts
-│       └── format.test.ts            # 工具函数测试
-├── tests/
-│   ├── unit/                         # 单元测试
-│   ├── integration/                  # 集成测试
-│   └── e2e/                          # E2E 测试
-│       └── input.cy.ts
-└── vitest.config.ts
-```
-
-#### 11.3.3 组件测试示例
-
-```typescript
-// web/src/components/InputList.test.ts
-import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { mount } from '@vue/test-utils'
-import { createTestingPinia } from '@pinia/testing'
-import InputList from './InputList.vue'
-import { useInputStore } from '@/stores/inputStore'
-
-describe('InputList', () => {
-  let wrapper: any
-  let store: any
-
-  beforeEach(() => {
-    wrapper = mount(InputList, {
-      global: {
-        plugins: [
-          createTestingPinia({
-            createSpy: vi.fn,
-            initialState: {
-              input: {
-                inputs: [
-                  { id: '1', name: 'MP4输入', type: 'file', status: 'running' },
-                  { id: '2', name: 'RTSP输入', type: 'rtsp', status: 'stopped' },
-                ],
-                loading: false,
-              },
-            },
-          }),
-        ],
-      },
-    })
-    store = useInputStore()
-  })
-
-  it('渲染输入端列表', () => {
-    const items = wrapper.findAll('.input-item')
-    expect(items).toHaveLength(2)
-  })
-
-  it('显示输入端名称', () => {
-    const firstItem = wrapper.find('.input-item:first-child .name')
-    expect(firstItem.text()).toBe('MP4输入')
-  })
-
-  it('显示正确的状态标签', () => {
-    const statusTags = wrapper.findAll('.status-tag')
-    expect(statusTags[0].classes()).toContain('running')
-    expect(statusTags[1].classes()).toContain('stopped')
-  })
-
-  it('点击删除按钮触发事件', async () => {
-    const deleteBtn = wrapper.find('.input-item:first-child .delete-btn')
-    await deleteBtn.trigger('click')
-    
-    expect(wrapper.emitted('delete')).toBeTruthy()
-    expect(wrapper.emitted('delete')[0]).toEqual(['1'])
-  })
-
-  it('点击启动按钮调用store方法', async () => {
-    const startBtn = wrapper.find('.input-item:nth-child(2) .start-btn')
-    await startBtn.trigger('click')
-    
-    expect(store.startInput).toHaveBeenCalledWith('2')
-  })
-})
-```
-
-#### 11.3.4 Store 测试示例
-
-```typescript
-// web/src/stores/inputStore.test.ts
-import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { setActivePinia, createPinia } from 'pinia'
-import { useInputStore } from './inputStore'
-import * as inputApi from '@/api/inputApi'
-
-vi.mock('@/api/inputApi')
-
-describe('InputStore', () => {
-  let store: any
-
-  beforeEach(() => {
-    setActivePinia(createPinia())
-    store = useInputStore()
-  })
-
-  describe('fetchInputs', () => {
-    it('成功获取输入端列表', async () => {
-      const mockInputs = [
-        { id: '1', name: 'MP4输入', type: 'file' },
-        { id: '2', name: 'RTSP输入', type: 'rtsp' },
-      ]
-      
-      vi.mocked(inputApi.getInputs).mockResolvedValue(mockInputs)
-      
-      await store.fetchInputs()
-      
-      expect(store.inputs).toEqual(mockInputs)
-      expect(store.loading).toBe(false)
-    })
-
-    it('处理获取失败', async () => {
-      vi.mocked(inputApi.getInputs).mockRejectedValue(new Error('网络错误'))
-      
-      await store.fetchInputs()
-      
-      expect(store.inputs).toEqual([])
-      expect(store.error).toBeTruthy()
-    })
-  })
-
-  describe('createInput', () => {
-    it('成功创建输入端', async () => {
-      const newInput = { name: '新输入', type: 'file', config: '{}' }
-      const createdInput = { id: '3', ...newInput, status: 'stopped' }
-      
-      vi.mocked(inputApi.createInput).mockResolvedValue(createdInput)
-      
-      await store.createInput(newInput)
-      
-      expect(store.inputs).toContainEqual(createdInput)
-    })
-  })
-
-  describe('deleteInput', () => {
-    it('成功删除输入端', async () => {
-      store.inputs = [
-        { id: '1', name: '输入1' },
-        { id: '2', name: '输入2' },
-      ]
-      
-      vi.mocked(inputApi.deleteInput).mockResolvedValue()
-      
-      await store.deleteInput('1')
-      
-      expect(store.inputs).toHaveLength(1)
-      expect(store.inputs[0].id).toBe('2')
-    })
-  })
-})
-```
-
-#### 11.3.5 E2E 测试示例
-
-```typescript
-// web/tests/e2e/input.cy.ts
-describe('输入端管理', () => {
-  beforeEach(() => {
-    cy.visit('/inputs')
-  })
-
-  it('显示输入端列表', () => {
-    cy.get('.input-list').should('exist')
-    cy.get('.input-item').should('have.length.greaterThan', 0)
-  })
-
-  it('创建新的MP4输入端', () => {
-    cy.get('.create-btn').click()
-    
-    cy.get('input[name="name"]').type('测试MP4')
-    cy.get('select[name="type"]').select('file')
-    cy.get('input[name="path"]').type('/data/test.mp4')
-    cy.get('input[name="loop"]').check()
-    
-    cy.get('.submit-btn').click()
-    
-    cy.get('.el-message--success').should('be.visible')
-    cy.get('.input-list').should('contain', '测试MP4')
-  })
-
-  it('启动输入端', () => {
-    cy.get('.input-item')
-      .contains('测试MP4')
-      .parent()
-      .find('.start-btn')
-      .click()
-    
-    cy.get('.status-tag').should('contain', '运行中')
-  })
-
-  it('停止输入端', () => {
-    cy.get('.input-item')
-      .contains('测试MP4')
-      .parent()
-      .find('.stop-btn')
-      .click()
-    
-    cy.get('.status-tag').should('contain', '已停止')
-  })
-
-  it('删除输入端', () => {
-    cy.get('.input-item')
-      .contains('测试MP4')
-      .parent()
-      .find('.delete-btn')
-      .click()
-    
-    cy.get('.el-message-box__btns .el-button--primary').click()
-    
-    cy.get('.input-list').should('not.contain', '测试MP4')
-  })
-})
-```
-
-### 11.4 协议功能测试
-
-#### 11.4.1 测试环境
-
-```yaml
-# test/docker-compose.test.yml
-version: "3.8"
-services:
-  # 被测服务
-  x-media:
-    build: .
-    ports:
-      - "8080:8080"
-      - "1935:1935"
-      - "5544:5544"
-    
-  # 测试用 RTSP 服务器
-  rtsp-server:
-    image: aler9/rtsp-simple-server
-    ports:
-      - "8554:8554"
-    environment:
-      - RTSP_PROTOCOLS=tcp
-    
-  # 测试用 FFmpeg
-  ffmpeg:
-    image: jrottenberg/ffmpeg
-    volumes:
-      - ./fixtures:/fixtures
-```
-
-#### 11.4.2 MP4 文件输入测试
-
-```bash
-#!/bin/bash
-# test/protocol/test_mp4_input.sh
-
-set -e
-
-API_URL="http://localhost:8080/api/v1"
-TEST_MP4="/fixtures/test.mp4"
-
-echo "=== MP4 文件输入测试 ==="
-
-# 1. 创建 MP4 输入端
-echo "1. 创建 MP4 输入端..."
-INPUT_ID=$(curl -s -X POST "$API_URL/inputs" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "测试MP4",
-    "type": "file",
-    "config": {
-      "path": "'$TEST_MP4'",
-      "loop": true,
-      "speed": 1.0
-    }
-  }' | jq -r '.id')
-
-echo "   输入端ID: $INPUT_ID"
-
-# 2. 启动输入端
-echo "2. 启动输入端..."
-curl -s -X POST "$API_URL/inputs/$INPUT_ID/start"
-sleep 2
-
-# 3. 检查状态
-echo "3. 检查状态..."
-STATUS=$(curl -s "$API_URL/inputs/$INPUT_ID" | jq -r '.status')
-if [ "$STATUS" = "running" ]; then
-    echo "   ✓ 状态正常: running"
-else
-    echo "   ✗ 状态异常: $STATUS"
-    exit 1
-fi
-
-# 4. 检查统计信息
-echo "4. 检查统计信息..."
-STATS=$(curl -s "$API_URL/stats/inputs/$INPUT_ID")
-echo "   统计数据: $STATS"
-
-# 5. 停止输入端
-echo "5. 停止输入端..."
-curl -s -X POST "$API_URL/inputs/$INPUT_ID/stop"
-sleep 1
-
-# 6. 删除输入端
-echo "6. 删除输入端..."
-curl -s -X DELETE "$API_URL/inputs/$INPUT_ID"
-
-echo "=== MP4 文件输入测试完成 ==="
-```
-
-#### 11.4.3 RTSP 输入测试
-
-```bash
-#!/bin/bash
-# test/protocol/test_rtsp_input.sh
-
-set -e
-
-API_URL="http://localhost:8080/api/v1"
-RTSP_URL="rtsp://rtsp-server:8554/test"
-
-echo "=== RTSP 输入测试 ==="
-
-# 1. 启动测试流
-echo "1. 启动测试 RTSP 流..."
-docker-compose exec ffmpeg \
-  -re -i /fixtures/test.mp4 \
-  -c copy -f rtsp "$RTSP_URL" &
-FFMPEG_PID=$!
-sleep 3
-
-# 2. 创建 RTSP 输入端
-echo "2. 创建 RTSP 输入端..."
-INPUT_ID=$(curl -s -X POST "$API_URL/inputs" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "测试RTSP",
-    "type": "rtsp",
-    "config": {
-      "url": "'$RTSP_URL'",
-      "transport": "tcp",
-      "timeout_ms": 10000,
-      "reconnect": true
-    }
-  }' | jq -r '.id')
-
-echo "   输入端ID: $INPUT_ID"
-
-# 3. 启动输入端
-echo "3. 启动输入端..."
-curl -s -X POST "$API_URL/inputs/$INPUT_ID/start"
-sleep 5
-
-# 4. 检查状态
-echo "4. 检查状态..."
-STATUS=$(curl -s "$API_URL/inputs/$INPUT_ID" | jq -r '.status')
-if [ "$STATUS" = "running" ]; then
-    echo "   ✓ 状态正常: running"
-else
-    echo "   ✗ 状态异常: $STATUS"
-    exit 1
-fi
-
-# 5. 测试重连（模拟断流）
-echo "5. 测试重连..."
-kill $FFMPEG_PID 2>/dev/null || true
-sleep 2
-docker-compose exec ffmpeg \
-  -re -i /fixtures/test.mp4 \
-  -c copy -f rtsp "$RTSP_URL" &
-sleep 3
-
-STATUS=$(curl -s "$API_URL/inputs/$INPUT_ID" | jq -r '.status')
-if [ "$STATUS" = "running" ]; then
-    echo "   ✓ 重连成功"
-else
-    echo "   ✗ 重连失败"
-fi
-
-# 6. 清理
-echo "6. 清理..."
-curl -s -X POST "$API_URL/inputs/$INPUT_ID/stop"
-curl -s -X DELETE "$API_URL/inputs/$INPUT_ID"
-kill $FFMPEG_PID 2>/dev/null || true
-
-echo "=== RTSP 输入测试完成 ==="
-```
-
-#### 11.4.4 RTMP 输出测试
-
-```bash
-#!/bin/bash
-# test/protocol/test_rtmp_output.sh
-
-set -e
-
-API_URL="http://localhost:8080/api/v1"
-RTMP_URL="rtmp://localhost:1935/live/test_output"
-
-echo "=== RTMP 输出测试 ==="
-
-# 1. 创建 MP4 输入端
-echo "1. 创建输入端..."
-INPUT_ID=$(curl -s -X POST "$API_URL/inputs" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "测试输入",
-    "type": "file",
-    "config": {"path": "/fixtures/test.mp4", "loop": true}
-  }' | jq -r '.id')
-
-# 2. 创建 RTMP 输出端
-echo "2. 创建 RTMP 输出端..."
-OUTPUT_ID=$(curl -s -X POST "$API_URL/outputs" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "测试RTMP输出",
-    "type": "rtmp",
-    "config": {
-      "url": "'$RTMP_URL'",
-      "reconnect": true,
-      "reconnect_interval_ms": 5000
-    }
-  }' | jq -r '.id')
-
-# 3. 创建管道
-echo "3. 创建管道..."
-PIPE_ID=$(curl -s -X POST "$API_URL/pipes" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "input_id": "'$INPUT_ID'",
-    "output_id": "'$OUTPUT_ID'",
-    "auto_start": true
-  }' | jq -r '.id')
-
-sleep 5
-
-# 4. 验证 RTMP 流
-echo "4. 验证 RTMP 流..."
-ffprobe -v quiet -print_format json -show_streams "$RTMP_URL" > /dev/null 2>&1
-if [ $? -eq 0 ]; then
-    echo "   ✓ RTMP 流正常"
-else
-    echo "   ✗ RTMP 流异常"
-    exit 1
-fi
-
-# 5. 检查统计
-echo "5. 检查统计信息..."
-STATS=$(curl -s "$API_URL/stats/pipes/$PIPE_ID")
-echo "   统计数据: $STATS"
-
-# 6. 清理
-echo "6. 清理..."
-curl -s -X DELETE "$API_URL/pipes/$PIPE_ID"
-curl -s -X DELETE "$API_URL/outputs/$OUTPUT_ID"
-curl -s -X DELETE "$API_URL/inputs/$INPUT_ID"
-
-echo "=== RTMP 输出测试完成 ==="
-```
-
-#### 11.4.5 RTSP 输出测试
-
-```bash
-#!/bin/bash
-# test/protocol/test_rtsp_output.sh
-
-set -e
-
-API_URL="http://localhost:8080/api/v1"
-RTSP_OUTPUT_URL="rtsp://localhost:5544/live/test_output"
-
-echo "=== RTSP 输出测试 ==="
-
-# 1. 创建输入端
-echo "1. 创建输入端..."
-INPUT_ID=$(curl -s -X POST "$API_URL/inputs" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "测试输入",
-    "type": "file",
-    "config": {"path": "/fixtures/test.mp4", "loop": true}
-  }' | jq -r '.id')
-
-# 2. 创建 RTSP 输出端（server 模式）
-echo "2. 创建 RTSP 输出端..."
-OUTPUT_ID=$(curl -s -X POST "$API_URL/outputs" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "测试RTSP输出",
-    "type": "rtsp",
-    "config": {
-      "mode": "server",
-      "addr": ":5544",
-      "transport": "tcp"
-    }
-  }' | jq -r '.id')
-
-# 3. 创建管道
-echo "3. 创建管道..."
-PIPE_ID=$(curl -s -X POST "$API_URL/pipes" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "input_id": "'$INPUT_ID'",
-    "output_id": "'$OUTPUT_ID'",
-    "auto_start": true
-  }' | jq -r '.id')
-
-sleep 5
-
-# 4. 验证 RTSP 流
-echo "4. 验证 RTSP 流..."
-ffprobe -v quiet -print_format json -show_streams "$RTSP_OUTPUT_URL" > /dev/null 2>&1
-if [ $? -eq 0 ]; then
-    echo "   ✓ RTSP 流正常"
-else
-    echo "   ✗ RTSP 流异常"
-    exit 1
-fi
-
-# 5. 清理
-echo "5. 清理..."
-curl -s -X DELETE "$API_URL/pipes/$PIPE_ID"
-curl -s -X DELETE "$API_URL/outputs/$OUTPUT_ID"
-curl -s -X DELETE "$API_URL/inputs/$INPUT_ID"
-
-echo "=== RTSP 输出测试完成 ==="
-```
-
-#### 11.4.6 HTTP-FLV 输出测试
-
-```bash
-#!/bin/bash
-# test/protocol/test_httpflv_output.sh
-
-set -e
-
-API_URL="http://localhost:8080/api/v1"
-HTTPFLV_URL="http://localhost:8080/live/test_output.flv"
-
-echo "=== HTTP-FLV 输出测试 ==="
-
-# 1. 创建输入端
-echo "1. 创建输入端..."
-INPUT_ID=$(curl -s -X POST "$API_URL/inputs" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "测试输入",
-    "type": "file",
-    "config": {"path": "/fixtures/test.mp4", "loop": true}
-  }' | jq -r '.id')
-
-# 2. 创建 HTTP-FLV 输出端
-echo "2. 创建 HTTP-FLV 输出端..."
-OUTPUT_ID=$(curl -s -X POST "$API_URL/outputs" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "测试HTTP-FLV输出",
-    "type": "http-flv",
-    "config": {
-      "addr": ":8080",
-      "url_pattern": "/live/",
-      "gop_num": 2
-    }
-  }' | jq -r '.id')
-
-# 3. 创建管道
-echo "3. 创建管道..."
-PIPE_ID=$(curl -s -X POST "$API_URL/pipes" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "input_id": "'$INPUT_ID'",
-    "output_id": "'$OUTPUT_ID'",
-    "auto_start": true
-  }' | jq -r '.id')
-
-sleep 5
-
-# 4. 验证 HTTP-FLV 流
-echo "4. 验证 HTTP-FLV 流..."
-HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "$HTTPFLV_URL")
-if [ "$HTTP_CODE" = "200" ]; then
-    echo "   ✓ HTTP-FLV 流正常 (HTTP $HTTP_CODE)"
-else
-    echo "   ✗ HTTP-FLV 流异常 (HTTP $HTTP_CODE)"
-    exit 1
-fi
-
-# 5. 验证 FLV 格式
-echo "5. 验证 FLV 格式..."
-ffprobe -v quiet -print_format json -show_streams "$HTTPFLV_URL" > /dev/null 2>&1
-if [ $? -eq 0 ]; then
-    echo "   ✓ FLV 格式正确"
-else
-    echo "   ✗ FLV 格式错误"
-fi
-
-# 6. 清理
-echo "6. 清理..."
-curl -s -X DELETE "$API_URL/pipes/$PIPE_ID"
-curl -s -X DELETE "$API_URL/outputs/$OUTPUT_ID"
-curl -s -X DELETE "$API_URL/inputs/$INPUT_ID"
-
-echo "=== HTTP-FLV 输出测试完成 ==="
-```
-
-### 11.5 集成测试
-
-#### 11.5.1 管道转发测试
-
-```bash
-#!/bin/bash
-# test/integration/test_pipe_flow.sh
-
-set -e
-
-API_URL="http://localhost:8080/api/v1"
-
-echo "=== 管道转发集成测试 ==="
-
-# 测试场景：MP4 -> RTMP + RTSP + HTTP-FLV 多路输出
-
-# 1. 创建输入端
-INPUT_ID=$(curl -s -X POST "$API_URL/inputs" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "集成测试输入",
-    "type": "file",
-    "config": {"path": "/fixtures/test.mp4", "loop": true}
-  }' | jq -r '.id')
-
-# 2. 创建多个输出端
-RTMP_OUTPUT=$(curl -s -X POST "$API_URL/outputs" \
-  -H "Content-Type: application/json" \
-  -d '{"name":"RTMP","type":"rtmp","config":{"url":"rtmp://localhost:1935/live/test"}}' | jq -r '.id')
-
-RTSP_OUTPUT=$(curl -s -X POST "$API_URL/outputs" \
-  -H "Content-Type: application/json" \
-  -d '{"name":"RTSP","type":"rtsp","config":{"mode":"server",":5544"}}' | jq -r '.id')
-
-HTTPFLV_OUTPUT=$(curl -s -X POST "$API_URL/outputs" \
-  -H "Content-Type: application/json" \
-  -d '{"name":"HTTP-FLV","type":"http-flv","config":{"addr":":8080"}}' | jq -r '.id')
-
-# 3. 创建管道
-for OUTPUT_ID in $RTMP_OUTPUT $RTSP_OUTPUT $HTTPFLV_OUTPUT; do
-  curl -s -X POST "$API_URL/pipes" \
-    -H "Content-Type: application/json" \
-    -d '{
-      "input_id": "'$INPUT_ID'",
-      "output_id": "'$OUTPUT_ID'",
-      "auto_start": true
-    }'
-done
-
-sleep 10
-
-# 4. 验证所有输出
-echo "验证 RTMP..."
-curl -s -o /dev/null -w "%{http_code}" "rtmp://localhost:1935/live/test" || true
-
-echo "验证 RTSP..."
-ffprobe -v quiet rtsp://localhost:5544/live/test || true
-
-echo "验证 HTTP-FLV..."
-curl -s -o /dev/null -w "%{http_code}" "http://localhost:8080/live/test.flv" || true
-
-# 5. 检查统计
-curl -s "$API_URL/stats" | jq .
-
-echo "=== 管道转发集成测试完成 ==="
-```
-
-### 11.6 性能测试
-
-#### 11.6.1 并发流测试
-
-```bash
-#!/bin/bash
-# test/performance/test_concurrent_streams.sh
-
-set -e
-
-API_URL="http://localhost:8080/api/v1"
-STREAM_COUNT=${1:-10}
-
-echo "=== 并发流性能测试 ==="
-echo "测试流数量: $STREAM_COUNT"
-
-# 创建多个输入输出管道
-for i in $(seq 1 $STREAM_COUNT); do
-  INPUT_ID=$(curl -s -X POST "$API_URL/inputs" \
-    -H "Content-Type: application/json" \
-    -d '{
-      "name": "性能测试输入'$i'",
-      "type": "file",
-      "config": {"path": "/fixtures/test.mp4", "loop": true}
-    }' | jq -r '.id')
-  
-  OUTPUT_ID=$(curl -s -X POST "$API_URL/outputs" \
-    -H "Content-Type: application/json" \
-    -d '{
-      "name": "性能测试输出'$i'",
-      "type": "rtmp",
-      "config": {"url": "rtmp://localhost:1935/perf/test'$i'"}
-    }' | jq -r '.id')
-  
-  curl -s -X POST "$API_URL/pipes" \
-    -H "Content-Type: application/json" \
-    -d '{
-      "input_id": "'$INPUT_ID'",
-      "output_id": "'$OUTPUT_ID'",
-      "auto_start": true
-    }'
-done
-
-echo "等待流稳定..."
-sleep 30
-
-# 监控资源使用
-echo "=== 资源使用情况 ==="
-docker stats --no-stream x-media
-
-# 获取统计信息
-echo "=== 流统计信息 ==="
-curl -s "$API_URL/stats" | jq .
-
-echo "=== 并发流性能测试完成 ==="
-```
-
-### 11.7 测试执行
-
-#### 11.7.1 Makefile 配置
-
-```makefile
-# Makefile
-
-.PHONY: test test-unit test-protocol test-integration test-perf test-all
-
-# 运行所有单元测试
-test-unit:
-	@echo "运行后端单元测试..."
-	cd server && go test -v -coverprofile=coverage.out ./...
-	@echo "运行前端单元测试..."
-	cd web && npm run test:unit
-
-# 运行协议测试
-test-protocol:
-	@echo "运行协议测试..."
-	@bash test/protocol/test_mp4_input.sh
-	@bash test/protocol/test_rtsp_input.sh
-	@bash test/protocol/test_rtmp_output.sh
-	@bash test/protocol/test_rtsp_output.sh
-	@bash test/protocol/test_httpflv_output.sh
-
-# 运行集成测试
-test-integration:
-	@echo "运行集成测试..."
-	@bash test/integration/test_pipe_flow.sh
-
-# 运行性能测试
-test-perf:
-	@echo "运行性能测试..."
-	@bash test/performance/test_concurrent_streams.sh 10
-
-# 运行所有测试
-test-all: test-unit test-protocol test-integration
-
-# 生成测试覆盖率报告
-coverage:
-	cd server && go tool cover -html=coverage.out -o coverage.html
-	cd web && npm run test:coverage
-
-# 启动测试环境
-test-env-up:
-	docker-compose -f test/docker-compose.test.yml up -d
-
-# 停止测试环境
-test-env-down:
-	docker-compose -f test/docker-compose.test.yml down
-```
-
-#### 11.7.2 CI/CD 配置
-
-```yaml
-# .github/workflows/test.yml
-name: Tests
-
-on:
-  push:
-    branches: [main, develop]
-  pull_request:
-    branches: [main]
-
-jobs:
-  unit-test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v3
-      
-      - name: Set up Go
-        uses: actions/setup-go@v4
-        with:
-          go-version: '1.21'
-      
-      - name: Run backend tests
-        run: |
-          cd server
-          go test -v -coverprofile=coverage.out ./...
-      
-      - name: Set up Node
-        uses: actions/setup-node@v3
-        with:
-          node-version: '18'
-      
-      - name: Run frontend tests
-        run: |
-          cd web
-          npm install
-          npm run test:unit
-
-  protocol-test:
-    runs-on: ubuntu-latest
-    needs: unit-test
-    steps:
-      - uses: actions/checkout@v3
-      
-      - name: Start test environment
-        run: make test-env-up
-      
-      - name: Run protocol tests
-        run: make test-protocol
-      
-      - name: Stop test environment
-        if: always()
-        run: make test-env-down
-
-  integration-test:
-    runs-on: ubuntu-latest
-    needs: protocol-test
-    steps:
-      - uses: actions/checkout@v3
-      
-      - name: Start test environment
-        run: make test-env-up
-      
-      - name: Run integration tests
-        run: make test-integration
-      
-      - name: Stop test environment
-        if: always()
-        run: make test-env-down
-```
-
-### 11.8 测试报告
-
-测试完成后生成以下报告：
-
-| 报告类型 | 生成工具 | 输出位置 |
-|----------|----------|----------|
-| 单元测试覆盖率 | go tool cover | server/coverage.html |
-| 前端测试覆盖率 | vitest | web/coverage/ |
-| 协议测试日志 | bash | test/reports/protocol.log |
-| 性能测试报告 | 自定义脚本 | test/reports/performance.json |
+按 **L1 契约层 → L2 组件层（MP4Source → Pipe → RTSP server sink → HTTP-FLV sink → RTMP sink → RTSPInput）→ L3 半集成 → L4 端到端** 顺序，每完成一个组件即用 mock 三角验证，再进入下一个。

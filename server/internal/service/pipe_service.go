@@ -2,7 +2,6 @@ package service
 
 import (
 	"encoding/json"
-	"path/filepath"
 
 	"github.com/x-media/x-media-server/internal/media"
 	"github.com/x-media/x-media-server/internal/model"
@@ -17,7 +16,7 @@ type PipeService struct {
 	pipeRepo   repository.PipeRepository
 	inputRepo  repository.InputRepository
 	outputRepo repository.OutputRepository
-	engine     media.MediaEngine
+	engine     media.Engine
 }
 
 // NewPipeService 创建管道服务
@@ -25,7 +24,7 @@ func NewPipeService(
 	pipeRepo repository.PipeRepository,
 	inputRepo repository.InputRepository,
 	outputRepo repository.OutputRepository,
-	engine media.MediaEngine,
+	engine media.Engine,
 ) *PipeService {
 	return &PipeService{
 		pipeRepo:   pipeRepo,
@@ -208,25 +207,15 @@ func (s *PipeService) Start(id string) error {
 		return errors.NewInternalError(err)
 	}
 
-	if input.Type == model.InputTypeFile && inputConfig.Path != "" {
-		filePath := inputConfig.Path
-		if !filepath.IsAbs(filePath) {
-			abs, err := filepath.Abs(filePath)
-			if err == nil {
-				filePath = abs
-			}
-		}
-		if err := s.engine.StartOutputWithFile(pipe.OutputID, filePath); err != nil {
-			logger.Warnf("启动输出流失败: %v", err)
-		}
-	} else {
-		if err := s.engine.StartOutput(pipe.OutputID); err != nil {
-			logger.Warnf("启动输出流失败: %v", err)
-		}
+	// 启动输出端（RTSP server 需先监听）、输入端，再启动管道数据面。
+	if err := s.engine.StartOutput(pipe.OutputID); err != nil {
+		logger.Warnf("启动输出流失败: %v", err)
 	}
-
 	if err := s.engine.StartInput(pipe.InputID); err != nil {
 		logger.Warnf("启动输入流失败(可能已启动): %v", err)
+	}
+	if err := s.engine.StartPipe(pipe.InputID, pipe.OutputID); err != nil {
+		logger.Warnf("启动管道失败: %v", err)
 	}
 
 	return s.pipeRepo.UpdateStatus(id, model.PipeStatusRunning)

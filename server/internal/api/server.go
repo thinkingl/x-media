@@ -24,7 +24,7 @@ type Server struct {
 	config       *ServerConfig
 	engine       *gin.Engine
 	httpServer   *http.Server
-	mediaEngine  media.MediaEngine
+	mediaEngine  media.Engine
 	inputSvc     *service.InputService
 	outputSvc    *service.OutputService
 	pipeSvc      *service.PipeService
@@ -37,7 +37,7 @@ type Server struct {
 // NewServer 创建API服务器
 func NewServer(
 	config *ServerConfig,
-	mediaEngine media.MediaEngine,
+	mediaEngine media.Engine,
 	inputSvc *service.InputService,
 	outputSvc *service.OutputService,
 	pipeSvc *service.PipeService,

@@ -29,7 +29,7 @@ X-Media: Go media streaming platform with Vue3 web UI. Supports MP4/RTSP inputs,
 ### Backend (from `server/`)
 
 ```bash
-make build         # CGO_ENABLED=1 required for SQLite
+make build         # 纯 Go，无需 CGO（SQLite 用纯 Go 实现）
 make test          # go test ./... -v -count=1
 make test-coverage # generates coverage.out and coverage.html
 make lint          # go vet ./...
@@ -58,7 +58,7 @@ docker-compose down
 - Go 1.21+, Gin, GORM + SQLite, zap + lumberjack (log rotation)
 - Vue3, TypeScript, Vite, Element Plus, Pinia, Vue Router, Axios
 - Testing: `github.com/stretchr/testify` (assert + mock)
-- CGO required (mattn/go-sqlite3)
+- 无 CGO 依赖（SQLite 用纯 Go `github.com/glebarez/sqlite`，构建需 `CGO_ENABLED=0`）
 
 ## Testing patterns
 

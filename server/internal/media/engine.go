@@ -1,43 +1,6 @@
 package media
 
-import (
-	"context"
-)
-
-// MediaEngine 媒体引擎接口
-type MediaEngine interface {
-	Start(ctx context.Context) error
-	Stop() error
-	CreateInput(config *InputConfig) (InputStream, error)
-	CreateOutput(config *OutputConfig) (OutputStream, error)
-	Connect(inputID, outputID string) error
-	Disconnect(inputID, outputID string) error
-	RemoveInput(id string) error
-	RemoveOutput(id string) error
-	StartInput(id string) error
-	StartOutput(id string) error
-	StartOutputWithFile(id string, filePath string) error
-	GetOutput(id string) (OutputStream, error)
-}
-
-// InputStream 输入流接口
-type InputStream interface {
-	ID() string
-	Start(ctx context.Context) error
-	Stop() error
-	Status() StreamStatus
-	ReadPacket() (*MediaPacket, error)
-	OnPacket(handler PacketHandler)
-}
-
-// OutputStream 输出流接口
-type OutputStream interface {
-	ID() string
-	Start(ctx context.Context) error
-	Stop() error
-	Status() StreamStatus
-	WritePacket(pkt *MediaPacket) error
-}
+import "context"
 
 // StreamStatus 流状态
 type StreamStatus string
@@ -70,31 +33,23 @@ type OutputConfig struct {
 	Transport string
 }
 
-// MediaPacket 媒体数据包
-type MediaPacket struct {
-	StreamID   string
-	ChannelID  uint8
-	Kind       string
-	CodecID    CodecID
-	Timestamp  int64
-	IsVideo    bool
-	IsAudio    bool
-	IsKeyFrame bool
-	Data       []byte
-	PTS        int64
-	DTS        int64
-	CodecType  string
-	CodecConfig []byte
+// Engine 媒体引擎接口：服务层依赖的媒体能力子集。
+// MediaHub 为其实现；测试可用 mock 替代。
+type Engine interface {
+	Start(ctx context.Context) error
+	Stop() error
+	CreateInput(config *InputConfig) (Source, error)
+	CreateOutput(config *OutputConfig) (Sink, error)
+	Connect(inputID, outputID string) error
+	Disconnect(inputID, outputID string) error
+	RemoveInput(id string) error
+	RemoveOutput(id string) error
+	StartInput(id string) error
+	StartOutput(id string) error
+	StartOutputWithFile(id string, filePath string) error
+	StartPipe(inputID, outputID string) error
+	GetOutput(id string) (Sink, error)
 }
 
-// PacketHandler 数据包处理函数
-type PacketHandler func(pkt *MediaPacket)
-
-// MediaStats 媒体统计信息
-type MediaStats struct {
-	BytesIn    int64
-	BytesOut   int64
-	Bitrate    int64
-	FPS        float64
-	PacketLoss float64
-}
+// Compile-time check: MediaHub 实现 Engine 接口。
+var _ Engine = (*MediaHub)(nil)

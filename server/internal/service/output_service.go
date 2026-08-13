@@ -16,11 +16,11 @@ import (
 // OutputService 输出端服务
 type OutputService struct {
 	repo   repository.OutputRepository
-	engine media.MediaEngine
+	engine media.Engine
 }
 
 // NewOutputService 创建输出端服务
-func NewOutputService(repo repository.OutputRepository, engine media.MediaEngine) *OutputService {
+func NewOutputService(repo repository.OutputRepository, engine media.Engine) *OutputService {
 	return &OutputService{repo: repo, engine: engine}
 }
 

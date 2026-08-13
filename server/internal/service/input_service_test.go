@@ -53,69 +53,6 @@ func (m *MockInputRepo) UpdateMediaInfo(id string, mediaInfo string) error {
 	return args.Error(0)
 }
 
-// MockInputStream 模拟输入流
-type MockInputStream struct {
-	mock.Mock
-}
-
-func (m *MockInputStream) ID() string {
-	args := m.Called()
-	return args.String(0)
-}
-
-func (m *MockInputStream) Start(ctx context.Context) error {
-	args := m.Called(ctx)
-	return args.Error(0)
-}
-
-func (m *MockInputStream) Stop() error {
-	args := m.Called()
-	return args.Error(0)
-}
-
-func (m *MockInputStream) Status() media.StreamStatus {
-	args := m.Called()
-	return args.Get(0).(media.StreamStatus)
-}
-
-func (m *MockInputStream) ReadPacket() (*media.MediaPacket, error) {
-	args := m.Called()
-	return args.Get(0).(*media.MediaPacket), args.Error(1)
-}
-
-func (m *MockInputStream) OnPacket(handler media.PacketHandler) {
-	m.Called(handler)
-}
-
-// MockOutputStream 模拟输出流
-type MockOutputStream struct {
-	mock.Mock
-}
-
-func (m *MockOutputStream) ID() string {
-	args := m.Called()
-	return args.String(0)
-}
-
-func (m *MockOutputStream) Start(ctx context.Context) error {
-	args := m.Called(ctx)
-	return args.Error(0)
-}
-
-func (m *MockOutputStream) Stop() error {
-	args := m.Called()
-	return args.Error(0)
-}
-
-func (m *MockOutputStream) Status() media.StreamStatus {
-	args := m.Called()
-	return args.Get(0).(media.StreamStatus)
-}
-
-func (m *MockOutputStream) WritePacket(pkt *media.MediaPacket) error {
-	args := m.Called(pkt)
-	return args.Error(0)
-}
 
 // MockMediaEngine 模拟媒体引擎
 type MockMediaEngine struct {
@@ -132,14 +69,20 @@ func (m *MockMediaEngine) Stop() error {
 	return args.Error(0)
 }
 
-func (m *MockMediaEngine) CreateInput(config *media.InputConfig) (media.InputStream, error) {
+func (m *MockMediaEngine) CreateInput(config *media.InputConfig) (media.Source, error) {
 	args := m.Called(config)
-	return args.Get(0).(media.InputStream), args.Error(1)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).(media.Source), args.Error(1)
 }
 
-func (m *MockMediaEngine) CreateOutput(config *media.OutputConfig) (media.OutputStream, error) {
+func (m *MockMediaEngine) CreateOutput(config *media.OutputConfig) (media.Sink, error) {
 	args := m.Called(config)
-	return args.Get(0).(media.OutputStream), args.Error(1)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).(media.Sink), args.Error(1)
 }
 
 func (m *MockMediaEngine) Connect(inputID, outputID string) error {
@@ -177,12 +120,17 @@ func (m *MockMediaEngine) StartOutputWithFile(id string, filePath string) error 
 	return args.Error(0)
 }
 
-func (m *MockMediaEngine) GetOutput(id string) (media.OutputStream, error) {
+func (m *MockMediaEngine) StartPipe(inputID, outputID string) error {
+	args := m.Called(inputID, outputID)
+	return args.Error(0)
+}
+
+func (m *MockMediaEngine) GetOutput(id string) (media.Sink, error) {
 	args := m.Called(id)
 	if args.Get(0) == nil {
 		return nil, args.Error(1)
 	}
-	return args.Get(0).(media.OutputStream), args.Error(1)
+	return args.Get(0).(media.Sink), args.Error(1)
 }
 
 func TestInputService_Create(t *testing.T) {

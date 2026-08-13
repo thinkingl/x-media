@@ -44,10 +44,14 @@ func main() {
 	}
 
 	// 初始化媒体引擎
-	engine := media.NewMediaEngine()
+	engine := media.NewMediaHub()
 	if err := engine.Start(context.Background()); err != nil {
 		logger.Fatalf("启动媒体引擎失败: %v", err)
 	}
+
+	// 配置 RTSP UDP/multicast transport（可选）
+	media.ConfigureRTSPUDP(cfg.Server.RTSPUDPRTPAddr, cfg.Server.RTSPUDPRTCPAddr,
+		cfg.Server.RTSPMulticastIP, cfg.Server.RTSPMulticastRTP, cfg.Server.RTSPMulticastRTCP)
 
 	// 初始化仓储层
 	inputRepo := repository.NewInputRepo(db)

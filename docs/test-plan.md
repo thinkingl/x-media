@@ -1,307 +1,116 @@
-# X-Media 媒体协议测试方案
+# X-Media 测试方案（Media Pipe Mock 三角验证）
 
-## 测试环境
+> 本方案取代旧测试方案，是当前唯一权威测试策略。架构与标准见 `design.md` 第 12 节。
 
-| 项目 | 值 |
-|------|-----|
-| 后端地址 | http://localhost:18090 |
-| 前端地址 | http://localhost:18091 |
-| ffmpeg 版本 | 6.1.1-3ubuntu5 |
-| 测试文件 H264 | uploads/9116241a-2124-d4e3-bf68-e7eaf457446b.mp4 (852x480, AAC) |
-| 测试文件 H265 | test_data/h265_test.mp4 (1280x720, 无音频) |
+## 1. 核心思想
 
-## 已有资源
+管道标准使每个组件只依赖契约、不依赖对端实现，因此每个组件完工后可用 **一个真实组件 + 两个 mock** 独立验证。任何改动都被约束在 mock 边界内，回归成本最低。
 
-| 类型 | 名称 | ID | 配置 | 状态 |
-|------|------|----|------|------|
-| 输入 | limu-teach | f8d05543-... | 文件 H264, loop=true | running |
-| 输入 | test probe | 62936972-... | 文件 H265 | stopped |
-| 输出 | rtsp1 | f67092c3-... | RTSP server :18001 | running |
-| 管道 | - | 10cc1960-... | limu-teach → rtsp1 | running |
-
----
-
-## 测试矩阵
-
-| # | 输入类型 | 输出类型 | 验证方式 | 优先级 |
-|---|---------|---------|---------|--------|
-| T1 | 文件 (H264) | RTSP server | ffplay/ffprobe 拉流 | P0 |
-| T2 | 文件 (H264) | RTMP | ffplay/ffprobe 拉流 | P0 |
-| T3 | 文件 (H264) | HTTP-FLV | ffplay/curl 拉流 | P0 |
-| T4 | 文件 (H265) | RTSP server | ffplay/ffprobe 拉流 | P1 |
-| T5 | 文件 (H265) | RTMP | ffplay/ffprobe 拉流 | P1 |
-| T6 | 文件 (H265) | HTTP-FLV | ffplay/curl 拉流 | P1 |
-| T7 | RTSP 拉流 | RTSP server | 转发验证 | P2 |
-| T8 | RTSP 拉流 | HTTP-FLV | 转发验证 | P2 |
-| T9 | 文件 | 多输出 fan-out | 同时 RTMP + HTTP-FLV | P2 |
-| T10 | 文件 | 多管道并发 | 2个文件→2个输出 | P3 |
-
----
-
-## 测试步骤
-
-### T1: 文件(H264) → RTSP server
-
-**前置：** 系统已有 limu-teach 输入和 rtsp1 输出，管道已连接且 running。
-
-**步骤：**
-
-```bash
-# 1. 验证 RTSP 端口已监听
-ss -tlnp | grep ':18001'
-
-# 2. 用 ffprobe 检测 RTSP 流
-ffprobe -v quiet -rtsp_transport tcp -print_format json -show_streams rtsp://localhost:18001/live
-
-# 3. 用 ffplay 播放 (有界面机器)
-ffplay -rtsp_transport tcp rtsp://localhost:18001/live
-
-# 4. 用 ffmpeg 录制 5 秒验证
-ffmpeg -y -rtsp_transport tcp -i rtsp://localhost:18001/live -t 5 -c copy /tmp/t1_rtsp_out.mp4
-ffprobe -v quiet -print_format json -show_streams /tmp/t1_rtsp_out.mp4
+```
+        MockPipe(内存通道)
+           ↕ 标准帧/信令
+  真实 Source ───────────► MockSink(记录/断言)
+        MockPipe
+           ↕ 标准帧/信令
+  真实 Pipe ◄────────────► MockSource(可编程产帧) + MockSink(记录/断言)
+        MockPipe
+           ↕ 标准帧/信令
+  真实 Sink ◄────────────► MockSource(可编程产帧)
 ```
 
-**预期：**
-- ffprobe 能获取到 H264 视频流信息
-- ffplay 能播放出画面
-- 录制文件能正常播放，codec 为 h264
+## 2. Mock 三件套
 
----
+- **MockSource**：按测试剧本可编程产帧（合法 H.264 AU、AAC 帧），响应信令（`Subscribe`→回预设 `StreamInfo`、处理 `Seek`/`Pause`），记录收到的控制请求。
+- **MockSink**：接收帧并断言（顺序/字节/时间戳/关键帧），可发起信令请求。
+- **MockPipe**：内存双向通道——真实 source 可推帧、真实 sink 可消费，信令 request/response + 事件两路齐全。
 
-### T2: 文件(H264) → RTMP
+## 3. 四层测试金字塔
 
-**步骤：**
+### 3.1 L1 契约层（纯单元，无 mock）
 
-```bash
-# 1. 创建 RTMP 输出 (通过 API)
-curl -s -X POST http://localhost:18090/api/v1/outputs \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "rtmp-test",
-    "type": "rtmp",
-    "config": "{\"url\":\"rtmp://localhost:1935/live/t2\"}"
-  }'
-
-# 2. 创建管道
-curl -s -X POST http://localhost:18090/api/v1/pipes \
-  -H "Content-Type: application/json" \
-  -d '{"input_id":"f8d05543-b506-d93d-21b9-0a70651d1935","output_id":"<rtmp-test-id>"}'
-
-# 3. 启动管道
-curl -s -X POST http://localhost:18090/api/v1/pipes/<pipe-id>/start
-
-# 4. 验证 ffmpeg 进程存在
-ps aux | grep "ffmpeg.*rtmp"
-
-# 5. 用 ffprobe 检测 RTMP 流
-ffprobe -v quiet -print_format json -show_streams rtmp://localhost:1935/live/t2
+- FrameHeader 编解码 round-trip、30 字节边界、magic/version 校验、截断/损坏
+- 信令 Envelope 编解码 round-trip
+- ClockRate 换算表驱动（→ms、→90kHz，视频/音频不同 timescale）
 
-# 6. 用 ffmpeg 录制 5 秒
-ffmpeg -y -i rtmp://localhost:1935/live/t2 -t 5 -c copy /tmp/t2_rtmp_out.flv
-ffprobe -v quiet -print_format json -show_streams /tmp/t2_rtmp_out.flv
-```
+### 3.2 L2 组件层（真实 + 两 mock）——核心
 
-**预期：**
-- ffmpeg 子进程运行中
-- ffprobe 能获取到流信息
-- 录制文件能播放
+| 被测组件 | MockSource | MockPipe | MockSink | 关键断言 |
+|---|---|---|---|---|
+| MP4Source | ✓ | ✓ | | Subscribe 返回正确 SPS/PPS/AAC config/ClockRate；首帧=keyframe；每 AU 一个 sample；PTS/DTS 与 mp4ff 一致且单调；音视频交错；Loop/Seek/Pause/Stop 语义 |
+| RTSPInput | ✓ | ✓ | | 拉流→depacketize→标准帧内容正确；动态 InfoUpdate（音轨后到） |
+| Pipe | ✓ | ✓ | | 信令路由、帧转发（顺序/字节一致）、fan-out 双 sink 独立全量、背压丢帧计数且不阻塞 source、Unsubscribe 停收、事件下发 |
+| RTSP server sink | ✓ | ✓ | | StreamInfo→正确 SDP/format；rtph264 封装字节级校验；ClockRate 换算 |
+| HTTP-FLV sink | ✓ | ✓ | | flv header + sequence header（avcC/ASC）+ tag 头（type 8/9、时间戳 ms、CTS）字节级校验 |
+| RTMP sink | ✓ | ✓ | | 握手 C0/C1/C2、connect AMF0、sequence header、tag 时间戳、24 位回绕、断线重连 |
 
-**说明：** RTMP 输出需要外部 RTMP 服务器接收。如果本地没有 nginx-rtmp，此测试仅验证 ffmpeg 进程是否启动。
+### 3.3 L3 半集成（两个真实 + 一个 mock）
 
----
+- 真实 MP4Source + 真实 Pipe + MockSink：标准帧在真实链路无损
+- MockSource + 真实 Pipe + 真实 RTMP sink：标准→协议字节
+- 真实 MP4Source + 真实 Pipe + 真实 HTTP-FLV sink：离线端到端（flv 落文件/内存校验）
 
-### T3: 文件(H264) → HTTP-FLV
+### 3.4 L4 全真端到端（需外部依赖，手动/CI 可选）
 
-**步骤：**
+- file→rtmp/rtsp/http-flv 用 ffprobe/ffplay 实测（扩展 `server/test/integration/api_test.sh`）
 
-```bash
-# 1. 创建 HTTP-FLV 输出
-curl -s -X POST http://localhost:18090/api/v1/outputs \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "httpflv-test",
-    "type": "http-flv",
-    "config": "{\"addr\":\":18002\"}"
-  }'
+## 4. 测试数据策略
 
-# 2. 创建管道并启动
-curl -s -X POST http://localhost:18090/api/v1/pipes \
-  -H "Content-Type: application/json" \
-  -d '{"input_id":"f8d05543-b506-d93d-21b9-0a70651d1935","output_id":"<httpflv-test-id>"}'
+- **合成字节 fixture**（确定性、离线、毫秒级）：合法 SPS/PPS/IDR 字节 + AAC 帧 + AudioSpecificConfig，用于协议封装测试。
+- **真实文件 fixture**（`server/test/fixtures/test.mp4`，已在仓库）：用于 MP4Source 的 PTS/DTS/交错/Loop 断言。
+- 两种并存：合成字节测协议封装，真实文件测 demux 正确性。
 
-curl -s -X POST http://localhost:18090/api/v1/pipes/<pipe-id>/start
+## 5. RTMP mock server
 
-# 3. 等待 2 秒
-sleep 2
+原生 RTMP sink 测试需要最小 RTMP server（握手 C0/C1/C2 + chunk 解析 + AMF0 假服务端）接收字节并断言，约 200 行，属于测试基建的一部分。确保 RTMP sink 可离线完整验证。
 
-# 4. 用 curl 检测 HTTP-FLV 端点
-curl -s --max-time 5 -o /dev/null -w "%{http_code}" http://localhost:18002/<httpflv-test-id>.flv
+## 6. 时序处理约定
 
-# 5. 用 curl 检测 /live/ 路径
-curl -s --max-time 5 -o /dev/null -w "%{http_code}" http://localhost:18002/live/<httpflv-test-id>.flv
+- 流式异步一律用 channel + 超时等待（`require.Eventually` / 带 deadline 的 select），**禁用 `time.Sleep` 猜测时序**，减少 flaky。
+- 并发相关的断言放在接收 goroutine 内完成后再退出，避免竞态。
 
-# 6. 用 ffplay 播放
-ffplay http://localhost:18002/<httpflv-test-id>.flv
+## 7. 与现有测试的关系
 
-# 7. 用 ffmpeg 录制 5 秒
-ffmpeg -y -i http://localhost:18002/<httpflv-test-id>.flv -t 5 -c copy /tmp/t3_flv_out.flv
-ffprobe -v quiet -print_format json -show_streams /tmp/t3_flv_out.flv
-```
+现有 `MockInputStream`/`MockOutputStream`/`MockMediaEngine`（绑定旧接口）随新架构替换为 `MockSource`/`MockSink`/`MockPipe`。服务层测试（CRUD/校验）保留 mock repo 模式不变。
 
-**预期：**
-- HTTP 端点返回 200
-- Content-Type 为 video/x-flv
-- ffplay 能播放
-- 录制文件是有效 FLV
+## 8. 实施顺序
 
----
+按 **L1 契约层 → L2 组件层（MP4Source → Pipe → RTSP server sink → HTTP-FLV sink → RTMP sink → RTSPInput）→ L3 半集成 → L4 端到端** 顺序，每完成一个组件即用 mock 三角验证，再进入下一个。
 
-### T4: 文件(H265) → RTSP server
+### 8.1 实施状态【已完成】
 
-**步骤：**
+- **L1 契约层**：`frame_test.go` / `signal_test.go` / `clock_test.go` 全通过
+- **L2 组件层**：MP4Source / DefaultPipe / RTSPSink / HTTPFLVSink / RTMPSink / RTSPInput 均通过 Mock 三角验证（`mock source/sink/pipe`）
+- **L3 半集成**：MP4→HTTP-FLV、MP4→RTSP→RTSP 中继通过
+- **L4 端到端**：文件→RTSP server / HTTP-FLV 拉流解码通过（见 design.md 12.9.1）
+- **循环回绕**：`TestMP4Source_AlignLoopAlignment` 验证统一基准回绕后音视频绝对时间轴一致
 
-```bash
-# 1. 停止现有管道和输出 (如果需要新建)
-# 2. 创建新输入使用 H265 文件
-curl -s -X POST http://localhost:18090/api/v1/inputs \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "h265-input",
-    "type": "file",
-    "config": "{\"path\":\"test_data/h265_test.mp4\",\"loop\":true}"
-  }'
+### 8.2 RTSP transport 适配【已完成】
 
-# 3. 创建 RTSP 输出 (端口 18003)
-curl -s -X POST http://localhost:18090/api/v1/outputs \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "rtsp-h265",
-    "type": "rtsp",
-    "config": "{\"mode\":\"server\",\"addr\":\":18003\",\"transport\":\"tcp\"}"
-  }'
+ffmpeg 全 transport 实测通过（`l4_transport_test.sh`）：
 
-# 4. 创建管道并启动
-# 5. 验证
-ffprobe -v quiet -rtsp_transport tcp -print_format json -show_streams rtsp://localhost:18003/live
-```
+| transport | 结果 |
+|---|---|
+| TCP (`-rtsp_transport tcp`) | ✅ frame=100 |
+| UDP (`-rtsp_transport udp`) | ✅ frame=108 |
+| UDP-multicast | ✅ frame=243（loop 回绕有 dts 警告，非致命） |
+| Default（自动协商） | ✅ frame=69 |
 
-**预期：**
-- ffprobe 显示 hevc codec
-- 分辨率 1280x720
+配置项（`config.yaml`）：`rtsp_udp_rtp_addr` / `rtsp_udp_rtcp_addr` / `rtsp_multicast_ip` / `rtsp_multicast_rtp_port` / `rtsp_multicast_rtcp_port`。
 
----
+### 8.3 去除 CGO 依赖【已完成】
 
-### T5: 文件(H265) → RTMP
+- SQLite 驱动从 `gorm.io/driver/sqlite`（依赖 `mattn/go-sqlite3`，CGO）替换为 `github.com/glebarez/sqlite`（纯 Go，基于 `modernc.org/sqlite`）
+- `CGO_ENABLED=0` 构建通过，产物为静态链接
+- Dockerfile 移除 `gcc`/`libsqlite3-dev`/`libsqlite3-0`
 
-步骤同 T2，使用 H265 输入。
+## 9. 端到端测试矩阵（L4，验收基线）
 
----
-
-### T6: 文件(H265) → HTTP-FLV
-
-步骤同 T3，使用 H265 输入。
-
----
-
-### T7: RTSP 拉流 → RTSP server
-
-**步骤：**
-
-```bash
-# 1. 用 ffmpeg 启动一个临时 RTSP 源
-ffmpeg -re -i test_data/h265_test.mp4 -c copy -f rtsp rtsp://localhost:18004/source &
-FFMPEG_PID=$!
-
-# 2. 创建 RTSP 拉流输入
-curl -s -X POST http://localhost:18090/api/v1/inputs \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "rtsp-pull",
-    "type": "rtsp",
-    "config": "{\"url\":\"rtsp://localhost:18004/source\",\"transport\":\"tcp\"}"
-  }'
-
-# 3. 创建 RTSP 输出 (18005)
-# 4. 创建管道并启动
-# 5. 验证
-ffprobe -v quiet -rtsp_transport tcp -print_format json -show_streams rtsp://localhost:18005/live
-
-# 6. 清理
-kill $FFMPEG_PID
-```
-
-**预期：**
-- 拉流输入正常获取数据
-- 转发到 RTSP 输出端，可播放
-
----
-
-### T8: RTSP 拉流 → HTTP-FLV
-
-步骤同 T7，输出改为 HTTP-FLV。
-
----
-
-### T9: 文件 → 多输出 fan-out
-
-**步骤：**
-
-```bash
-# 1. 创建 2 个输出 (RTMP + HTTP-FLV)
-# 2. 创建 2 条管道，同一个输入连接到 2 个输出
-# 3. 启动两条管道
-# 4. 同时验证两个输出端都有数据
-```
-
-**预期：**
-- 两个输出端同时收到数据
-- 不互相影响
-
----
-
-### T10: 多管道并发
-
-**步骤：**
-
-```bash
-# 1. 创建 2 个文件输入 (H264 + H265)
-# 2. 创建 2 个 HTTP-FLV 输出 (不同端口)
-# 3. 创建 2 条管道
-# 4. 同时验证
-```
-
----
-
-## 清理命令
-
-```bash
-# 停止所有管道
-for pid in $(curl -s http://localhost:18090/api/v1/pipes | jq -r '.data[].id'); do
-  curl -s -X POST http://localhost:18090/api/v1/pipes/$pid/stop
-  curl -s -X DELETE http://localhost:18090/api/v1/pipes/$pid
-done
-
-# 停止所有输出
-for oid in $(curl -s http://localhost:18090/api/v1/outputs | jq -r '.data[].id'); do
-  curl -s -X POST http://localhost:18090/api/v1/outputs/$oid/stop
-  curl -s -X DELETE http://localhost:18090/api/v1/outputs/$oid
-done
-
-# 停止所有输入 (非系统默认的)
-for iid in $(curl -s http://localhost:18090/api/v1/inputs | jq -r '.data[].id'); do
-  curl -s -X POST http://localhost:18090/api/v1/inputs/$iid/stop
-done
-```
-
-## 已知限制
-
-1. RTMP 输出需要外部 RTMP 服务器 (如 nginx-rtmp-module) 才能验证完整链路
-2. RTSP 输出当前使用 ffmpeg 子进程推流，server 模式需要 ffmpeg 内置 RTSP server 支持
-3. H265 文件无音频流，仅验证视频
-4. 当前 ffmpeg 输出格式固定为 h264，H265 文件需要调整 ffmpeg 参数
-
-## 待确认
-
-1. 是否需要搭建本地 RTMP 服务器 (nginx-rtmp) 用于 T2/T5 测试？
-2. H265 输出是否需要支持（当前 ffmpeg 参数写死 h264）？
-3. 测试优先级是否合理？P0 是否全部执行？
+| # | 输入 | 输出 | 验证方式 | 优先级 |
+|---|------|------|---------|--------|
+| T1 | 文件 H264 | RTSP server | ffprobe 拉流解码 0 错误 | P0 |
+| T2 | 文件 H264 | RTMP | ffplay/ffprobe 拉流 | P0 |
+| T3 | 文件 H264 | HTTP-FLV | ffplay/curl 拉流 | P0 |
+| T4 | 文件 H265 | RTSP server | ffplay/ffprobe 拉流 | P1 |
+| T5 | RTSP 拉流 | RTSP server | 转发验证 | P1 |
+| T6 | 文件 | 多输出 fan-out | 同时 RTMP + HTTP-FLV | P1 |
+| T7 | 文件 | 多管道并发 | 2 个文件→2 个输出 | P2 |

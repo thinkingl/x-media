@@ -18,6 +18,12 @@ type ServerConfig struct {
 	HTTPAddr string `yaml:"http_addr"`
 	RTMPAddr string `yaml:"rtmp_addr"`
 	RTSPAddr string `yaml:"rtsp_addr"`
+	// RTSP UDP transport 端口（可选；不配置则 RTSP 仅支持 TCP）
+	RTSPUDPRTPAddr   string `yaml:"rtsp_udp_rtp_addr"`
+	RTSPUDPRTCPAddr  string `yaml:"rtsp_udp_rtcp_addr"`
+	RTSPMulticastIP  string `yaml:"rtsp_multicast_ip"`
+	RTSPMulticastRTP int    `yaml:"rtsp_multicast_rtp_port"`
+	RTSPMulticastRTCP int   `yaml:"rtsp_multicast_rtcp_port"`
 }
 
 // DatabaseConfig 数据库配置

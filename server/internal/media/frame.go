@@ -126,40 +126,6 @@ func WriteFrame(w io.Writer, f *Frame) error {
 	return err
 }
 
-func (f *Frame) ToMediaPacket() *MediaPacket {
-	return &MediaPacket{
-		StreamID:   fmt.Sprintf("ch%d", f.Header.ChannelID),
-		ChannelID:  f.Header.ChannelID,
-		Kind:       f.Header.FrameType.String(),
-		CodecType:  f.Header.Codec.String(),
-		CodecID:    f.Header.Codec,
-		IsVideo:    f.Header.FrameType == FrameTypeVideo,
-		IsAudio:    f.Header.FrameType == FrameTypeAudio,
-		IsKeyFrame: f.Header.Flags&FlagKeyframe != 0,
-		Data:       f.Payload,
-		PTS:        f.Header.PTS,
-		DTS:        f.Header.DTS,
-		Timestamp:  f.Header.PTS / 1000,
-	}
-}
-
-func MediaPacketToFrame(pkt *MediaPacket) *Frame {
-	var flags FrameFlag
-	if pkt.IsKeyFrame {
-		flags |= FlagKeyframe
-	}
-
-	return NewFrame(
-		pkt.ChannelID,
-		FrameTypeFromString(pkt.Kind),
-		pkt.CodecID,
-		flags,
-		pkt.PTS,
-		pkt.DTS,
-		pkt.Data,
-	)
-}
-
 func FrameTypeFromString(s string) FrameType {
 	switch s {
 	case "video":
