@@ -24,22 +24,28 @@ import (
 type MP4Source struct {
 	mu sync.RWMutex
 
-	id      string
-	path    string
-	loop    bool
-	status  StreamStatus
-	handler FrameHandler
+	id       string
+	path     string
+	loop     bool
+	status   StreamStatus
+	handler  FrameHandler
 	handlers []FrameHandler
 
 	file    *os.File
 	mp4f    *mp4.File
 	streams []StreamInfo
 	tracks  []*mp4Track
-	baseTr  *mp4Track   // 基准 track（时长最长者），循环回绕以它为准
+	baseTr  *mp4Track // 基准 track（时长最长者），循环回绕以它为准
 	cancel  context.CancelFunc
 	done    chan struct{} // readLoop 退出信号
 
 	throttleOverride time.Duration // 测试辅助：>0 时覆盖默认节流间隔，加速驱动回绕
+
+	// 无漂移节流锚点：以基准 track 媒体时间轴锚定单调墙钟，
+	// 媒体时间轴相对墙钟跳变（Start/Seek/Resume）时重新锚定。
+	paceAnchor      time.Time
+	paceAnchorMedia int64
+	paceAnchored    bool
 }
 
 // mp4Track 单个媒体轨道的运行时状态。
@@ -48,10 +54,10 @@ type mp4Track struct {
 	trak      *mp4.TrakBox
 	timescale uint32
 	sampleNr  uint32
-	play      bool          // 是否允许发送（Pause 时为 false）
+	play      bool // 是否允许发送（Pause 时为 false）
 	isVideo   bool
-	isBase    bool          // 是否为基准 track（时长最长者），决定循环回绕节奏
-	loopDur   int64         // 已累计的循环偏移（自身 timescale），保证循环时时间戳单调递增
+	isBase    bool  // 是否为基准 track（时长最长者），决定循环回绕节奏
+	loopDur   int64 // 已累计的循环偏移（自身 timescale），保证循环时时间戳单调递增
 }
 
 func NewMP4Source(config *InputConfig) (*MP4Source, error) {
@@ -278,6 +284,13 @@ func (m *MP4Source) readLoop(ctx context.Context) {
 			return
 		}
 
+		m.mu.RLock()
+		anchored := m.paceAnchored
+		m.mu.RUnlock()
+		if !anchored {
+			m.reAnchorPacing()
+		}
+
 		baseDone = false
 		emitted := false
 		for _, tr := range tracks {
@@ -346,6 +359,30 @@ func (m *MP4Source) readLoop(ctx context.Context) {
 		}
 
 		// 节流：模拟实时媒体节奏，避免忙转与瞬间读完文件。
+		// 本圈有产帧时按基准 track 媒体时间轴无漂移推进；
+		// 暂停/无产帧时退化为固定间隔轮询，避免忙转。
+		if emitted {
+			if m.throttleOverride > 0 {
+				select {
+				case <-ctx.Done():
+					exitReason = "context cancelled (Stop called)"
+					return
+				case <-time.After(m.throttleOverride):
+				}
+				continue
+			}
+			if target := m.paceTarget(); !target.IsZero() {
+				if d := time.Until(target); d > 0 {
+					select {
+					case <-ctx.Done():
+						exitReason = "context cancelled (Stop called)"
+						return
+					case <-time.After(d):
+					}
+				}
+			}
+			continue
+		}
 		select {
 		case <-ctx.Done():
 			exitReason = "context cancelled (Stop called)"
@@ -450,6 +487,62 @@ func (m *MP4Source) throttle() time.Duration {
 		}
 	}
 	return 5 * time.Millisecond
+}
+
+// paceTarget 返回下一帧的墙钟调度目标（无漂移节流）。
+// 以基准 track 的媒体时间轴（dts+loopDur，自身 timescale）锚定单调墙钟，
+// 使发送节奏与媒体时间戳精确一致，消除固定 sleep + 处理开销造成的累计漂移。
+// 返回零值表示当前无法调度（暂停/无样本/无基准轨道）。
+func (m *MP4Source) paceTarget() time.Time {
+	m.mu.RLock()
+	base := m.baseTr
+	if base == nil || base.trak == nil || base.trak.Mdia == nil ||
+		base.trak.Mdia.Minf == nil || base.trak.Mdia.Minf.Stbl == nil ||
+		base.trak.Mdia.Minf.Stbl.Stts == nil {
+		m.mu.RUnlock()
+		return time.Time{}
+	}
+	sampleNr := base.sampleNr
+	loopDur := base.loopDur
+	ts := int64(base.timescale)
+	anchor := m.paceAnchor
+	anchorMedia := m.paceAnchorMedia
+	m.mu.RUnlock()
+	if ts <= 0 {
+		ts = 90000
+	}
+	if sampleNr > base.trak.GetNrSamples() {
+		return time.Time{}
+	}
+	stts := base.trak.Mdia.Minf.Stbl.Stts
+	dts, _ := stts.GetDecodeTime(sampleNr)
+	media := int64(dts) + loopDur
+	if media <= anchorMedia {
+		return time.Time{}
+	}
+	return anchor.Add(time.Duration((media - anchorMedia) * int64(time.Second) / ts))
+}
+
+// reAnchorPacing 在媒体时间轴相对墙钟跳变后重置无漂移节流锚点，
+// 避免按旧锚点休眠造成长时间等待或突发追赶。Start/Seek/Resume 时调用。
+func (m *MP4Source) reAnchorPacing() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	base := m.baseTr
+	if base == nil || base.trak == nil || base.trak.Mdia == nil ||
+		base.trak.Mdia.Minf == nil || base.trak.Mdia.Minf.Stbl == nil ||
+		base.trak.Mdia.Minf.Stbl.Stts == nil {
+		return
+	}
+	media := base.loopDur
+	if nr := base.sampleNr; nr <= base.trak.GetNrSamples() {
+		if dts, _ := base.trak.Mdia.Minf.Stbl.Stts.GetDecodeTime(nr); dts > 0 {
+			media += int64(dts)
+		}
+	}
+	m.paceAnchor = time.Now()
+	m.paceAnchorMedia = media
+	m.paceAnchored = true
 }
 
 // videoFPS 从 stts 推导平均帧率。
@@ -606,16 +699,20 @@ func (m *MP4Source) Signal(ctx context.Context, sig *Signal) (*Signal, error) {
 
 func (m *MP4Source) setPlay(play bool) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	for _, tr := range m.tracks {
 		tr.play = play
+	}
+	reAnchor := play && m.paceAnchored
+	m.mu.Unlock()
+	// Resume/Start 时媒体时间轴相对墙钟已停留，重新锚定避免突发追赶。
+	if reAnchor {
+		m.reAnchorPacing()
 	}
 }
 
 // seek 将指定子通道定位到 PTS。
 func (m *MP4Source) seek(channelID uint8, pts int64) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	for _, tr := range m.tracks {
 		if tr.info.ChannelID != channelID {
 			continue
@@ -639,6 +736,9 @@ func (m *MP4Source) seek(channelID uint8, pts int64) {
 		tr.sampleNr = nr
 		tr.play = true
 	}
+	m.mu.Unlock()
+	// 跳转后媒体时间轴相对墙钟前跳，重新锚定避免按旧锚点长时间休眠。
+	m.reAnchorPacing()
 }
 
 func (m *MP4Source) SetFrameHandler(h FrameHandler) {

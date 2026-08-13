@@ -65,9 +65,15 @@ func (h *MediaHub) Stop() error {
 }
 
 // CreateInput 创建输入 Source（兼容旧服务层接口）。
+// 幂等：同 ID 已存在时直接返回既有实例，避免重复创建导致旧实例
+// 的 readLoop 泄漏（旧实例会持续读文件并 emit，造成 CPU 争用与重复帧）。
 func (h *MediaHub) CreateInput(config *InputConfig) (Source, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+
+	if src, ok := h.sources[config.ID]; ok {
+		return src, nil
+	}
 
 	var src Source
 	var err error
@@ -88,9 +94,15 @@ func (h *MediaHub) CreateInput(config *InputConfig) (Source, error) {
 }
 
 // CreateOutput 创建输出 Sink（兼容旧服务层接口）。
+// 幂等：同 ID 已存在时直接返回既有实例，避免重复创建导致旧实例
+// 的 RTSP server 注册与 SDP 状态泄漏。
 func (h *MediaHub) CreateOutput(config *OutputConfig) (Sink, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+
+	if sink, ok := h.sinks[config.ID]; ok {
+		return sink, nil
+	}
 
 	var sink Sink
 	var err error
