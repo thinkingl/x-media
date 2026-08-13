@@ -52,6 +52,10 @@
 ### 3.4 L4 全真端到端（需外部依赖，手动/CI 可选）
 
 - file→rtmp/rtsp/http-flv 用 ffprobe/ffplay 实测（扩展 `server/test/integration/api_test.sh`）
+- **基准参照式 E2E（内容锚定，推荐）**：`server/test/e2e/`（`make e2e`，需 ffmpeg）。
+  手工生成的基准 MP4（帧号条码 + 7 段数码 + DTMF 音频）经真实 MP4Source→Pipe→RTSPSink
+  推送，ffmpeg 拉流解码后与基准逐帧比对，定量校验丢帧/重复/损坏/内容不一致。
+  详见 `docs/e2e-reference-test.md`。
 
 ## 4. 测试数据策略
 

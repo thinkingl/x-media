@@ -79,6 +79,21 @@ func (r *RTSPSink) Status() StreamStatus {
 	return r.status
 }
 
+// Addr 返回 RTSP server 实际监听地址（addr 配置为 :0 时返回真实绑定端口）。
+func (r *RTSPSink) Addr() string {
+	r.mu.RLock()
+	handler := r.handler
+	addr := r.addr
+	r.mu.RUnlock()
+	if handler == nil || handler.server == nil {
+		return addr
+	}
+	if l := handler.server.NetListener(); l != nil {
+		return l.Addr().String()
+	}
+	return handler.server.RTSPAddress
+}
+
 func (r *RTSPSink) Start(ctx context.Context) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()

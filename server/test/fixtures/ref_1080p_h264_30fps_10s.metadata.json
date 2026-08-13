@@ -1,0 +1,58 @@
+{
+  "scenario": "ref_1080p_h264_30fps_10s",
+  "loop": false,
+  "video": {
+    "codec": "h264",
+    "width": 1920,
+    "height": 1080,
+    "fps": 30,
+    "frames": 300,
+    "gop": 60,
+    "bframes": -1,
+    "crf": 23,
+    "crop": {
+      "x": 0,
+      "y": 0,
+      "w": 720,
+      "h": 64
+    },
+    "barcode": {
+      "x": 16,
+      "y": 16,
+      "block_w": 16,
+      "block_h": 40,
+      "sync_blocks": 2,
+      "data_bits": 24,
+      "crc_bits": 8
+    },
+    "background": {
+      "x": 600,
+      "y": 0,
+      "w": 120,
+      "h": 64,
+      "mod": 256
+    }
+  },
+  "audio": {
+    "codec": "aac",
+    "sample_rate": 48000,
+    "channels": 1,
+    "chunk_size": 1024,
+    "chunks": 468,
+    "dtmf": {
+      "rows": [
+        697,
+        770,
+        852,
+        941
+      ],
+      "cols": [
+        1209,
+        1336,
+        1477,
+        1633
+      ],
+      "bits_per_chunk": 4
+    }
+  }
+}
