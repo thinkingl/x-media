@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/bluenviron/gortsplib/v5"
 	"github.com/bluenviron/gortsplib/v5/pkg/description"
@@ -34,26 +35,27 @@ type RTSPSink struct {
 	addr   string
 	status StreamStatus
 
-	handler *RTSPServerHandler
-	stream  *gortsplib.ServerStream
-	h264Enc *rtph264.Encoder
-	h265Enc *rtph265.Encoder
-	h265    bool         // 当前视频是否为 HEVC
-	vMedia  *description.Media
-	aMedia  *description.Media
-	videoClockRate int
-	audioClockRate int
+	handler         *RTSPServerHandler
+	stream          *gortsplib.ServerStream
+	h264Enc         *rtph264.Encoder
+	h265Enc         *rtph265.Encoder
+	h265            bool // 当前视频是否为 HEVC
+	vMedia          *description.Media
+	aMedia          *description.Media
+	videoClockRate  int
+	audioClockRate  int
 	audioSampleRate int
-	ready          bool
+	ready           bool
 	videoFrameCount int
 
-	sps           []byte     // 缓存的 SPS（供新 reader PLAY 时初始化）
-	pps           []byte
-	vps           []byte     // HEVC VPS（h265 时使用）
-	lastVideoPTS  int64      // 最近视频帧 PTS（供参数集 RTP 时间戳）
-	lastKeyframe  []byte     // 最近完整关键帧（含 SPS/PPS/IDR），新 reader 重放
-	lastKeyframePTS int64    // 关键帧原始 PTS
-	gopFrames     []gopFrame // 最近一个完整 GOP 的帧缓存（从关键帧开始），供新 reader 重放
+	sps             []byte // 缓存的 SPS（供新 reader PLAY 时初始化）
+	pps             []byte
+	vps             []byte     // HEVC VPS（h265 时使用）
+	lastVideoPTS    int64      // 最近视频帧 PTS（供参数集 RTP 时间戳）
+	lastKeyframe    []byte     // 最近完整关键帧（含 SPS/PPS/IDR），新 reader 重放
+	lastKeyframePTS int64      // 关键帧原始 PTS
+	gopFrames       []gopFrame // 最近一个完整 GOP 的帧缓存（从关键帧开始），供新 reader 重放
+	audioSeq        uint16     // 音频 RTP 序列号（每帧递增，避免接收端判定乱序/丢包）
 }
 
 func NewRTSPSink(config *OutputConfig) (*RTSPSink, error) {
@@ -319,7 +321,7 @@ func (r *RTSPSink) initEncoder() error {
 		return nil
 	}
 	enc := &rtph264.Encoder{
-		PayloadType:        96,
+		PayloadType:       96,
 		PacketizationMode: 1,
 	}
 	if err := enc.Init(); err != nil {
@@ -378,12 +380,14 @@ func (r *RTSPSink) writeVideo(f *Frame, stream *gortsplib.ServerStream) error {
 	}
 
 	// 累积 GOP 缓存：关键帧开启新 GOP，其余帧追加。供新 reader 重放完整 GOP。
-	// H.265 关键帧需前置 VPS/SPS/PPS（HEVC 参数集只存在于 hvcC，不在 sample 数据里）。
+	// 关键帧（H264/H265 均）前置参数集：H264 参数集在 avcC 而不在 sample 数据里，
+	// 若不在关键帧内带上 SPS/PPS，新 reader 即使收到参数集（PLAY 时单独发）也可能
+	// 因时间戳不匹配而无法初始化解码器 → 花屏/黑屏直到下一个带参数集的关键帧。
 	r.mu.Lock()
 	r.lastVideoPTS = f.Header.PTS
 	if f.Header.Flags&FlagKeyframe != 0 {
+		paramNals := make([][]byte, 0, 3+len(nalUnits))
 		if h265 {
-			paramNals := make([][]byte, 0, 3+len(nalUnits))
 			if len(r.vps) > 0 {
 				paramNals = append(paramNals, r.vps)
 			}
@@ -393,8 +397,15 @@ func (r *RTSPSink) writeVideo(f *Frame, stream *gortsplib.ServerStream) error {
 			if len(r.pps) > 0 {
 				paramNals = append(paramNals, r.pps)
 			}
-			nalUnits = append(paramNals, nalUnits...)
+		} else {
+			if len(r.sps) > 0 {
+				paramNals = append(paramNals, r.sps)
+			}
+			if len(r.pps) > 0 {
+				paramNals = append(paramNals, r.pps)
+			}
 		}
+		nalUnits = append(paramNals, nalUnits...)
 		r.gopFrames = []gopFrame{{payload: joinNals(nalUnits), pts: f.Header.PTS}}
 		r.lastKeyframe = joinNals(nalUnits)
 		r.lastKeyframePTS = f.Header.PTS
@@ -420,13 +431,34 @@ func (r *RTSPSink) writeVideo(f *Frame, stream *gortsplib.ServerStream) error {
 		logger.Errorf("RTSP sink H264 encode: %v", err)
 		return nil
 	}
-	for _, p := range pkts {
+
+	// 帧内分片节流：大帧（关键帧，几十个 RTP 分片）如果瞬间全发，
+	// 会在 <1ms 内把接收方 UDP 缓冲打满而丢包（VLC 固定位置花屏根因）。
+	// 仅在分片数较多时在分片之间加最小间隔摊开发送；小帧（1~2 分片）直接发，
+	// 不影响实时性。不依赖帧间 PTS，天然支持多输入复用一个 sink。
+	spread := packetSpreadInterval(len(pkts))
+	for i, p := range pkts {
 		p.Timestamp = pts
 		stream.WritePacketRTP(vMedia, p)
+		if spread > 0 && i < len(pkts)-1 {
+			time.Sleep(spread)
+		}
 	}
 	return nil
 }
 
+// packetSpreadInterval 根据一帧的 RTP 分片数决定分片间的发送间隔。
+// 分片越多（关键帧越大）间隔越大，把帧内所有分片摊到合理时间窗内发出，
+// 避免瞬时突发打满接收缓冲。分片少（小帧）返回 0 表示不分片直接发。
+func packetSpreadInterval(numPackets int) time.Duration {
+	if numPackets < 8 {
+		return 0
+	}
+	// 用固定窗格：每分片最多占 500µs。30fps 关键帧约 30-70 分片，
+	// 即 15-35ms 内摊开发完——与一帧的实时时长（33ms）同量级，
+	// 接收方有充足时间消费，不丢包，也不明显拖慢实时性。
+	return 500 * time.Microsecond
+}
 
 func (r *RTSPSink) writeAudio(f *Frame, stream *gortsplib.ServerStream) error {
 	r.mu.RLock()
@@ -457,12 +489,16 @@ func (r *RTSPSink) writeAudio(f *Frame, stream *gortsplib.ServerStream) error {
 	payload[3] = byte(auHeader)
 	copy(payload[4:], f.Payload)
 
+	// 音频 RTP 包序列号必须随每帧递增；固定 0 会导致接收端判定乱序/丢包。
+	seq := r.nextAudioSeq()
+
 	rtpPkt := &rtp.Packet{
 		Header: rtp.Header{
-			Version:   2,
-			PayloadType: 97,
-			Timestamp: pts,
-			SSRC:      0x12345678,
+			Version:        2,
+			PayloadType:    97,
+			SequenceNumber: seq,
+			Timestamp:      pts,
+			SSRC:           0x12345678,
 		},
 		Payload: payload,
 	}
@@ -470,8 +506,49 @@ func (r *RTSPSink) writeAudio(f *Frame, stream *gortsplib.ServerStream) error {
 	return nil
 }
 
+// nextAudioSeq 返回并递增音频 RTP 序列号（线程安全）。
+func (r *RTSPSink) nextAudioSeq() uint16 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.audioSeq++
+	return r.audioSeq
+}
+
 func (r *RTSPSink) Notify(sig *Signal) error {
 	return nil
+}
+
+// Clients 返回当前连接的 RTSP 拉流客户端信息（实现 ClientInfoProvider）。
+func (r *RTSPSink) Clients() []ClientInfo {
+	r.mu.RLock()
+	handler := r.handler
+	r.mu.RUnlock()
+	if handler == nil {
+		return nil
+	}
+	path := "live/" + r.id
+
+	handler.mutex.RLock()
+	p, ok := handler.paths[path]
+	var readers map[*gortsplib.ServerSession]*rtspReader
+	if ok {
+		readers = p.readers
+	}
+	handler.mutex.RUnlock()
+
+	if len(readers) == 0 {
+		return nil
+	}
+	out := make([]ClientInfo, 0, len(readers))
+	for _, rd := range readers {
+		out = append(out, ClientInfo{
+			Address:     rd.address,
+			UserAgent:   rd.userAgent,
+			Transport:   rd.transport,
+			ConnectedAt: rd.connectedAt,
+		})
+	}
+	return out
 }
 
 func (r *RTSPSink) Stop() error {

@@ -117,6 +117,7 @@ func (s *Server) registerRoutes() {
 			outputs.DELETE("/:id", s.deleteOutput)
 			outputs.POST("/:id/start", s.startOutput)
 			outputs.POST("/:id/stop", s.stopOutput)
+			outputs.GET("/:id/clients", s.getOutputClients)
 		}
 
 		// 管道

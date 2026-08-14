@@ -32,6 +32,13 @@ export interface Output {
   updated_at: string
 }
 
+export interface ClientInfo {
+  address: string
+  user_agent: string
+  transport: string
+  connected_at: string
+}
+
 export interface Pipe {
   id: string
   input_id: string
@@ -106,6 +113,7 @@ export const probeInput = (id: string) => api.post<ApiResponse<MediaInfo>>(`/inp
 // Outputs
 export const getOutputs = () => api.get<ApiResponse<Output[]>>('/outputs')
 export const getOutput = (id: string) => api.get<ApiResponse<Output>>(`/outputs/${id}`)
+export const getOutputClients = (id: string) => api.get<ApiResponse<ClientInfo[]>>(`/outputs/${id}/clients`)
 export const createOutput = (data: { name: string; type: string; config: string }) =>
   api.post<ApiResponse<Output>>('/outputs', data)
 export const updateOutput = (id: string, data: { name: string; type: string; config: string }) =>

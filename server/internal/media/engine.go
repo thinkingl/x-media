@@ -21,6 +21,9 @@ type InputConfig struct {
 	Speed     float64
 	Transport string // tcp/udp
 	Timeout   int
+	// UDPReadBufferSize UDP 拉流读缓冲大小（字节）；0 用 OS 默认值。
+	// 本机回环或高突发场景下调大可减少丢包。
+	UDPReadBufferSize int
 }
 
 // OutputConfig 输出流配置
@@ -49,6 +52,9 @@ type Engine interface {
 	StartOutputWithFile(id string, filePath string) error
 	StartPipe(inputID, outputID string) error
 	GetOutput(id string) (Sink, error)
+	// GetOutputClients 返回指定输出端当前连接的客户端信息。
+	// 输出端未实现 ClientInfoProvider 时返回空列表。
+	GetOutputClients(id string) ([]ClientInfo, error)
 }
 
 // Compile-time check: MediaHub 实现 Engine 接口。

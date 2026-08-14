@@ -132,6 +132,14 @@ func (m *MockMediaEngine) GetOutput(id string) (media.Sink, error) {
 	return args.Get(0).(media.Sink), args.Error(1)
 }
 
+func (m *MockMediaEngine) GetOutputClients(id string) ([]media.ClientInfo, error) {
+	args := m.Called(id)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).([]media.ClientInfo), args.Error(1)
+}
+
 func TestInputService_Create(t *testing.T) {
 	t.Run("成功创建MP4输入端", func(t *testing.T) {
 		// Arrange

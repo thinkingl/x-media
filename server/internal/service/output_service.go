@@ -68,6 +68,14 @@ func (s *OutputService) GetByID(id string) (*model.Output, error) {
 	return output, nil
 }
 
+// GetClients 返回指定输出端当前连接的客户端信息。
+func (s *OutputService) GetClients(id string) ([]media.ClientInfo, error) {
+	if _, err := s.repo.GetByID(id); err != nil {
+		return nil, errors.NewNotFoundError("输出端", id)
+	}
+	return s.engine.GetOutputClients(id)
+}
+
 // GetAll 获取所有输出端
 func (s *OutputService) GetAll() ([]model.Output, error) {
 	return s.repo.GetAll()

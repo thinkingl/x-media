@@ -290,6 +290,19 @@ func (h *MediaHub) GetOutput(id string) (Sink, error) {
 // GetSink 获取输出 Sink 别名。
 func (h *MediaHub) GetSink(id string) (Sink, error) { return h.GetOutput(id) }
 
+// GetOutputClients 返回指定输出端当前连接的客户端信息。
+func (h *MediaHub) GetOutputClients(id string) ([]ClientInfo, error) {
+	sink, err := h.GetOutput(id)
+	if err != nil {
+		return nil, err
+	}
+	prov, ok := sink.(ClientInfoProvider)
+	if !ok {
+		return nil, nil // 该输出端类型不支持客户端信息
+	}
+	return prov.Clients(), nil
+}
+
 func pipeKey(inputID, outputID string) string {
 	return inputID + "->" + outputID
 }

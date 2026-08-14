@@ -77,6 +77,7 @@ func TestPipeService_Create(t *testing.T) {
 		mockInputRepo.On("GetByID", "input_001").Return(input, nil)
 		mockOutputRepo.On("GetByID", "output_001").Return(output, nil)
 		mockPipeRepo.On("GetByInputID", "input_001").Return([]model.Pipe{}, nil)
+		mockPipeRepo.On("GetByOutputID", "output_001").Return([]model.Pipe{}, nil)
 		mockPipeRepo.On("Create", mock.AnythingOfType("*model.Pipe")).Return(nil)
 
 		// Act

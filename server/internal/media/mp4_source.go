@@ -352,13 +352,12 @@ func (m *MP4Source) readLoop(ctx context.Context) {
 		baseDone = false
 		emitted := false
 
-		// 迭代时钟：基准 track 下一个 sample 的绝对媒体时间（µs）。
-		// 非基准 track 在本迭代内补发到媒体时间追上该时钟，保持各自帧率。
-		baseClock := int64(-1)
-		if base != nil {
-			baseClock = m.peekMediaAbs(base)
-		}
-
+		// 迭代时钟：所有 track 各自的下一帧绝对媒体时间（µs），选最早者驱动本迭代。
+		// 每个 track 按自己的时间戳节奏推进：音视频不再"视频时钟捆绑突发"，
+		// 而是各自到点即发，避免音频帧攒批随视频帧一起发出导致接收端抖动。
+		// 找所有 track 中"下一帧最早"的 track 作为本迭代的发送候选。
+		var nextTr *mp4Track
+		nextMedia := int64(-1)
 		for _, tr := range tracks {
 			m.mu.RLock()
 			play := tr.play
@@ -366,40 +365,34 @@ func (m *MP4Source) readLoop(ctx context.Context) {
 			if !play {
 				continue
 			}
-
-			if tr != base {
-				// 非基准 track：按自身帧率补发，直到媒体时间追上基准时钟。
-				for {
-					media := m.peekMediaAbs(tr)
-					if media < 0 || (baseClock >= 0 && media > baseClock) {
-						break
-					}
-					e, done, err := m.emitNext(tr, ws, &tick, &first)
-					if err != nil {
-						logger.Errorf("MP4 source read error [%s]: %v", m.id, err)
-						exitReason = "nextSample error: " + err.Error()
-						return
-					}
-					if done {
-						break // 防御：peek 已返回 -1
-					}
-					emitted = emitted || e
-				}
+			media := m.peekMediaAbs(tr)
+			if media < 0 {
 				continue
 			}
+			if nextMedia < 0 || media < nextMedia {
+				nextMedia = media
+				nextTr = tr
+			}
+		}
 
-			// 基准 track：每迭代一个 sample。
+		if nextTr != nil {
+			tr := nextTr
 			e, done, err := m.emitNext(tr, ws, &tick, &first)
 			if err != nil {
 				logger.Errorf("MP4 source read error [%s]: %v", m.id, err)
 				exitReason = "nextSample error: " + err.Error()
 				return
 			}
-			if done {
+			if done && tr == base {
 				baseDone = true
-				continue
 			}
 			emitted = emitted || e
+			// 采用"每迭代发最早帧"策略后，音频与视频交错按各自时钟发出，无需再补发。
+		} else {
+			// 所有 track 的 peek 均返回 -1（已读完或暂停）：若基准 track 已读完则触发回绕。
+			m.mu.RLock()
+			baseDone = base != nil && base.sampleNr > base.trak.GetNrSamples()
+			m.mu.RUnlock()
 		}
 
 		if !emitted && !baseDone {
@@ -422,7 +415,7 @@ func (m *MP4Source) readLoop(ctx context.Context) {
 		}
 
 		// 节流：模拟实时媒体节奏，避免忙转与瞬间读完文件。
-		// 本圈有产帧时按基准 track 媒体时间轴无漂移推进；
+		// 按全局"下一帧最早媒体时间"推进（音视频各自时间戳节奏），
 		// 暂停/无产帧时退化为固定间隔轮询，避免忙转。
 		if emitted {
 			if m.throttleOverride > 0 {
@@ -434,7 +427,7 @@ func (m *MP4Source) readLoop(ctx context.Context) {
 				}
 				continue
 			}
-			if target := m.paceTarget(); !target.IsZero() {
+			if target := m.nextPaceTarget(); !target.IsZero() {
 				if d := time.Until(target); d > 0 {
 					select {
 					case <-ctx.Done():
@@ -453,6 +446,63 @@ func (m *MP4Source) readLoop(ctx context.Context) {
 		case <-time.After(m.throttle()):
 		}
 	}
+}
+
+// nextPaceTarget 基于所有 track 中"下一帧最早媒体时间"计算墙钟调度目标。
+// 与 paceTarget 不同：不再只用视频基准 track，而是取音视频各自下一帧的最早者，
+// 使音频按其自身时钟（11.4ms）与视频（40ms）交错匀速发送，避免音频攒批突发。
+func (m *MP4Source) nextPaceTarget() time.Time {
+	m.mu.RLock()
+	base := m.baseTr
+	if base == nil || base.trak == nil || base.trak.Mdia == nil ||
+		base.trak.Mdia.Minf == nil || base.trak.Mdia.Minf.Stbl == nil ||
+		base.trak.Mdia.Minf.Stbl.Stts == nil || !m.paceAnchored {
+		m.mu.RUnlock()
+		return time.Time{}
+	}
+	baseTS := int64(base.timescale)
+	if baseTS <= 0 {
+		baseTS = 90000
+	}
+	// 收集各 track 下一帧媒体时间（µs）与 timescale
+	type cand struct {
+		media int64 // µs
+		ts    int64
+	}
+	var cands []cand
+	for _, tr := range m.tracks {
+		if tr.trak == nil || tr.trak.Mdia == nil || tr.trak.Mdia.Minf == nil || tr.trak.Mdia.Minf.Stbl == nil || tr.trak.Mdia.Minf.Stbl.Stts == nil {
+			continue
+		}
+		sampleNr := tr.sampleNr
+		loopDur := tr.loopDur
+		ts := int64(tr.timescale)
+		if ts <= 0 {
+			ts = 90000
+		}
+		if sampleNr > tr.trak.GetNrSamples() {
+			continue
+		}
+		dts, _ := tr.trak.Mdia.Minf.Stbl.Stts.GetDecodeTime(sampleNr)
+		media := int64(dts) + loopDur
+		cands = append(cands, cand{media: ConvertClock(media, int(ts), 1000000), ts: ts})
+	}
+	anchor := m.paceAnchor
+	anchorMedia := m.paceAnchorMedia
+	m.mu.RUnlock()
+
+	// 取最早者，换算到视频 timescale 与锚点对齐
+	nextMedia := int64(-1)
+	for _, c := range cands {
+		mib := ConvertClock(c.media, 1000000, int(baseTS))
+		if nextMedia < 0 || mib < nextMedia {
+			nextMedia = mib
+		}
+	}
+	if nextMedia < 0 || nextMedia <= anchorMedia {
+		return time.Time{}
+	}
+	return anchor.Add(time.Duration((nextMedia - anchorMedia) * int64(time.Second) / baseTS))
 }
 
 // nextSample 读取下一个 sample 的元数据并构造帧头。done=true 表示该轨道已读完。

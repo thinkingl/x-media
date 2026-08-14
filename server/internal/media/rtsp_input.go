@@ -25,17 +25,20 @@ import (
 type RTSPInput struct {
 	mu sync.RWMutex
 
-	id      string
-	url     string
-	status  StreamStatus
-	handler FrameHandler
+	id       string
+	url      string
+	status   StreamStatus
+	handler  FrameHandler
 	handlers []FrameHandler
 
-	client *gortsplib.Client
-	streams []StreamInfo
-	decoders map[uint8]*rtph264.Decoder
-	cancel   context.CancelFunc
-	done     chan struct{}
+	client    *gortsplib.Client
+	streams   []StreamInfo
+	decoders  map[uint8]*rtph264.Decoder
+	transport string // tcp/udp，空则自动
+	udpBuf    int    // UDP 读缓冲大小（字节）
+	pktCount  uint64 // 收到的 RTP 包计数（诊断用）
+	cancel    context.CancelFunc
+	done      chan struct{}
 }
 
 func NewRTSPInput(config *InputConfig) (*RTSPInput, error) {
@@ -47,10 +50,12 @@ func NewRTSPInput(config *InputConfig) (*RTSPInput, error) {
 		id = utils.GenerateID()
 	}
 	return &RTSPInput{
-		id:       id,
-		url:      config.URL,
-		status:   StreamStatusStopped,
-		decoders: make(map[uint8]*rtph264.Decoder),
+		id:        id,
+		url:       config.URL,
+		status:    StreamStatusStopped,
+		decoders:  make(map[uint8]*rtph264.Decoder),
+		transport: config.Transport,
+		udpBuf:    config.UDPReadBufferSize,
 	}, nil
 }
 
@@ -90,6 +95,15 @@ func (r *RTSPInput) Start(ctx context.Context) error {
 		Scheme:      u.Scheme,
 		Host:        u.Host,
 		ReadTimeout: 10 * time.Second,
+	}
+	switch r.transport {
+	case "tcp":
+		proto := gortsplib.ProtocolTCP
+		client.Protocol = &proto
+	case "udp":
+		proto := gortsplib.ProtocolUDP
+		client.Protocol = &proto
+		client.UDPReadBufferSize = r.udpBuf
 	}
 	if err := client.Start(); err != nil {
 		r.status = StreamStatusError
@@ -134,11 +148,11 @@ func buildStreamsFromDescription(desc *description.Session) ([]StreamInfo, error
 			switch tf := f.(type) {
 			case *format.H264:
 				streams = append(streams, StreamInfo{
-					ChannelID:  channelID,
-					Kind:       "video",
-					CodecID:    CodecH264,
-					CodecName:  "H264",
-					ClockRate:  tf.ClockRate(),
+					ChannelID:   channelID,
+					Kind:        "video",
+					CodecID:     CodecH264,
+					CodecName:   "H264",
+					ClockRate:   tf.ClockRate(),
 					CodecConfig: appendAnnexBNAL(nil, tf.SPS),
 				})
 				cfg := appendAnnexBNAL(nil, tf.SPS)
@@ -152,11 +166,11 @@ func buildStreamsFromDescription(desc *description.Session) ([]StreamInfo, error
 					continue
 				}
 				streams = append(streams, StreamInfo{
-					ChannelID:  channelID,
-					Kind:       "audio",
-					CodecID:    CodecAAC,
-					CodecName:  "AAC",
-					ClockRate:  tf.ClockRate(),
+					ChannelID:   channelID,
+					Kind:        "audio",
+					CodecID:     CodecAAC,
+					CodecName:   "AAC",
+					ClockRate:   tf.ClockRate(),
 					CodecConfig: config,
 				})
 				channelID++
@@ -200,7 +214,6 @@ func aacConfigFromFMTP(fmtp map[string]string) []byte {
 func (r *RTSPInput) readLoop(ctx context.Context, client *gortsplib.Client, desc *description.Session, streams []StreamInfo, u *base.URL) {
 	defer close(r.done)
 
-
 	channelID := uint8(0)
 	videoChannel := uint8(0)
 	var videoMedia *description.Media
@@ -232,11 +245,13 @@ func (r *RTSPInput) readLoop(ctx context.Context, client *gortsplib.Client, desc
 		}
 	}
 
+	logger.Infof("RTSP input before SetupAll [%s] medias=%d baseURL=%s", r.id, len(desc.Medias), desc.BaseURL.String())
 	if err := client.SetupAll(desc.BaseURL, desc.Medias); err != nil {
 		logger.Errorf("RTSP input setup: %v", err)
 		r.setError()
 		return
 	}
+	logger.Infof("RTSP input setup OK [%s] medias=%d", r.id, len(desc.Medias))
 
 	// Setup 后注册数据回调（OnPacketRTP 依赖已 setup 的 media）。
 	if videoMedia != nil {
@@ -254,6 +269,7 @@ func (r *RTSPInput) readLoop(ctx context.Context, client *gortsplib.Client, desc
 		r.setError()
 		return
 	}
+	logger.Infof("RTSP input play OK [%s]", r.id)
 
 	// 阻塞直到 context 取消
 	<-ctx.Done()
@@ -269,6 +285,10 @@ func (r *RTSPInput) handleVideoPacket(medi *description.Media, f *format.H264, p
 	if dec == nil {
 		return
 	}
+	if r.pktCount%50 == 0 {
+		logger.Infof("RTSP input packet [%s] ch=%d count=%d seq=%d ts=%d", r.id, channelID, r.pktCount, pkt.SequenceNumber, pkt.Timestamp)
+	}
+	r.pktCount++
 
 	nalus, err := dec.Decode(pkt)
 	if err != nil {

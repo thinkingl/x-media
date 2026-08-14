@@ -5,7 +5,6 @@ import (
 	"sync"
 	"time"
 
-
 	"github.com/bluenviron/gortsplib/v5"
 	"github.com/bluenviron/gortsplib/v5/pkg/base"
 	"github.com/bluenviron/gortsplib/v5/pkg/description"
@@ -21,6 +20,17 @@ type rtspPath struct {
 	// onPlay 该路径新 reader PLAY 后的回调（按路径注册，避免多 sink 共用
 	// server 时全局回调被覆盖、错误 sink 向不匹配 stream 发包导致崩溃）。
 	onPlay func(stream *gortsplib.ServerStream)
+	// readers 当前拉流客户端（key = *ServerSession），供前端展示与排障。
+	readers map[*gortsplib.ServerSession]*rtspReader
+}
+
+// rtspReader 一个 RTSP 拉流客户端。
+type rtspReader struct {
+	session     *gortsplib.ServerSession
+	address     string
+	userAgent   string
+	transport   string
+	connectedAt time.Time
 }
 
 type RTSPServerHandler struct {
@@ -34,7 +44,6 @@ func NewRTSPServerHandler() *RTSPServerHandler {
 		paths: make(map[string]*rtspPath),
 	}
 }
-
 func (h *RTSPServerHandler) SetServer(s *gortsplib.Server) {
 	h.server = s
 }
@@ -61,6 +70,13 @@ func (h *RTSPServerHandler) OnSessionClose(ctx *gortsplib.ServerHandlerOnSession
 			delete(h.paths, path)
 			logger.Infof("RTSP publisher disconnected: %s", path)
 			return
+		}
+		// 移除该 session 的 reader 记录（若存在）
+		if p.readers != nil {
+			if _, ok := p.readers[ctx.Session]; ok {
+				delete(p.readers, ctx.Session)
+				logger.Infof("RTSP reader disconnected: %s", path)
+			}
 		}
 	}
 }
@@ -145,6 +161,26 @@ func (h *RTSPServerHandler) OnPlay(ctx *gortsplib.ServerHandlerOnPlayCtx) (
 	path := trimLeadingSlash(ctx.Path)
 	logger.Infof("RTSP PLAY: path=%s ua=%s", path, reqUA(ctx.Request))
 
+	// 记录拉流客户端信息（IP、UA、transport、连接时间），供前端展示与排障。
+	addr := "?"
+	if ctx.Conn != nil && ctx.Conn.NetConn() != nil {
+		addr = ctx.Conn.NetConn().RemoteAddr().String()
+	}
+	h.mutex.Lock()
+	if p, ok := h.paths[path]; ok {
+		if p.readers == nil {
+			p.readers = make(map[*gortsplib.ServerSession]*rtspReader)
+		}
+		p.readers[ctx.Session] = &rtspReader{
+			session:     ctx.Session,
+			address:     addr,
+			userAgent:   reqUA(ctx.Request),
+			transport:   transportSummary(ctx.Session.Transport()),
+			connectedAt: time.Now(),
+		}
+	}
+	h.mutex.Unlock()
+
 	// 新 reader 建立：异步重放完整 GOP。同步发送会因 reader 未激活被 gortsplib 丢弃；
 	// 延迟等待 PLAY 响应发出、reader 激活后再发送，保证 ffmpeg/VLC 探测窗口内收到关键帧。
 	h.mutex.RLock()
@@ -210,6 +246,9 @@ type RTSPServerManager struct {
 	multicastIP   string
 	multicastRTP  int
 	multicastRTCP int
+
+	// writeQueueSize 每 reader 的 RTP 写队列容量（包数），0 使用 gortsplib 默认值。
+	writeQueueSize int
 }
 
 var globalRTSPManager = &RTSPServerManager{
@@ -233,6 +272,14 @@ func ConfigureRTSPUDP(rtpAddr, rtcpAddr, multicastIP string, multicastRTP, multi
 	globalRTSPManager.ConfigureUDP(rtpAddr, rtcpAddr, multicastIP, multicastRTP, multicastRTCP)
 }
 
+// SetWriteQueueSize 设置每个 reader 的 RTP 写队列容量（包数）。
+// 测试或高突发场景下可调大，避免 gortsplib 默认 256 包队列溢出丢包。
+func (m *RTSPServerManager) SetWriteQueueSize(n int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.writeQueueSize = n
+}
+
 func (m *RTSPServerManager) GetOrCreate(addr string) (*RTSPServerHandler, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -243,13 +290,14 @@ func (m *RTSPServerManager) GetOrCreate(addr string) (*RTSPServerHandler, error)
 
 	h := NewRTSPServerHandler()
 	srv := &gortsplib.Server{
-		Handler:     h,
-		RTSPAddress: addr,
+		Handler:           h,
+		RTSPAddress:       addr,
 		UDPRTPAddress:     m.udpRTPAddr,
 		UDPRTCPAddress:    m.udpRTCPAddr,
 		MulticastIPRange:  m.multicastIP,
 		MulticastRTPPort:  m.multicastRTP,
 		MulticastRTCPPort: m.multicastRTCP,
+		WriteQueueSize:    m.writeQueueSize,
 	}
 	h.SetServer(srv)
 

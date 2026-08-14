@@ -48,6 +48,19 @@ func (s *Server) getOutput(c *gin.Context) {
 	response(c, http.StatusOK, output)
 }
 
+// getOutputClients 获取输出端当前连接的客户端信息
+func (s *Server) getOutputClients(c *gin.Context) {
+	id := c.Param("id")
+
+	clients, err := s.outputSvc.GetClients(id)
+	if err != nil {
+		handleError(c, err)
+		return
+	}
+
+	response(c, http.StatusOK, clients)
+}
+
 // updateOutput 更新输出端
 func (s *Server) updateOutput(c *gin.Context) {
 	id := c.Param("id")

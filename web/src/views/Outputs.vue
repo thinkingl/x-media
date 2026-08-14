@@ -117,6 +117,31 @@
           <h4>原始配置</h4>
           <pre class="raw-config">{{ currentOutput.config }}</pre>
         </div>
+
+        <div class="config-section">
+          <h4>当前客户端 ({{ clients.length }})</h4>
+          <el-table :data="clients" v-loading="clientsLoading" size="small" empty-text="暂无客户端连接">
+            <el-table-column prop="address" label="地址" min-width="140">
+              <template #default="{ row }">
+                <span class="mono">{{ row.address }}</span>
+              </template>
+            </el-table-column>
+            <el-table-column prop="user_agent" label="客户端" min-width="120" />
+            <el-table-column prop="transport" label="传输" width="70">
+              <template #default="{ row }">
+                <el-tag :type="row.transport === 'tcp' ? 'success' : 'warning'" size="small">{{ row.transport }}</el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column prop="connected_at" label="连接时间" width="160">
+              <template #default="{ row }">
+                <span class="mono">{{ formatTime(row.connected_at) }}</span>
+              </template>
+            </el-table-column>
+          </el-table>
+          <div class="clients-actions">
+            <el-button size="small" :loading="clientsLoading" @click="loadClients">刷新</el-button>
+          </div>
+        </div>
       </div>
       <template #footer>
         <el-button @click="detailsVisible = false">关闭</el-button>
@@ -129,7 +154,8 @@
 import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useOutputStore } from '@/stores/output'
-import type { Output } from '@/api'
+import { getOutputClients } from '@/api'
+import type { ClientInfo, Output } from '@/api'
 
 const outputStore = useOutputStore()
 const dialogVisible = ref(false)
@@ -138,6 +164,8 @@ const isEditing = ref(false)
 const editingId = ref('')
 const submitting = ref(false)
 const currentOutput = ref<Output | null>(null)
+const clients = ref<ClientInfo[]>([])
+const clientsLoading = ref(false)
 
 const form = reactive({
   name: '',
@@ -251,6 +279,28 @@ function showEditDialog(row: Output) {
 function showDetails(row: Output) {
   currentOutput.value = row
   detailsVisible.value = true
+  loadClients()
+}
+
+async function loadClients() {
+  if (!currentOutput.value) return
+  clientsLoading.value = true
+  try {
+    const { data } = await getOutputClients(currentOutput.value.id)
+    clients.value = data.data || []
+  } catch (error: any) {
+    clients.value = []
+    console.error('Failed to fetch clients:', error)
+  } finally {
+    clientsLoading.value = false
+  }
+}
+
+function formatTime(t: string): string {
+  if (!t) return '-'
+  const d = new Date(t)
+  if (isNaN(d.getTime())) return t
+  return d.toLocaleString()
 }
 
 function buildConfig(): string {
@@ -322,4 +372,6 @@ async function handleDelete(id: string) {
 .raw-config { background: #f5f7fa; padding: 12px; border-radius: 4px; font-size: 12px; overflow-x: auto; margin: 0; }
 .url-row { display: flex; align-items: center; gap: 8px; }
 .url-text { font-family: monospace; font-size: 13px; }
+.mono { font-family: monospace; font-size: 12px; }
+.clients-actions { margin-top: 10px; text-align: right; }
 </style>

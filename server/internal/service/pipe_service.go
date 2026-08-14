@@ -95,6 +95,16 @@ func (s *PipeService) Create(req *CreatePipeRequest) (*model.Pipe, error) {
 		}
 	}
 
+	// 一个输出只允许一个输入（fan-out 是输入对多输出，fan-in 多输入连同一输出
+	// 会导致 RTSPSink 等被多次 Configure、多流混合损坏）。
+	existingByOutput, err := s.pipeRepo.GetByOutputID(req.OutputID)
+	if err != nil {
+		return nil, errors.NewInternalError(err)
+	}
+	if len(existingByOutput) > 0 {
+		return nil, errors.NewValidationError("该输出端已连接其他输入端")
+	}
+
 	pipe := &model.Pipe{
 		ID:         utils.GenerateID(),
 		InputID:    req.InputID,
