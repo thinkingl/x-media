@@ -103,6 +103,16 @@ func (h *HTTPFLVSink) WriteFrame(f *Frame) error {
 		return nil
 	}
 
+	// 每遇视频关键帧（GOP 起点）重置累积时钟，使 tag 时间戳落在
+	// 单 GOP/文件时长范围内（而非服务启动以来的绝对时长）。否则服务长期
+	// 运行时时间戳可达数十万毫秒，播放器看到首帧巨大时间戳误判时间轴 → 帧率失控。
+	if f.Header.FrameType == FrameTypeVideo && f.Header.Flags&FlagKeyframe != 0 {
+		h.mu.Lock()
+		h.writer.resetVideoClock()
+		h.writer.resetAudioClock()
+		h.mu.Unlock()
+	}
+
 	tag := h.writer.EncodeTag(f)
 	if len(tag) == 0 {
 		return nil
@@ -337,14 +347,16 @@ func (r *flvReader) Read(p []byte) (int, error) {
 	r.ring.mu.Lock()
 	defer r.ring.mu.Unlock()
 	n := 0
+	// 只读取"未读"数据：pos 到 tail 之间的字节，pos == tail 即无新数据。
+	// 不能用 r.ring.full 作为读取条件——ring 写满后 full 恒为 true，
+	// 会从 pos 无限重读整个缓冲导致帧重复（帧率失控根因）。
 	for n < len(p) {
-		if r.ring.full || r.pos != r.ring.tail {
-			p[n] = r.ring.buf[r.pos]
-			r.pos = (r.pos + 1) % len(r.ring.buf)
-			n++
-			continue
+		if r.pos == r.ring.tail {
+			break
 		}
-		break
+		p[n] = r.ring.buf[r.pos]
+		r.pos = (r.pos + 1) % len(r.ring.buf)
+		n++
 	}
 	if n == 0 {
 		return 0, io.EOF

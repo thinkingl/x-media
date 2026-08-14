@@ -2,9 +2,11 @@ package media
 
 import (
 	"context"
+	"os"
 	"testing"
 	"time"
 
+	"github.com/Eyevinn/mp4ff/mp4"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -138,7 +140,7 @@ func TestHTTPFLVSink_WriteAudioTag(t *testing.T) {
 			// data 开头
 			if raw[pos+11] == 0xAF && raw[pos+12] == flvAACPacketTypeRaw {
 				found = true
-				assert.Equal(t, 21, ts, "audio tag timestamp 21ms")
+				assert.Equal(t, 0, ts, "first audio tag timestamp should be 0 (normalized to base)")
 			}
 		}
 		pos += 11 + ds + 4
@@ -178,4 +180,121 @@ func TestHTTPFLVSink_FlvWriterUnit(t *testing.T) {
 	w := NewFLVWriter()
 	require.NotNil(t, w)
 	require.Equal(t, 13, len(w.Header()))
+}
+
+// loadHevcConfigFromFile 从 mp4 文件解析 HEVC CodecConfig（AnnexB VPS/SPS/PPS）。
+func loadHevcConfigFromFile(t *testing.T, path string) []byte {
+	t.Helper()
+	f, err := os.Open(path)
+	require.NoError(t, err, "open h265 mp4")
+	defer f.Close()
+
+	mp4f, err := mp4.DecodeFile(f, mp4.WithDecodeMode(mp4.DecModeLazyMdat))
+	require.NoError(t, err, "decode h265 mp4")
+	for _, trak := range mp4f.Moov.Traks {
+		stbl := trak.Mdia.Minf.Stbl
+		if stbl == nil || stbl.Stsd == nil || stbl.Stsd.HvcX == nil {
+			continue
+		}
+		if stbl.Stsd.HvcX.HvcC != nil {
+			return extractHvcCDecConfRec(&stbl.Stsd.HvcX.HvcC.DecConfRec)
+		}
+	}
+	return nil
+}
+
+// TestHTTPFLVSink_HevcSequenceHeader 验证 H265 视频流经 HTTP-FLV 的
+// sequence header（HEVCDecoderConfigurationRecord + Enhanced RTMP codecID=12）。
+func TestHTTPFLVSink_HevcSequenceHeader(t *testing.T) {
+	sink := newFLVSink(t)
+	defer sink.Stop()
+
+	// 从真实 h265_test.mp4 解析 HEVC 配置（VPS/SPS/PPS），与 MP4Source 相同方式
+	hevcConfig := loadHevcConfigFromFile(t, testFixturePath(t, "../../../test_data/h265_test.mp4"))
+	require.NotEmpty(t, hevcConfig, "h265_test.mp4 should have HEVC codec config")
+
+	w := NewFLVWriter()
+	w.SetClockRate(0, 90000)
+	out := w.hevcSequenceHeader(hevcConfig)
+	require.NotEmpty(t, out, "hevc sequence header should be produced")
+
+	// tag type=9 (video), data 开头 0x90 = IS_EX(0x80)|SeqStart(0)|KEY(0x10), 后跟 "hvc1"
+	assert.Equal(t, byte(9), out[0])
+	assert.Equal(t, byte(0x90), out[11], "HEVC seq header should be 0x90")
+	assert.Equal(t, "hvc1", string(out[12:16]), "fourcc should be hvc1")
+
+	// 数据部分应为 HEVCDecoderConfigurationRecord: version=1
+	// data = [0x90][hvc1(4B)] + hvcC → hvcC 从 data 偏移 5 开始
+	hvcC := out[16:]
+	assert.Equal(t, byte(0x01), hvcC[0], "HEVCDecoderConfigurationRecord version")
+	assert.Equal(t, byte(0x03), hvcC[22], "numOfArrays should be 3 (VPS/SPS/PPS)")
+}
+
+// TestHTTPFLVSink_HevcVideoTag 验证 H265 视频帧编码为 Enhanced RTMP HEVC tag。
+func TestHTTPFLVSink_HevcVideoTag(t *testing.T) {
+	w := NewFLVWriter()
+	w.SetClockRate(0, 90000)
+
+	// HEVC IDR NAL（关键帧）
+	frameData := []byte{
+		0x00, 0x00, 0x00, 0x01, 0x26, 0x01, 0xaf, 0x0b, 0x46, 0x0e,
+	}
+	f := testFrame(0, FrameTypeVideo, CodecH265, 3000, frameData)
+	f.Header.Flags = FlagKeyframe
+	tag := w.EncodeTag(f)
+	require.NotEmpty(t, tag)
+
+	// tag type=9
+	assert.Equal(t, byte(9), tag[0])
+	// data 开头: 0x93 = IS_EX(0x80)|CodedFramesX(3)|KEY(0x10)（PTS==DTS 无 CTS）, 后跟 "hvc1"
+	assert.Equal(t, byte(0x93), tag[11], "HEVC keyframe (PTS==DTS) should be 0x93")
+	assert.Equal(t, "hvc1", string(tag[12:16]), "fourcc should be hvc1")
+	// 数据（length-prefixed）从偏移 16 开始: NAL 长度
+	nalLen := int(tag[16])<<24 | int(tag[17])<<16 | int(tag[18])<<8 | int(tag[19])
+	assert.Equal(t, len(frameData)-4, nalLen, "NAL length prefix should match")
+
+	// 非关键帧
+	f2 := testFrame(0, FrameTypeVideo, CodecH265, 4000, frameData)
+	tag2 := w.EncodeTag(f2)
+	assert.Equal(t, byte(0xA3), tag2[11], "HEVC inter frame should be 0xA3")
+}
+
+// TestHTTPFLVSink_HevcKeyframeParams 验证关键帧前置 VPS/SPS/PPS，
+// 使任意时刻接入/丢帧后都可解码（与 RTSPSink 行为一致）。
+func TestHTTPFLVSink_HevcKeyframeParams(t *testing.T) {
+	hevcConfig := loadHevcConfigFromFile(t, testFixturePath(t, "../../../test_data/h265_test.mp4"))
+	require.NotEmpty(t, hevcConfig, "h265_test.mp4 should have HEVC codec config")
+
+	w := NewFLVWriter()
+	w.SetClockRate(0, 90000)
+	// 模拟 Configure 缓存参数集
+	vps, sps, pps := splitCodecConfigHevc(hevcConfig)
+	w.hevcVPS, w.hevcSPS, w.hevcPPS = vps, sps, pps
+
+	// 关键帧
+	frameData := []byte{
+		0x00, 0x00, 0x00, 0x01, 0x26, 0x01, 0xaf, 0x0b, 0x46, 0x0e,
+	}
+	f := testFrame(0, FrameTypeVideo, CodecH265, 3000, frameData)
+	f.Header.Flags = FlagKeyframe
+	tag := w.EncodeTag(f)
+	require.NotEmpty(t, tag)
+
+	// data: [0x93][hvc1(4B)] + length-prefixed NAL 序列
+	// 数据从偏移 16 开始，应先出现 VPS(len=24) → SPS(len=41) → PPS(len=7) → IDR
+	off := 16
+	nalTypes := []int{}
+	for len(nalTypes) < 4 && off+4 <= len(tag)-15 {
+		l := int(tag[off])<<24 | int(tag[off+1])<<16 | int(tag[off+2])<<8 | int(tag[off+3])
+		if l <= 0 || off+4+l > len(tag) {
+			break
+		}
+		nalTypes = append(nalTypes, int((tag[off+4]>>1)&0x3F))
+		off += 4 + l
+	}
+	t.Logf("keyframe NAL types: %v", nalTypes)
+	require.GreaterOrEqual(t, len(nalTypes), 3, "keyframe should contain VPS+SPS+PPS (+IDR)")
+	assert.Equal(t, 32, nalTypes[0], "first NAL should be VPS")
+	assert.Equal(t, 33, nalTypes[1], "second NAL should be SPS")
+	assert.Equal(t, 34, nalTypes[2], "third NAL should be PPS")
 }

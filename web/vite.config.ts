@@ -20,6 +20,10 @@ export default defineConfig({
         target: 'http://localhost:18090',
         changeOrigin: true,
       },
+      '/live': {
+        target: 'http://localhost:18090',
+        changeOrigin: true,
+      },
     },
   },
 })

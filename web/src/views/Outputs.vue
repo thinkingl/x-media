@@ -75,8 +75,8 @@
             <el-option label="UDP 组播" value="udp-multicast" />
           </el-select>
         </el-form-item>
-        <el-form-item v-if="form.type === 'http-flv'" label="监听地址">
-          <el-input v-model="form.configAddr" placeholder=":8080" />
+        <el-form-item v-if="form.type === 'http-flv'" label="访问路径">
+          <el-input v-model="form.configAddr" placeholder="/live/:id.flv（固定，无需修改）" disabled />
         </el-form-item>
       </el-form>
       <template #footer>
@@ -116,7 +116,7 @@
               </div>
             </el-descriptions-item>
             <el-descriptions-item v-if="parsedConfig.mode" label="模式">{{ parsedConfig.mode === 'push' ? '推流' : '服务' }}</el-descriptions-item>
-            <el-descriptions-item v-if="parsedConfig.addr" label="监听地址">{{ parsedConfig.addr }}</el-descriptions-item>
+            <el-descriptions-item v-if="parsedConfig.addr && currentOutput && currentOutput.type !== 'http-flv'" label="监听地址">{{ parsedConfig.addr }}</el-descriptions-item>
             <el-descriptions-item v-if="parsedConfig.transport" label="传输协议">{{ transportLabel(parsedConfig.transport) }}</el-descriptions-item>
           </el-descriptions>
         </div>
@@ -222,10 +222,10 @@ function getStreamUrl(row: Output): string {
       return `rtsp://${host}:${port}/live/${row.id}`
     }
     if (row.type === 'rtsp' && cfg.mode === 'push' && cfg.url) return cfg.url
-    if (row.type === 'http-flv' && cfg.addr) {
-      const host = location.hostname
-      const port = cfg.addr.replace(':', '')
-      return `http://${host}:${port}/live/${row.id}.flv`
+    if (row.type === 'http-flv') {
+      // HTTP-FLV 挂在 API server 上（无独立监听端口），使用当前页面地址。
+      // 生产：前端与 API 同端口(18090)；dev：vite 已代理 /live 到 18090。
+      return `http://${location.host}/live/${row.id}.flv`
     }
   } catch {}
   return ''
@@ -328,7 +328,7 @@ function buildConfig(): string {
     }
     return JSON.stringify({ mode: 'server', addr: form.configAddr, transport: form.rtspTransport || 'auto' })
   } else if (form.type === 'http-flv') {
-    return JSON.stringify({ addr: form.configAddr })
+    return JSON.stringify({ addr: '/live/' })
   }
   return '{}'
 }
@@ -338,7 +338,9 @@ async function handleSubmit() {
   if (form.type === 'rtmp' && !form.configUrl) { ElMessage.warning('请输入RTMP URL'); return }
   if (form.type === 'rtsp' && form.rtspMode === 'push' && !form.configUrl) { ElMessage.warning('请输入RTSP URL'); return }
   if (form.type === 'rtsp' && form.rtspMode === 'server' && !form.configAddr) { ElMessage.warning('请输入监听地址'); return }
-  if (form.type === 'http-flv' && !form.configAddr) { ElMessage.warning('请输入监听地址'); return }
+  if (form.type === 'http-flv' && !form.configAddr) {
+    form.configAddr = '/live/'
+  }
 
   submitting.value = true
   try {

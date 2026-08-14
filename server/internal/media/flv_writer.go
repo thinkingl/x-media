@@ -1,7 +1,10 @@
 package media
 
 import (
+	"bytes"
 	"encoding/binary"
+
+	"github.com/Eyevinn/mp4ff/hevc"
 )
 
 // FLV 封装器：将标准帧编码为 FLV tag 流（HTTP-FLV 与 RTMP 共用）。
@@ -10,12 +13,22 @@ import (
 // H.264 在 FLV 中的 AVCC 封装用 composition time offset（CTS = PTS - DTS）。
 
 const (
-	flvCodecH264     = 7
-	flvCodecAAC      = 10
-	flvAVCPacketTypeSeq = 0 // 视频 sequence header
-	flvAVCPacketTypeNALU = 1
-	flvAACPacketTypeSeq  = 0 // 音频 sequence header
-	flvAACPacketTypeRaw  = 1
+	flvCodecH264        = 7
+	flvCodecAAC         = 10
+	flvAVCPacketTypeSeq    = 0 // 视频 sequence header
+	flvAVCPacketTypeNALU   = 1
+	flvAACPacketTypeSeq    = 0 // 音频 sequence header
+	flvAACPacketTypeRaw    = 1
+
+	// Enhanced RTMP / ExVideoTagHeader（HEVC 等）：字节0 为
+	// FLV_IS_EX_HEADER | packetType | frametype，随后 4 字节 fourcc("hvc1")。
+	// 常量与 FFmpeg libavformat/flv.h 保持一致，保证 ffmpeg/VLC 可解。
+	flvIsExHeader         = 0x80
+	flvExPacketTypeSeq    = 0 // PacketTypeSequenceStart
+	flvExPacketTypeFrames = 1 // PacketTypeCodedFrames（带 CTS）
+	flvExPacketTypeFramesX = 3 // PacketTypeCodedFramesX（PTS==DTS，无 CTS）
+	flvExFrameKey         = 0x10 // FLV_FRAME_KEY = 1<<4
+	flvExFrameInter       = 0x20 // FLV_FRAME_INTER = 2<<4
 )
 
 var flvHeader = []byte{
@@ -31,16 +44,30 @@ type FLVWriter struct {
 	hasVideo bool
 	hasAudio bool
 	clocks   map[uint8]int // ChannelID → ClockRate
+
+	// 单调流时钟：FLV tag 时间戳必须是单调递增的相对时钟。
+	// 源帧 DTS 是绝对媒体时间（含 loopDur 累计），loop 回绕时会跳回小值，
+	// 直接用它会导致播放器时间轴错乱/帧率失控。这里改为**累加帧间 delta**：
+	//   videoAcc += max(0, curDTS - prevDTS)
+	// 回绕时 delta<0 被钳制为 0（时间戳暂停不后退），后续正常递增，天然单调。
+	videoAcc    int64 // 视频累积时间戳（流内 timescale）
+	prevVideoDTS int64
+	hasPrevVideo bool
+	// audioAcc 同理（音频用 PTS）。
+	audioAcc    int64
+	prevAudioPTS int64
+	hasPrevAudio bool
+
+	// HEVC 参数集缓存（从 CodecConfig 提取，Configure 时填充）。
+	// 数据关键帧编码时前置 VPS/SPS/PPS，保证任意时刻接入/丢帧后都可解码。
+	hevcVPS []byte
+	hevcSPS []byte
+	hevcPPS []byte
 }
 
 // NewFLVWriter 创建 FLV writer。
 func NewFLVWriter() *FLVWriter {
 	return &FLVWriter{clocks: make(map[uint8]int)}
-}
-
-// SetClockRate 注册子通道时钟率（由 Configure 调用）。
-func (w *FLVWriter) SetClockRate(channelID uint8, rate int) {
-	w.clocks[channelID] = rate
 }
 
 // Reset 重置状态（如循环时重新开始）。
@@ -49,6 +76,66 @@ func (w *FLVWriter) Reset() {
 	w.hasVideo = false
 	w.hasAudio = false
 	w.clocks = make(map[uint8]int)
+	w.videoAcc = 0
+	w.prevVideoDTS = 0
+	w.hasPrevVideo = false
+	w.audioAcc = 0
+	w.prevAudioPTS = 0
+	w.hasPrevAudio = false
+	w.hevcVPS = nil
+	w.hevcSPS = nil
+	w.hevcPPS = nil
+}
+
+// nextVideoTS 推进视频累积时钟并返回当前视频时间戳（流内 timescale）。
+func (w *FLVWriter) nextVideoTS(dts int64) int64 {
+	if !w.hasPrevVideo {
+		w.prevVideoDTS = dts
+		w.hasPrevVideo = true
+		w.videoAcc = 0
+		return 0
+	}
+	delta := dts - w.prevVideoDTS
+	w.prevVideoDTS = dts
+	if delta > 0 && delta < int64(1<<40) {
+		w.videoAcc += delta
+	}
+	return w.videoAcc
+}
+
+// resetVideoClock 重置视频累积时钟（loop 回绕时调用），使时间戳从头开始。
+func (w *FLVWriter) resetVideoClock() {
+	w.videoAcc = 0
+	w.prevVideoDTS = 0
+	w.hasPrevVideo = false
+}
+
+// resetAudioClock 重置音频累积时钟（loop 回绕时调用）。
+func (w *FLVWriter) resetAudioClock() {
+	w.audioAcc = 0
+	w.prevAudioPTS = 0
+	w.hasPrevAudio = false
+}
+
+// nextAudioTS 推进音频累积时钟并返回当前音频时间戳（流内 timescale）。
+func (w *FLVWriter) nextAudioTS(pts int64) int64 {
+	if !w.hasPrevAudio {
+		w.prevAudioPTS = pts
+		w.hasPrevAudio = true
+		w.audioAcc = 0
+		return 0
+	}
+	delta := pts - w.prevAudioPTS
+	w.prevAudioPTS = pts
+	if delta > 0 && delta < int64(1<<40) {
+		w.audioAcc += delta
+	}
+	return w.audioAcc
+}
+
+// SetClockRate 注册子通道时钟率（由 Configure 调用）。
+func (w *FLVWriter) SetClockRate(channelID uint8, rate int) {
+	w.clocks[channelID] = rate
 }
 
 // Header 返回 FLV 文件头（应最先发送）。
@@ -64,7 +151,15 @@ func (w *FLVWriter) BuildConfigTags(streams []StreamInfo) []byte {
 		switch s.Kind {
 		case "video":
 			if s.CodecConfig != nil {
-				out = append(out, w.videoSequenceHeader(s.CodecConfig)...)
+				if s.CodecID == CodecH265 {
+					vps, sps, pps := splitCodecConfigHevc(s.CodecConfig)
+					w.hevcVPS = vps
+					w.hevcSPS = sps
+					w.hevcPPS = pps
+					out = append(out, w.hevcSequenceHeader(s.CodecConfig)...)
+				} else {
+					out = append(out, w.videoSequenceHeader(s.CodecConfig)...)
+				}
 				w.hasVideo = true
 			}
 		case "audio":
@@ -82,8 +177,10 @@ func (w *FLVWriter) BuildConfigTags(streams []StreamInfo) []byte {
 func (w *FLVWriter) EncodeTag(f *Frame) []byte {
 	switch f.Header.FrameType {
 	case FrameTypeVideo:
+		w.nextVideoTS(f.Header.DTS)
 		return w.videoTag(f)
 	case FrameTypeAudio:
+		w.nextAudioTS(f.Header.PTS)
 		return w.audioTag(f)
 	}
 	return nil
@@ -94,27 +191,50 @@ func (w *FLVWriter) EncodeTag(f *Frame) []byte {
 func (w *FLVWriter) EncodeTagData(f *Frame) (tagType byte, ts uint32, data []byte) {
 	switch f.Header.FrameType {
 	case FrameTypeVideo:
+		videoTS := w.nextVideoTS(f.Header.DTS)
 		cts := f.Header.PTS - f.Header.DTS
 		if cts < 0 {
 			cts = 0
 		}
-		avcc := annexBToAVCC(f.Payload)
 		ft := byte(0x02)
 		if f.Header.Flags&FlagKeyframe != 0 {
 			ft = 0x01
 		}
-		data = make([]byte, 0, 5+len(avcc))
+		if f.Header.Codec == CodecH265 {
+			ft := byte(flvExFrameInter)
+			if f.Header.Flags&FlagKeyframe != 0 {
+				ft = flvExFrameKey
+			}
+			hvcc := annexBToAVCC(f.Payload)
+			if f.Header.Flags&FlagKeyframe != 0 {
+				hvcc = prependHevcParams(hvcc, w.hevcVPS, w.hevcSPS, w.hevcPPS)
+			}
+			data := make([]byte, 0, 5+len(hvcc))
+			if cts > 0 {
+				data = append(data, flvIsExHeader|flvExPacketTypeFrames|ft)
+				data = append(data, 'h', 'v', 'c', '1')
+				data = append(data, byte(cts>>16), byte(cts>>8), byte(cts))
+			} else {
+				data = append(data, flvIsExHeader|flvExPacketTypeFramesX|ft)
+				data = append(data, 'h', 'v', 'c', '1')
+			}
+			data = append(data, hvcc...)
+			return 9, uint32(ToMilliseconds(videoTS, w.clockOf(f.Header.ChannelID, 90000))), data
+		}
+		avcc := annexBToAVCC(f.Payload)
+		data := make([]byte, 0, 5+len(avcc))
 		data = append(data, ft<<4|flvCodecH264)
 		data = append(data, flvAVCPacketTypeNALU)
 		data = append(data, byte(cts>>16), byte(cts>>8), byte(cts))
 		data = append(data, avcc...)
-		return 9, uint32(ToMilliseconds(f.Header.DTS, w.clockOf(f.Header.ChannelID, 90000))), data
+		return 9, uint32(ToMilliseconds(videoTS, w.clockOf(f.Header.ChannelID, 90000))), data
 	case FrameTypeAudio:
+		audioTS := w.nextAudioTS(f.Header.PTS)
 		data = make([]byte, 0, 2+len(f.Payload))
 		data = append(data, 0xAF)
 		data = append(data, flvAACPacketTypeRaw)
 		data = append(data, f.Payload...)
-		return 8, uint32(ToMilliseconds(f.Header.PTS, w.clockOf(f.Header.ChannelID, 0))), data
+		return 8, uint32(ToMilliseconds(audioTS, w.clockOf(f.Header.ChannelID, 0))), data
 	}
 	return 0, 0, nil
 }
@@ -141,6 +261,41 @@ func (w *FLVWriter) videoSequenceHeader(config []byte) []byte {
 	return w.buildTag(9, 0, data)
 }
 
+// hevcSequenceHeader 生成 HEVC 的 sequence header（Enhanced RTMP / ExVideoTagHeader）。
+// 格式与 FFmpeg flvenc.c 一致：0x90(IS_EX|SeqStart|KEY) + "hvc1" + HEVCDecoderConfigurationRecord。
+func (w *FLVWriter) hevcSequenceHeader(config []byte) []byte {
+	vps, sps, pps := splitCodecConfigHevc(config)
+	if len(vps) == 0 || len(sps) == 0 || len(pps) == 0 {
+		return nil
+	}
+
+	hvcC := buildHVCC(vps, sps, pps)
+
+	data := make([]byte, 0, 5+len(hvcC))
+	data = append(data, flvIsExHeader|flvExPacketTypeSeq|flvExFrameKey) // 0x90
+	data = append(data, 'h', 'v', 'c', '1')
+	data = append(data, hvcC...)
+	return w.buildTag(9, 0, data)
+}
+
+// buildHVCC 构造 HEVCDecoderConfigurationRecord（ISO/IEC 14496-15）。
+// 使用 mp4ff 解析 SPS 提取 profile/level/尺寸等信息，生成标准 hvcC，
+// 保证 ffmpeg/VLC 能正确初始化 HEVC 解码器。
+func buildHVCC(vps, sps, pps []byte) []byte {
+	rec, err := hevc.CreateHEVCDecConfRec(
+		[][]byte{vps}, [][]byte{sps}, [][]byte{pps},
+		true, true, true, true,
+	)
+	if err != nil {
+		return nil
+	}
+	var buf bytes.Buffer
+	if err := rec.Encode(&buf); err != nil {
+		return nil
+	}
+	return buf.Bytes()
+}
+
 // audioSequenceHeader 从 AudioSpecificConfig 生成 AAC sequence header。
 func (w *FLVWriter) audioSequenceHeader(config []byte) []byte {
 	data := make([]byte, 0, 2+len(config))
@@ -157,6 +312,10 @@ func (w *FLVWriter) videoTag(f *Frame) []byte {
 		cts = 0
 	}
 
+	if f.Header.Codec == CodecH265 {
+		return w.buildVideoTag(f, cts)
+	}
+
 	// 构造 AVCC length-prefixed 数据（从 AnnexB 转回）
 	avcc := annexBToAVCC(f.Payload)
 
@@ -171,8 +330,61 @@ func (w *FLVWriter) videoTag(f *Frame) []byte {
 	data = append(data, byte(cts>>16), byte(cts>>8), byte(cts))
 	data = append(data, avcc...)
 
-	ts := uint32(ToMilliseconds(f.Header.DTS, w.clockOf(f.Header.ChannelID, 90000)))
+	ts := uint32(ToMilliseconds(w.videoAcc, w.clockOf(f.Header.ChannelID, 90000)))
 	return w.buildTag(9, ts, data)
+}
+
+// buildVideoTag 编码 H.265(HEVC) 视频 tag（Enhanced RTMP / ExVideoTagHeader）。
+// 格式与 FFmpeg flvenc.c 一致：
+//
+//	关键帧: 0x91(IS_EX|CodedFrames|KEY) + "hvc1" + cts(3B) + length-prefixed 数据
+//	普通帧: 0xA3(IS_EX|CodedFramesX|INTER) + "hvc1" + length-prefixed 数据（PTS==DTS 无 CTS）
+func (w *FLVWriter) buildVideoTag(f *Frame, cts int64) []byte {
+	ft := byte(flvExFrameInter)
+	if f.Header.Flags&FlagKeyframe != 0 {
+		ft = flvExFrameKey
+	}
+
+	// HEVC 在 Enhanced RTMP 中数据为 length-prefixed（4 字节 NAL 长度），与 H264 AVCC 一致
+	hvcc := annexBToAVCC(f.Payload)
+
+	// 关键帧前置 VPS/SPS/PPS（length-prefixed），保证任意时刻接入/丢帧后都可解码。
+	if f.Header.Flags&FlagKeyframe != 0 {
+		hvcc = prependHevcParams(hvcc, w.hevcVPS, w.hevcSPS, w.hevcPPS)
+	}
+
+	data := make([]byte, 0, 5+len(hvcc))
+	// PTS != DTS 时用 CodedFrames 带 CTS，否则用 CodedFramesX 不带
+	if cts > 0 {
+		data = append(data, flvIsExHeader|flvExPacketTypeFrames|ft)
+		data = append(data, 'h', 'v', 'c', '1')
+		data = append(data, byte(cts>>16), byte(cts>>8), byte(cts))
+	} else {
+		data = append(data, flvIsExHeader|flvExPacketTypeFramesX|ft)
+		data = append(data, 'h', 'v', 'c', '1')
+	}
+	data = append(data, hvcc...)
+
+	ts := uint32(ToMilliseconds(w.videoAcc, w.clockOf(f.Header.ChannelID, 90000)))
+	return w.buildTag(9, ts, data)
+}
+
+// prependHevcParams 在关键帧数据前插入 VPS/SPS/PPS（以 4 字节长度前缀形式）。
+func prependHevcParams(avcc []byte, vps, sps, pps []byte) []byte {
+	params := make([]byte, 0, len(vps)+len(sps)+len(pps)+12)
+	for _, n := range [][]byte{vps, sps, pps} {
+		if len(n) == 0 {
+			continue
+		}
+		params = append(params, byte(len(n)>>24), byte(len(n)>>16), byte(len(n)>>8), byte(len(n)))
+		params = append(params, n...)
+	}
+	if len(params) == 0 {
+		return avcc
+	}
+	out := make([]byte, 0, len(params)+len(avcc))
+	out = append(out, params...)
+	return append(out, avcc...)
 }
 
 // audioTag 编码音频 tag。
@@ -182,7 +394,7 @@ func (w *FLVWriter) audioTag(f *Frame) []byte {
 	data = append(data, flvAACPacketTypeRaw)
 	data = append(data, f.Payload...)
 
-	ts := uint32(ToMilliseconds(f.Header.PTS, w.clockOf(f.Header.ChannelID, 0)))
+	ts := uint32(ToMilliseconds(w.audioAcc, w.clockOf(f.Header.ChannelID, 0)))
 	return w.buildTag(8, ts, data)
 }
 

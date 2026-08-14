@@ -78,13 +78,13 @@ func TestRTMPSink_AudioVideoData(t *testing.T) {
 		return audio >= 2 && video >= 2
 	}, "audio+video messages")
 
-	// 验证 video 数据消息时间戳：3000 ticks(90k) → 33ms
+	// 验证 video 数据消息时间戳：首帧归一化后为 0（相对流起点）
 	for _, m := range mock.messages() {
 		if m.Type == msgTypeVideo && len(m.Payload) > 5 && m.Payload[1] == flvAVCPacketTypeNALU {
-			assert.Equal(t, uint32(33), m.Ts, "video data timestamp 33ms")
+			assert.Equal(t, uint32(0), m.Ts, "first video data timestamp should be 0 (normalized)")
 		}
 		if m.Type == msgTypeAudio && len(m.Payload) > 1 && m.Payload[1] == flvAACPacketTypeRaw {
-			assert.Equal(t, uint32(21), m.Ts, "audio data timestamp 21ms")
+			assert.Equal(t, uint32(0), m.Ts, "first audio data timestamp should be 0 (normalized)")
 		}
 	}
 }
