@@ -67,6 +67,14 @@
         <el-form-item v-if="form.type === 'rtsp' && form.rtspMode === 'server'" label="监听地址">
           <el-input v-model="form.configAddr" placeholder=":5544" />
         </el-form-item>
+        <el-form-item v-if="form.type === 'rtsp' && form.rtspMode === 'server'" label="传输协议">
+          <el-select v-model="form.rtspTransport">
+            <el-option label="自动适配" value="auto" />
+            <el-option label="TCP" value="tcp" />
+            <el-option label="UDP" value="udp" />
+            <el-option label="UDP 组播" value="udp-multicast" />
+          </el-select>
+        </el-form-item>
         <el-form-item v-if="form.type === 'http-flv'" label="监听地址">
           <el-input v-model="form.configAddr" placeholder=":8080" />
         </el-form-item>
@@ -109,7 +117,7 @@
             </el-descriptions-item>
             <el-descriptions-item v-if="parsedConfig.mode" label="模式">{{ parsedConfig.mode === 'push' ? '推流' : '服务' }}</el-descriptions-item>
             <el-descriptions-item v-if="parsedConfig.addr" label="监听地址">{{ parsedConfig.addr }}</el-descriptions-item>
-            <el-descriptions-item v-if="parsedConfig.transport" label="传输协议">{{ parsedConfig.transport }}</el-descriptions-item>
+            <el-descriptions-item v-if="parsedConfig.transport" label="传输协议">{{ transportLabel(parsedConfig.transport) }}</el-descriptions-item>
           </el-descriptions>
         </div>
 
@@ -173,6 +181,7 @@ const form = reactive({
   configUrl: '',
   configAddr: '',
   rtspMode: 'push',
+  rtspTransport: 'auto',
 })
 
 const parsedConfig = computed(() => {
@@ -196,6 +205,11 @@ onMounted(() => {
 function getTypeTag(type: string) {
   const tags: Record<string, string> = { rtmp: 'danger', rtsp: 'warning', 'http-flv': 'success', hls: '' }
   return tags[type] || 'info'
+}
+
+function transportLabel(t: string): string {
+  const labels: Record<string, string> = { auto: '自动适配', tcp: 'TCP', udp: 'UDP', 'udp-multicast': 'UDP 组播' }
+  return labels[t] || t
 }
 
 function getStreamUrl(row: Output): string {
@@ -251,6 +265,7 @@ function resetForm() {
   form.configUrl = ''
   form.configAddr = ''
   form.rtspMode = 'push'
+  form.rtspTransport = 'auto'
 }
 
 function showCreateDialog() {
@@ -270,6 +285,7 @@ function showEditDialog(row: Output) {
     form.configUrl = cfg.url || ''
     form.configAddr = cfg.addr || ''
     form.rtspMode = cfg.mode || 'push'
+    form.rtspTransport = cfg.transport || 'auto'
   } catch {
     resetForm()
   }
@@ -310,7 +326,7 @@ function buildConfig(): string {
     if (form.rtspMode === 'push') {
       return JSON.stringify({ mode: 'push', url: form.configUrl, transport: 'tcp' })
     }
-    return JSON.stringify({ mode: 'server', addr: form.configAddr, transport: 'tcp' })
+    return JSON.stringify({ mode: 'server', addr: form.configAddr, transport: form.rtspTransport || 'auto' })
   } else if (form.type === 'http-flv') {
     return JSON.stringify({ addr: form.configAddr })
   }

@@ -5,6 +5,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bluenviron/gortsplib/v5"
+	"github.com/bluenviron/gortsplib/v5/pkg/base"
 	"github.com/bluenviron/gortsplib/v5/pkg/description"
 	"github.com/bluenviron/gortsplib/v5/pkg/format"
 	"github.com/stretchr/testify/assert"
@@ -448,4 +450,172 @@ func TestRTSPSink_MultiSinkSameServerPerPathCallback(t *testing.T) {
 	require.NotPanics(t, func() {
 		p1.onPlay(p2.stream)
 	}, "wrong-stream callback must be guarded")
+}
+
+// TestRTSPManager_MultiAddrDynamicUDP 验证不同 addr 的 RTSP server 各自动态分配
+// 一对 UDP 端口，互不冲突（此前全局单对 UDP 端口会导致第二个 server bind 失败）。
+func TestRTSPManager_MultiAddrDynamicUDP(t *testing.T) {
+	defer globalRTSPManager.StopAll()
+
+	// 不配置全局 UDP，验证 GetOrCreate 自动探测动态端口
+	h1, err := globalRTSPManager.GetOrCreate("127.0.0.1:" + freeTCPPort(t))
+	require.NoError(t, err)
+	h2, err := globalRTSPManager.GetOrCreate("127.0.0.1:" + freeTCPPort(t))
+	require.NoError(t, err)
+	defer globalRTSPManager.StopAll()
+
+	require.NotNil(t, h1.server)
+	require.NotNil(t, h2.server)
+	// 两个 server 各监听一对 UDP 端口，且互不相同
+	require.NotNil(t, h1.server.UDPRTPAddress, "server1 should have dynamic UDP RTP address")
+	require.NotNil(t, h2.server.UDPRTPAddress, "server2 should have dynamic UDP RTP address")
+	assert.NotEqual(t, h1.server.UDPRTPAddress, h2.server.UDPRTPAddress,
+		"different servers must use different UDP port pairs")
+	assert.NotEqual(t, h1.server.UDPRTCPAddress, h2.server.UDPRTCPAddress)
+}
+
+// TestRTSPManager_DynamicUDPThenStop 验证动态端口分配的 server 正常关闭。
+func TestRTSPManager_DynamicUDPThenStop(t *testing.T) {
+	defer globalRTSPManager.StopAll()
+
+	h, err := globalRTSPManager.GetOrCreate("127.0.0.1:" + freeTCPPort(t))
+	require.NoError(t, err)
+	require.NotEmpty(t, h.server.UDPRTPAddress)
+
+	globalRTSPManager.StopAll()
+	// 关闭后再起一个新 server，应能重新动态分配
+	h2, err := globalRTSPManager.GetOrCreate("127.0.0.1:" + freeTCPPort(t))
+	require.NoError(t, err)
+	require.NotEmpty(t, h2.server.UDPRTPAddress)
+}
+
+// TestRTSPSink_TransportPolicy 验证 RTSP server 输出端的传输协议策略：
+// 路径配置强制 TCP 时，UDP 客户端 SETUP 应被 461 拒绝，TCP 客户端可正常连接。
+func TestRTSPSink_TransportPolicy(t *testing.T) {
+	spsPps := []byte{
+		0x00, 0x00, 0x00, 0x01, 0x67, 0x42, 0x00, 0x0a, 0xe9, 0x40, 0x50, 0x1e, 0xd0, 0x80,
+		0x00, 0x00, 0x00, 0x01, 0x68, 0xce, 0x38, 0x80,
+	}
+
+	// 独立端口，避免与全局缓存的 server 冲突
+	srvAddr := "127.0.0.1:" + freeTCPPort(t)
+	// 强制 TCP 策略的 sink
+	sink, err := NewRTSPSink(&OutputConfig{
+		ID:        "policy_tcp_" + t.Name(),
+		Type:      "rtsp",
+		Mode:      "server",
+		Addr:      srvAddr,
+		Transport: RTSPTransportTCP,
+	})
+	require.NoError(t, err)
+	require.NoError(t, sink.Start(context.Background()))
+	defer sink.Stop()
+	require.NoError(t, sink.Configure([]StreamInfo{
+		{ChannelID: 0, Kind: "video", CodecID: CodecH264, CodecName: "H264", ClockRate: 90000, CodecConfig: spsPps},
+	}))
+
+	// path 上应记录 TCP 策略
+	sink.handler.mutex.RLock()
+	p := sink.handler.paths["live/"+sink.ID()]
+	sink.handler.mutex.RUnlock()
+	require.NotNil(t, p)
+	assert.Equal(t, RTSPTransportTCP, p.transportPolicy)
+
+	// TCP 客户端应能正常 DESCRIBE + SETUP + PLAY
+	err = dialAndSetup(t, sink, "tcp")
+	assert.NoError(t, err, "TCP client should be accepted by tcp policy")
+}
+
+// TestRTSPSink_TransportPolicy_UDPRejected 验证全局 UDP 已启用时，
+// 强制 TCP 策略的路径对 UDP 客户端 SETUP 返回 461（路径级校验生效）。
+func TestRTSPSink_TransportPolicy_UDPRejected(t *testing.T) {
+	// 全局启用 UDP（须在 server 创建前配置，GetOrCreate 时生效）
+	rtpAddr, rtcpAddr := freeUDPPortPair(t)
+	globalRTSPManager.ConfigureUDP(rtpAddr, rtcpAddr, "", 0, 0)
+	defer globalRTSPManager.ConfigureUDP("", "", "", 0, 0)
+	defer globalRTSPManager.StopAll()
+
+	spsPps := []byte{
+		0x00, 0x00, 0x00, 0x01, 0x67, 0x42, 0x00, 0x0a, 0xe9, 0x40, 0x50, 0x1e, 0xd0, 0x80,
+		0x00, 0x00, 0x00, 0x01, 0x68, 0xce, 0x38, 0x80,
+	}
+	sink, err := NewRTSPSink(&OutputConfig{
+		ID:        "policy_udpreject_" + t.Name(),
+		Type:      "rtsp",
+		Mode:      "server",
+		Addr:      "127.0.0.1:" + freeTCPPort(t),
+		Transport: RTSPTransportTCP,
+	})
+	require.NoError(t, err)
+	require.NoError(t, sink.Start(context.Background()))
+	defer sink.Stop()
+	require.NoError(t, sink.Configure([]StreamInfo{
+		{ChannelID: 0, Kind: "video", CodecID: CodecH264, CodecName: "H264", ClockRate: 90000, CodecConfig: spsPps},
+	}))
+
+	// UDP 客户端应被 461 拒绝
+	err = dialAndSetup(t, sink, "udp")
+	assert.Error(t, err, "UDP client should be rejected by tcp policy")
+	// TCP 客户端仍正常
+	err = dialAndSetup(t, sink, "tcp")
+	assert.NoError(t, err, "TCP client should be accepted by tcp policy")
+}
+
+// TestRTSPSink_TransportPolicy_UDPMulticast 验证 UDP 组播策略的归一化与路径记录。
+func TestRTSPSink_TransportPolicy_UDPMulticast(t *testing.T) {
+	sink, err := NewRTSPSink(&OutputConfig{
+		ID:        "policy_mcast_" + t.Name(),
+		Type:      "rtsp",
+		Mode:      "server",
+		Addr:      "127.0.0.1:0",
+		Transport: RTSPTransportUDPMulticast,
+	})
+	require.NoError(t, err)
+	require.NoError(t, sink.Start(context.Background()))
+	defer sink.Stop()
+	assert.Equal(t, RTSPTransportUDPMulticast, sink.transportPolicy)
+}
+
+// TestRTSPSink_TransportPolicy_InvalidNormalizesToAuto 验证未知策略值归一化为 auto。
+func TestRTSPSink_TransportPolicy_InvalidNormalizesToAuto(t *testing.T) {
+	sink, err := NewRTSPSink(&OutputConfig{
+		ID:        "policy_bad_" + t.Name(),
+		Type:      "rtsp",
+		Mode:      "server",
+		Addr:      "127.0.0.1:0",
+		Transport: "foo",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, RTSPTransportAuto, sink.transportPolicy)
+}
+
+// dialAndSetup 用 gortsplib 客户端按指定协议连接并完成 DESCRIBE+SETUP。
+// 返回错误表示握手/SETUP 阶段被拒绝（如 461 Unsupported Transport）。
+func dialAndSetup(t *testing.T, sink *RTSPSink, transport string) error {
+	t.Helper()
+	u, err := base.ParseURL("rtsp://" + sinkListenerAddr(sink) + "/live/" + sink.ID())
+	if err != nil {
+		return err
+	}
+	client := &gortsplib.Client{
+		Scheme:      u.Scheme,
+		Host:        u.Host,
+		ReadTimeout: 5 * time.Second,
+	}
+	if transport == "tcp" {
+		proto := gortsplib.ProtocolTCP
+		client.Protocol = &proto
+	} else {
+		proto := gortsplib.ProtocolUDP
+		client.Protocol = &proto
+	}
+	if err := client.Start(); err != nil {
+		return err
+	}
+	defer client.Close()
+	desc, _, err := client.Describe(u)
+	if err != nil {
+		return err
+	}
+	return client.SetupAll(u, desc.Medias)
 }

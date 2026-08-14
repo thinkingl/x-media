@@ -2,6 +2,8 @@ package media
 
 import (
 	"fmt"
+	"net"
+	"strconv"
 	"sync"
 	"time"
 
@@ -14,6 +16,15 @@ import (
 	"github.com/x-media/x-media-server/pkg/logger"
 )
 
+// RTSP 拉流传输协议策略（OutputConfig.Transport，RTSP server 模式）。
+// auto 由 gortsplib 按全局配置自动协商（UDP 监听开启则支持 UDP，否则仅 TCP）。
+const (
+	RTSPTransportAuto       = "auto" // 自动适配（默认，空字符串同义）
+	RTSPTransportTCP        = "tcp"
+	RTSPTransportUDP        = "udp"
+	RTSPTransportUDPMulticast = "udp-multicast"
+)
+
 type rtspPath struct {
 	stream    *gortsplib.ServerStream
 	publisher *gortsplib.ServerSession
@@ -22,6 +33,8 @@ type rtspPath struct {
 	onPlay func(stream *gortsplib.ServerStream)
 	// readers 当前拉流客户端（key = *ServerSession），供前端展示与排障。
 	readers map[*gortsplib.ServerSession]*rtspReader
+	// transportPolicy 该路径强制要求的拉流传输协议（""=自动适配）。
+	transportPolicy string
 }
 
 // rtspReader 一个 RTSP 拉流客户端。
@@ -143,16 +156,40 @@ func (h *RTSPServerHandler) OnSetup(ctx *gortsplib.ServerHandlerOnSetupCtx) (
 	}
 
 	h.mutex.RLock()
-	defer h.mutex.RUnlock()
-
 	p, ok := h.paths[path]
+	h.mutex.RUnlock()
 	if !ok {
 		logger.Infof("RTSP SETUP -> 404: %s", path)
 		return &base.Response{StatusCode: base.StatusNotFound}, nil, nil
 	}
 
+	// 传输协议策略校验：该路径若强制要求某协议，且客户端协商出的协议不匹配，
+	// 返回 461 Unsupported Transport 拒绝 SETUP（客户端可回退重试其它协议）。
+	if p.transportPolicy != "" && p.transportPolicy != RTSPTransportAuto &&
+		!rtspTransportMatches(p.transportPolicy, ctx.Transport) {
+		logger.Infof("RTSP SETUP -> 461: path=%s policy=%s got=%s",
+			path, p.transportPolicy, transportSummary(ctx.Transport))
+		return &base.Response{StatusCode: base.StatusUnsupportedTransport}, nil, nil
+	}
+
 	logger.Infof("RTSP SETUP -> 200: %s", path)
 	return &base.Response{StatusCode: base.StatusOK}, p.stream, nil
+}
+
+// rtspTransportMatches 判断协商出的 transport 是否符合路径的传输协议策略。
+func rtspTransportMatches(policy string, tr *gortsplib.SessionTransport) bool {
+	if tr == nil {
+		return false
+	}
+	switch policy {
+	case RTSPTransportTCP:
+		return tr.Protocol == gortsplib.ProtocolTCP
+	case RTSPTransportUDP:
+		return tr.Protocol == gortsplib.ProtocolUDP
+	case RTSPTransportUDPMulticast:
+		return tr.Protocol == gortsplib.ProtocolUDPMulticast
+	}
+	return true
 }
 
 func (h *RTSPServerHandler) OnPlay(ctx *gortsplib.ServerHandlerOnPlayCtx) (
@@ -288,12 +325,26 @@ func (m *RTSPServerManager) GetOrCreate(addr string) (*RTSPServerHandler, error)
 		return h, nil
 	}
 
+	// UDP transport 端口：优先用全局配置；未配置时动态探测一对空闲相邻端口
+	// （RTP 偶数 + RTCP=RTP+1），使每个不同 addr 的 RTSP server 独享一对 UDP
+	// 端口，多个 server 并发不冲突，也免去"配了 udp 策略但全局没配 UDP"的坑。
+	rtpAddr := m.udpRTPAddr
+	rtcpAddr := m.udpRTCPAddr
+	if rtpAddr == "" {
+		r, rc, err := findFreeUDPPair()
+		if err != nil {
+			logger.Warnf("RTSP server %s: dynamic UDP port pair unavailable, UDP disabled: %v", addr, err)
+		} else {
+			rtpAddr, rtcpAddr = r, rc
+		}
+	}
+
 	h := NewRTSPServerHandler()
 	srv := &gortsplib.Server{
 		Handler:           h,
 		RTSPAddress:       addr,
-		UDPRTPAddress:     m.udpRTPAddr,
-		UDPRTCPAddress:    m.udpRTCPAddr,
+		UDPRTPAddress:     rtpAddr,
+		UDPRTCPAddress:    rtcpAddr,
 		MulticastIPRange:  m.multicastIP,
 		MulticastRTPPort:  m.multicastRTP,
 		MulticastRTCPPort: m.multicastRTCP,
@@ -307,8 +358,43 @@ func (m *RTSPServerManager) GetOrCreate(addr string) (*RTSPServerHandler, error)
 
 	m.servers[addr] = srv
 	m.handler[addr] = h
-	logger.Infof("RTSP server started on %s (udp=%s/%s)", addr, m.udpRTPAddr, m.udpRTCPAddr)
+	logger.Infof("RTSP server started on %s (udp=%s/%s)", addr, rtpAddr, rtcpAddr)
 	return h, nil
+}
+
+// findFreeUDPPair 探测一对连续的空闲 UDP 端口（RTP 偶数、RTCP = RTP+1），
+// 供 RTSP server 动态绑定 UDP transport。
+func findFreeUDPPair() (rtpAddr, rtcpAddr string, err error) {
+	for i := 0; i < 20; i++ {
+		ln, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(0, 0, 0, 0), Port: 0})
+		if err != nil {
+			continue
+		}
+		port := ln.LocalAddr().(*net.UDPAddr).Port
+		ln.Close()
+		if port == 65535 {
+			continue
+		}
+		if port%2 != 0 {
+			port--
+		}
+		// 验证该偶数端口及 +1 端口确实空闲（避免探测-关闭间被抢占）
+		c1, err1 := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(0, 0, 0, 0), Port: port})
+		c2, err2 := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(0, 0, 0, 0), Port: port + 1})
+		if err1 == nil && err2 == nil {
+			c1.Close()
+			c2.Close()
+			return net.JoinHostPort("0.0.0.0", strconv.Itoa(port)),
+				net.JoinHostPort("0.0.0.0", strconv.Itoa(port+1)), nil
+		}
+		if c1 != nil {
+			c1.Close()
+		}
+		if c2 != nil {
+			c2.Close()
+		}
+	}
+	return "", "", fmt.Errorf("no free consecutive UDP port pair found")
 }
 
 func (m *RTSPServerManager) StopAll() {

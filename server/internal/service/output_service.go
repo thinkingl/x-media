@@ -194,6 +194,16 @@ func isValidOutputType(outputType string) bool {
 	return validTypes[outputType]
 }
 
+// isValidRTSPTransport 校验 RTSP 传输协议配置值（auto/tcp/udp/udp-multicast）。
+func isValidRTSPTransport(t string) bool {
+	switch t {
+	case "", media.RTSPTransportAuto, media.RTSPTransportTCP,
+		media.RTSPTransportUDP, media.RTSPTransportUDPMulticast:
+		return true
+	}
+	return false
+}
+
 func validateOutputConfig(outputType string, configStr string) error {
 	var config model.OutputConfig
 	if err := json.Unmarshal([]byte(configStr), &config); err != nil {
@@ -214,6 +224,9 @@ func validateOutputConfig(outputType string, configStr string) error {
 		}
 		if config.Mode == "server" && config.Addr == "" {
 			return errors.NewValidationError("服务模式地址不能为空")
+		}
+		if config.Transport != "" && !isValidRTSPTransport(config.Transport) {
+			return errors.NewValidationError("RTSP传输协议无效(可选: auto/tcp/udp/udp-multicast)")
 		}
 	case model.OutputTypeHTTPFLV:
 		if config.Addr == "" {

@@ -142,6 +142,64 @@ func TestOutputService_Create(t *testing.T) {
 		assert.Nil(t, result)
 		mockRepo.AssertNotCalled(t, "Create")
 	})
+
+	t.Run("成功创建RTSP输出端-指定传输协议", func(t *testing.T) {
+		mockRepo := new(MockOutputRepo)
+		mockEngine := new(MockMediaEngine)
+		svc := NewOutputService(mockRepo, mockEngine, new(MockPipeRepo), new(MockInputRepo))
+
+		req := &CreateOutputRequest{
+			Name:   "测试RTSP-TCP",
+			Type:   "rtsp",
+			Config: `{"mode":"server","addr":":5544","transport":"tcp"}`,
+		}
+
+		mockRepo.On("Create", mock.AnythingOfType("*model.Output")).Return(nil)
+
+		result, err := svc.Create(req)
+
+		assert.NoError(t, err)
+		assert.NotNil(t, result)
+		mockRepo.AssertExpectations(t)
+	})
+
+	t.Run("参数验证失败-RTSP传输协议无效", func(t *testing.T) {
+		mockRepo := new(MockOutputRepo)
+		mockEngine := new(MockMediaEngine)
+		svc := NewOutputService(mockRepo, mockEngine, new(MockPipeRepo), new(MockInputRepo))
+
+		req := &CreateOutputRequest{
+			Name:   "测试",
+			Type:   "rtsp",
+			Config: `{"mode":"server","addr":":5544","transport":"quic"}`,
+		}
+
+		result, err := svc.Create(req)
+
+		assert.Error(t, err)
+		assert.Nil(t, result)
+		mockRepo.AssertNotCalled(t, "Create")
+	})
+
+	t.Run("参数验证失败-RTSP组播协议需合法值", func(t *testing.T) {
+		mockRepo := new(MockOutputRepo)
+		mockEngine := new(MockMediaEngine)
+		svc := NewOutputService(mockRepo, mockEngine, new(MockPipeRepo), new(MockInputRepo))
+
+		req := &CreateOutputRequest{
+			Name:   "测试",
+			Type:   "rtsp",
+			Config: `{"mode":"server","addr":":5544","transport":"udp-multicast"}`,
+		}
+
+		mockRepo.On("Create", mock.AnythingOfType("*model.Output")).Return(nil)
+
+		result, err := svc.Create(req)
+
+		assert.NoError(t, err)
+		assert.NotNil(t, result)
+		mockRepo.AssertExpectations(t)
+	})
 }
 
 func TestOutputService_GetByID(t *testing.T) {

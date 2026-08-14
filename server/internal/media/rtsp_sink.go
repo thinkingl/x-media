@@ -35,6 +35,10 @@ type RTSPSink struct {
 	addr   string
 	status StreamStatus
 
+	// transportPolicy 该输出端强制的拉流传输协议（""=自动适配）。
+	// 仅 RTSP server 模式生效；由 configureLocked 写入 path 供 OnSetup 校验。
+	transportPolicy string
+
 	handler         *RTSPServerHandler
 	stream          *gortsplib.ServerStream
 	h264Enc         *rtph264.Encoder
@@ -67,10 +71,20 @@ func NewRTSPSink(config *OutputConfig) (*RTSPSink, error) {
 		id = "rtsp_" + config.Addr
 	}
 	return &RTSPSink{
-		id:     id,
-		addr:   config.Addr,
-		status: StreamStatusStopped,
+		id:              id,
+		addr:            config.Addr,
+		status:          StreamStatusStopped,
+		transportPolicy: normalizeRTSPTransport(config.Transport),
 	}, nil
+}
+
+// normalizeRTSPTransport 将配置的传输协议归一化：空/未知值一律按 auto。
+func normalizeRTSPTransport(t string) string {
+	switch t {
+	case RTSPTransportTCP, RTSPTransportUDP, RTSPTransportUDPMulticast:
+		return t
+	}
+	return RTSPTransportAuto
 }
 
 func (r *RTSPSink) ID() string { return r.id }
@@ -222,8 +236,9 @@ func (r *RTSPSink) configureLocked(streams []StreamInfo) error {
 	// 新 reader PLAY 后按路径注册回调（多 sink 共用同一 server 时互不覆盖）。
 	r.handler.mutex.Lock()
 	r.handler.paths[path] = &rtspPath{
-		stream: stream,
-		onPlay: func(s *gortsplib.ServerStream) { r.sendParamsToStream(s) },
+		stream:          stream,
+		onPlay:          func(s *gortsplib.ServerStream) { r.sendParamsToStream(s) },
+		transportPolicy: r.transportPolicy,
 	}
 	r.handler.mutex.Unlock()
 
