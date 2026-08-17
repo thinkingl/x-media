@@ -13,6 +13,7 @@
           <el-menu-item index="/inputs">输入端</el-menu-item>
           <el-menu-item index="/outputs">输出端</el-menu-item>
           <el-menu-item index="/pipes">管道</el-menu-item>
+          <el-menu-item index="/test">测试</el-menu-item>
           <el-menu-item index="/logs">日志</el-menu-item>
         </el-menu>
       </div>

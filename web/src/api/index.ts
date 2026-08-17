@@ -159,4 +159,15 @@ export const uploadFile = (file: File) => {
   })
 }
 
+// Tools
+export interface StreamTestResult {
+  url: string
+  ok: boolean
+  latency_ms: number
+  detail: string
+}
+
+export const testStreamURL = (url: string) =>
+  api.post<ApiResponse<StreamTestResult>>('/tools/test-stream', { url })
+
 export default api

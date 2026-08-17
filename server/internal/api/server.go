@@ -148,6 +148,12 @@ func (s *Server) registerRoutes() {
 			files.GET("/list", s.fileHandler.listDir)
 			files.POST("/upload", s.fileHandler.upload)
 		}
+
+		// 工具：流地址测试
+		tools := api.Group("/tools")
+		{
+			tools.POST("/test-stream", s.testStream)
+		}
 	}
 
 	// 前端静态文件
@@ -226,4 +232,21 @@ func errorResponse(c *gin.Context, code int, message string) {
 		"message": message,
 		"data":    nil,
 	})
+}
+
+// testStream 测试一个流地址（rtmp/whep/http-flv）的连通性。
+func (s *Server) testStream(c *gin.Context) {
+	var req struct {
+		URL string `json:"url" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		errorResponse(c, 400, "请提供要测试的 URL")
+		return
+	}
+	if req.URL == "" {
+		errorResponse(c, 400, "URL 不能为空")
+		return
+	}
+	res := media.TestStreamURL(req.URL)
+	response(c, 200, res)
 }
