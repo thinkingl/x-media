@@ -27,6 +27,16 @@ type HTTPFLVSink struct {
 
 	// 配置项
 	clientsLimit int
+
+	// flvClients 当前连接的 HTTP-FLV 拉流客户端（key = *flvReader）。
+	flvClients map[*flvReader]*flvClient
+}
+
+// flvClient 一个 HTTP-FLV 拉流客户端的信息。
+type flvClient struct {
+	address     string
+	userAgent   string
+	connectedAt time.Time
 }
 
 // NewHTTPFLVSink 创建 HTTP-FLV sink。
@@ -45,6 +55,7 @@ func NewHTTPFLVSink(config *OutputConfig) (*HTTPFLVSink, error) {
 		writer:       NewFLVWriter(),
 		ring:         newFLVRing(2 * 1024 * 1024),
 		clientsLimit: 100,
+		flvClients:   make(map[*flvReader]*flvClient),
 	}, nil
 }
 
@@ -82,10 +93,14 @@ func (h *HTTPFLVSink) configureLocked(streams []StreamInfo) error {
 		}
 	}
 	configTags := w.BuildConfigTags(streams)
+	metaTag := w.BuildOnMetaDataTag(streams)
 
-	// 固定前缀：FLV header + config tags，新客户端总能拿到有效起点。
+	// 固定前缀：FLV header + onMetaData + config tags，新客户端总能拿到有效起点。
+	// onMetaData 让 ffmpeg/VLC 的 flv demuxer 正确建立 dts 时间轴，避免缺失时
+	// 的启发式错乱（重复帧/卡顿）。
 	h.writer = w
-	h.prefix = append(append([]byte{}, h.writer.Header()...), configTags...)
+	h.prefix = append(append([]byte{}, h.writer.Header()...), metaTag...)
+	h.prefix = append(h.prefix, configTags...)
 	h.ring.reset()
 	h.ready = true
 	logger.Infof("HTTP-FLV sink configured: %s, streams: %d", h.id, len(streams))
@@ -103,16 +118,6 @@ func (h *HTTPFLVSink) WriteFrame(f *Frame) error {
 		return nil
 	}
 
-	// 每遇视频关键帧（GOP 起点）重置累积时钟，使 tag 时间戳落在
-	// 单 GOP/文件时长范围内（而非服务启动以来的绝对时长）。否则服务长期
-	// 运行时时间戳可达数十万毫秒，播放器看到首帧巨大时间戳误判时间轴 → 帧率失控。
-	if f.Header.FrameType == FrameTypeVideo && f.Header.Flags&FlagKeyframe != 0 {
-		h.mu.Lock()
-		h.writer.resetVideoClock()
-		h.writer.resetAudioClock()
-		h.mu.Unlock()
-	}
-
 	tag := h.writer.EncodeTag(f)
 	if len(tag) == 0 {
 		return nil
@@ -126,6 +131,25 @@ func (h *HTTPFLVSink) WriteFrame(f *Frame) error {
 
 func (h *HTTPFLVSink) Notify(sig *Signal) error {
 	return nil
+}
+
+// Clients 返回当前连接的 HTTP-FLV 拉流客户端信息（实现 ClientInfoProvider）。
+func (h *HTTPFLVSink) Clients() []ClientInfo {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	if len(h.flvClients) == 0 {
+		return nil
+	}
+	out := make([]ClientInfo, 0, len(h.flvClients))
+	for _, c := range h.flvClients {
+		out = append(out, ClientInfo{
+			Address:     c.address,
+			UserAgent:   c.userAgent,
+			Transport:   "http-flv",
+			ConnectedAt: c.connectedAt,
+		})
+	}
+	return out
 }
 
 func (h *HTTPFLVSink) Stop() error {
@@ -170,6 +194,24 @@ func (h *HTTPFLVSink) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	reader := h.ring.newReader()
 	defer reader.close()
+
+	// 记录客户端信息（IP、UA、连接时间），断开时移除
+	addr := "?"
+	if r.RemoteAddr != "" {
+		addr = r.RemoteAddr
+	}
+	h.mu.Lock()
+	h.flvClients[reader] = &flvClient{
+		address:     addr,
+		userAgent:   r.UserAgent(),
+		connectedAt: time.Now(),
+	}
+	h.mu.Unlock()
+	defer func() {
+		h.mu.Lock()
+		delete(h.flvClients, reader)
+		h.mu.Unlock()
+	}()
 
 	// 先发固定前缀（FLV header + sequence header）
 	h.mu.RLock()
@@ -278,9 +320,14 @@ func (r *flvRing) newReader() *flvReader {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	// 新客户端从最近 GOP 起点开始读（可解码起点），紧跟 prefix 发送。
-	start := r.gopPos
-	if !r.full && r.tail == r.gopPos {
-		start = r.head
+	// ring 满后 gopPos 指向的关键帧可能已被覆盖（head 前移，gopPos 处的字节
+	// 可能已变成其他 tag 的中间），此时若仍从 gopPos 读会导致 tag 错位/花屏。
+	// 稳妥起见：仅当 ring 未满且 gopPos 有效时从 GOP 起点开始，否则从 head。
+	start := r.head
+	if !r.full && r.gopPos != r.tail &&
+		((r.head <= r.tail && r.gopPos >= r.head && r.gopPos < r.tail) ||
+			(r.head > r.tail && (r.gopPos >= r.head || r.gopPos < r.tail))) {
+		start = r.gopPos
 	}
 	rd := &flvReader{
 		ring:     r,

@@ -55,19 +55,27 @@ func TestHTTPFLVSink_SequenceHeaders(t *testing.T) {
 	defer sink.Stop()
 	require.NoError(t, sink.Configure(flvTestStreams()))
 
-	// prefix 含 FLV header + sequence header
+	// prefix 含 FLV header + onMetaData + sequence header
 	sink.mu.RLock()
 	raw := append([]byte{}, sink.prefix...)
 	sink.mu.RUnlock()
 
-	// 找 video sequence header tag (type=9)
-	// 结构: flv header 13B, 然后 tags
+	// 结构: flv header 13B, 然后 onMetaData(18) + video seq header(9) + audio seq(8)
 	pos := 13
 	require.LessOrEqual(t, pos+11, len(raw))
-	tagType := raw[pos]
-	// 第一个 tag 应是 video seq header (0x17 开头)
-	assert.Equal(t, byte(9), tagType)
-	// data 开头 0x17 = keyframe<<4 | 7(h264), AVCPacketType=0(seq)
+	// 第一个 tag 应是 onMetaData (type=18)
+	assert.Equal(t, byte(18), raw[pos], "first tag should be onMetaData")
+	// AMF0: 0x02(string) + 2字节长度 + "onMetaData"
+	assert.Equal(t, byte(0x02), raw[pos+11], "AMF0 string type")
+	assert.Equal(t, "onMetaData", string(raw[pos+14:pos+24]))
+
+	// 跳过 onMetaData tag
+	metaSz := int(raw[pos+1])<<16 | int(raw[pos+2])<<8 | int(raw[pos+3])
+	pos += 11 + metaSz + 4
+
+	// 下一个 tag 应是 video seq header (0x17 开头)
+	require.LessOrEqual(t, pos+11, len(raw))
+	assert.Equal(t, byte(9), raw[pos])
 	assert.Equal(t, byte(0x17), raw[pos+11])
 	assert.Equal(t, byte(0), raw[pos+12])
 }
@@ -297,4 +305,82 @@ func TestHTTPFLVSink_HevcKeyframeParams(t *testing.T) {
 	assert.Equal(t, 32, nalTypes[0], "first NAL should be VPS")
 	assert.Equal(t, 33, nalTypes[1], "second NAL should be SPS")
 	assert.Equal(t, 34, nalTypes[2], "third NAL should be PPS")
+}
+
+// TestHTTPFLVSink_H264KeyframeParams 验证 H264 关键帧前置 SPS/PPS，
+// 保证任意 GOP 起点接入都可解码（VLC/ffmpeg 探测阶段消费 seq header 后仍可恢复）。
+func TestHTTPFLVSink_H264KeyframeParams(t *testing.T) {
+	w := NewFLVWriter()
+	w.SetClockRate(0, 90000)
+	// 模拟 Configure 缓存 SPS/PPS（来自 flvTestStreams 的 CodecConfig）
+	spsPps := []byte{
+		0x00, 0x00, 0x00, 0x01, 0x67, 0x42, 0x00, 0x0a, 0xe9, 0x40, 0x50, 0x1e, 0xd0, 0x80,
+		0x00, 0x00, 0x00, 0x01, 0x68, 0xce, 0x38, 0x80,
+	}
+	sps, pps := splitCodecConfigVideo(spsPps)
+	w.h264SPS, w.h264PPS = sps, pps
+
+	// 关键帧
+	frameData := []byte{
+		0x00, 0x00, 0x00, 0x01, 0x65, 0x88, 0x80, 0x40, 0x00,
+	}
+	f := testFrame(0, FrameTypeVideo, CodecH264, 3000, frameData)
+	f.Header.Flags = FlagKeyframe
+	tag := w.EncodeTag(f)
+	require.NotEmpty(t, tag)
+
+	// data: [0x17][AVCPacketType=1][cts 3B] + length-prefixed NAL 序列
+	// 数据从偏移 16 开始，应先出现 SPS → PPS → IDR
+	off := 16
+	nalTypes := []int{}
+	for len(nalTypes) < 3 && off+4 <= len(tag)-15 {
+		l := int(tag[off])<<24 | int(tag[off+1])<<16 | int(tag[off+2])<<8 | int(tag[off+3])
+		if l <= 0 || off+4+l > len(tag) {
+			break
+		}
+		nalTypes = append(nalTypes, int(tag[off+4]&0x1F))
+		off += 4 + l
+	}
+	t.Logf("H264 keyframe NAL types: %v", nalTypes)
+	require.GreaterOrEqual(t, len(nalTypes), 2, "keyframe should contain SPS+PPS (+IDR)")
+	assert.Equal(t, 7, nalTypes[0], "first NAL should be SPS (type 7)")
+	assert.Equal(t, 8, nalTypes[1], "second NAL should be PPS (type 8)")
+
+	// 非关键帧不应前置参数集
+	f2 := testFrame(0, FrameTypeVideo, CodecH264, 4000, frameData)
+	tag2 := w.EncodeTag(f2)
+	assert.Equal(t, byte(0x27), tag2[11], "inter frame should be 0x27")
+	// 第一个 NAL 应为 IDR/普通帧, 不是 SPS
+	nalType := int(tag2[16]&0x1F)
+	if nalType == 7 {
+		t.Error("inter frame should not prepend SPS")
+	}
+}
+
+// TestHTTPFLVSink_Clients 验证 HTTP-FLV 客户端信息接口。
+func TestHTTPFLVSink_Clients(t *testing.T) {
+	sink := newFLVSink(t)
+	defer sink.Stop()
+	require.NoError(t, sink.Configure(flvTestStreams()))
+
+	// 无客户端时应返回 nil
+	require.Nil(t, sink.Clients())
+
+	// 模拟一个客户端连接
+	rd := sink.ring.newReader()
+	sink.mu.Lock()
+	sink.flvClients[rd] = &flvClient{address: "1.2.3.4:5678", userAgent: "VLC", connectedAt: time.Now()}
+	sink.mu.Unlock()
+
+	clients := sink.Clients()
+	require.Len(t, clients, 1)
+	assert.Equal(t, "1.2.3.4:5678", clients[0].Address)
+	assert.Equal(t, "VLC", clients[0].UserAgent)
+	assert.Equal(t, "http-flv", clients[0].Transport)
+
+	// 移除后应为空
+	sink.mu.Lock()
+	delete(sink.flvClients, rd)
+	sink.mu.Unlock()
+	require.Nil(t, sink.Clients())
 }
