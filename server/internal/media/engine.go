@@ -24,6 +24,14 @@ type InputConfig struct {
 	// UDPReadBufferSize UDP 拉流读缓冲大小（字节）；0 用 OS 默认值。
 	// 本机回环或高突发场景下调大可减少丢包。
 	UDPReadBufferSize int
+	// TimestampGrid 时间戳网格化重打开关（按 track）。
+	TimestampGrid *TrackGridConfig
+}
+
+// TrackGridConfig 每个 track 的网格化重打开关（Video/Audio 独立）。
+type TrackGridConfig struct {
+	Video bool
+	Audio bool
 }
 
 // OutputConfig 输出流配置

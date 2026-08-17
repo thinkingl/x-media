@@ -39,3 +39,6 @@ logs/
 
 # Data
 data/
+
+# Runtime uploads / thumbnails
+server/uploads/thumbnails/

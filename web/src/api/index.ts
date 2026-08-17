@@ -97,6 +97,22 @@ export interface MediaInfo {
   format_long_name: string
   streams: StreamInfo[]
   thumbnail_path?: string
+  timestamp_stats?: TimestampDeltaStats[]
+}
+
+export interface TimestampDeltaStats {
+  kind: string
+  timescale: number
+  frames: number
+  min_delta: number
+  max_delta: number
+  avg_delta: number
+  median_delta: number
+  std_dev: number
+  stalls: number
+  jumps: number
+  jitter_ms: number
+  regular: boolean
 }
 
 export const getInputs = () => api.get<ApiResponse<Input[]>>('/inputs')

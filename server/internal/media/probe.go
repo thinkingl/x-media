@@ -10,50 +10,52 @@ import (
 )
 
 type MediaInfo struct {
-	FileName    string         `json:"file_name"`
-	FilePath    string         `json:"file_path"`
-	FileSize    int64          `json:"file_size"`
-	Duration    float64        `json:"duration"`
-	BitRate     int64          `json:"bit_rate"`
-	FormatName  string         `json:"format_name"`
-	FormatLong  string         `json:"format_long_name"`
-	Streams     []FFprobeStream `json:"streams"`
-	ThumbnailPath string       `json:"thumbnail_path,omitempty"`
+	FileName      string          `json:"file_name"`
+	FilePath      string          `json:"file_path"`
+	FileSize      int64           `json:"file_size"`
+	Duration      float64         `json:"duration"`
+	BitRate       int64           `json:"bit_rate"`
+	FormatName    string          `json:"format_name"`
+	FormatLong    string          `json:"format_long_name"`
+	Streams       []FFprobeStream `json:"streams"`
+	ThumbnailPath string          `json:"thumbnail_path,omitempty"`
+	// TimestampStats 各 track 的帧间隔 delta 统计（MP4 可解析时填充）。
+	TimestampStats []TimestampDeltaStats `json:"timestamp_stats,omitempty"`
 }
 
 type FFprobeStream struct {
-	Index       int    `json:"index"`
-	CodecType   string `json:"codec_type"`
-	CodecName   string `json:"codec_name"`
-	CodecLong   string `json:"codec_long_name"`
-	Width       int    `json:"width,omitempty"`
-	Height      int    `json:"height,omitempty"`
-	Profile     string `json:"profile,omitempty"`
-	PixFmt      string `json:"pix_fmt,omitempty"`
-	SampleRate  string `json:"sample_rate,omitempty"`
-	Channels    int    `json:"channels,omitempty"`
+	Index         int    `json:"index"`
+	CodecType     string `json:"codec_type"`
+	CodecName     string `json:"codec_name"`
+	CodecLong     string `json:"codec_long_name"`
+	Width         int    `json:"width,omitempty"`
+	Height        int    `json:"height,omitempty"`
+	Profile       string `json:"profile,omitempty"`
+	PixFmt        string `json:"pix_fmt,omitempty"`
+	SampleRate    string `json:"sample_rate,omitempty"`
+	Channels      int    `json:"channels,omitempty"`
 	ChannelLayout string `json:"channel_layout,omitempty"`
-	BitRate     string `json:"bit_rate,omitempty"`
+	BitRate       string `json:"bit_rate,omitempty"`
 }
 
 type ffprobeFormat struct {
-	Streams     []ffprobeStream `json:"streams"`
-	Format      ffprobeFormatInfo `json:"format"`
+	Streams []ffprobeStream   `json:"streams"`
+	Format  ffprobeFormatInfo `json:"format"`
 }
 
 type ffprobeStream struct {
-	Index          int    `json:"index"`
-	CodecType      string `json:"codec_type"`
-	CodecName      string `json:"codec_name"`
-	CodecLongName  string `json:"codec_long_name"`
-	Width          int    `json:"width"`
-	Height         int    `json:"height"`
-	Profile        string `json:"profile"`
-	PixFmt         string `json:"pix_fmt"`
-	SampleRate     string `json:"sample_rate"`
-	Channels       int    `json:"channels"`
-	ChannelLayout  string `json:"channel_layout"`
-	BitRate        string `json:"bit_rate"`
+	Index         int    `json:"index"`
+	CodecType     string `json:"codec_type"`
+	CodecName     string `json:"codec_name"`
+	CodecLongName string `json:"codec_long_name"`
+	Width         int    `json:"width"`
+	Height        int    `json:"height"`
+	Profile       string `json:"profile"`
+	PixFmt        string `json:"pix_fmt"`
+	SampleRate    string `json:"sample_rate"`
+	Channels      int    `json:"channels"`
+	ChannelLayout string `json:"channel_layout"`
+	BitRate       string `json:"bit_rate"`
 }
 
 type ffprobeFormatInfo struct {
@@ -91,7 +93,7 @@ func ProbeFile(filePath string) (*MediaInfo, error) {
 	info := &MediaInfo{
 		FileName:   filepath.Base(filePath),
 		FilePath:   filePath,
-		FormatName:  probe.Format.FormatName,
+		FormatName: probe.Format.FormatName,
 		FormatLong: probe.Format.FormatLongName,
 	}
 
@@ -101,21 +103,24 @@ func ProbeFile(filePath string) (*MediaInfo, error) {
 
 	for _, s := range probe.Streams {
 		stream := FFprobeStream{
-			Index:        s.Index,
-			CodecType:    s.CodecType,
-			CodecName:    s.CodecName,
-			CodecLong:    s.CodecLongName,
-			Width:        s.Width,
-			Height:       s.Height,
-			Profile:      s.Profile,
-			PixFmt:       s.PixFmt,
-			SampleRate:   s.SampleRate,
-			Channels:     s.Channels,
+			Index:         s.Index,
+			CodecType:     s.CodecType,
+			CodecName:     s.CodecName,
+			CodecLong:     s.CodecLongName,
+			Width:         s.Width,
+			Height:        s.Height,
+			Profile:       s.Profile,
+			PixFmt:        s.PixFmt,
+			SampleRate:    s.SampleRate,
+			Channels:      s.Channels,
 			ChannelLayout: s.ChannelLayout,
-			BitRate:      s.BitRate,
+			BitRate:       s.BitRate,
 		}
 		info.Streams = append(info.Streams, stream)
 	}
+
+	// MP4 可解析时补充时间戳 delta 统计
+	info.TimestampStats = AnalyzeMP4TimestampStats(filePath)
 
 	return info, nil
 }

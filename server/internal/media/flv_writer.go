@@ -57,9 +57,8 @@ type FLVWriter struct {
 	videoAcc    int64 // 视频累积时间戳（流内 timescale）
 	prevVideoDTS int64
 	hasPrevVideo bool
-	// audioAcc 同理（音频用 PTS）。
+	// audioAcc 音频累积时钟（单位：采样数，每帧 +1024 AAC 采样）。
 	audioAcc    int64
-	prevAudioPTS int64
 	hasPrevAudio bool
 
 	// HEVC 参数集缓存（从 CodecConfig 提取，Configure 时填充）。
@@ -89,7 +88,6 @@ func (w *FLVWriter) Reset() {
 	w.prevVideoDTS = 0
 	w.hasPrevVideo = false
 	w.audioAcc = 0
-	w.prevAudioPTS = 0
 	w.hasPrevAudio = false
 	w.hevcVPS = nil
 	w.hevcSPS = nil
@@ -114,19 +112,22 @@ func (w *FLVWriter) nextVideoTS(dts int64) int64 {
 	return w.videoAcc
 }
 
-// nextAudioTS 推进音频累积时钟并返回当前音频时间戳（流内 timescale）。
+// aacSamplesPerFrame AAC 每帧固定 1024 采样（与编码无关，标准常量）。
+const aacSamplesPerFrame = 1024
+
+// nextAudioTS 推进音频累积时钟并返回当前音频时间戳（采样数，非 timescale）。
+//
+// 音频是固定采样率流：AAC 每帧恒 1024 采样。FLV 音频 tag 时间戳应按
+// 帧数×1024/采样率 单调递增，而**不能跟随源帧 PTS**——VFR 源（如 onvif）
+// 的音频 PTS delta 不规则（如 1/3167/9534），直接累加会导致时间戳
+// 回退/大间隔，flv.js 等播放器会丢帧并生成静音帧（音视频不同步）。
 func (w *FLVWriter) nextAudioTS(pts int64) int64 {
 	if !w.hasPrevAudio {
-		w.prevAudioPTS = pts
 		w.hasPrevAudio = true
 		w.audioAcc = 0
 		return 0
 	}
-	delta := pts - w.prevAudioPTS
-	w.prevAudioPTS = pts
-	if delta > 0 && delta < int64(1<<40) {
-		w.audioAcc += delta
-	}
+	w.audioAcc += aacSamplesPerFrame
 	return w.audioAcc
 }
 

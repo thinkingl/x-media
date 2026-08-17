@@ -149,6 +149,20 @@
           <el-form-item label="循环播放">
             <el-switch v-model="createForm.configLoop" />
           </el-form-item>
+
+          <el-form-item label="时间戳网格化">
+            <div class="grid-options">
+              <span class="grid-option">
+                <el-switch v-model="createForm.gridVideo" size="small" />
+                视频
+              </span>
+              <span class="grid-option">
+                <el-switch v-model="createForm.gridAudio" size="small" />
+                音频
+              </span>
+              <span class="grid-tip">将帧时间戳打平到固定间隔网格，消除源 VFR/停滞/跳变</span>
+            </div>
+          </el-form-item>
         </template>
 
         <template v-if="createForm.type === 'rtsp'">
@@ -212,6 +226,39 @@
               </template>
             </el-image>
           </div>
+
+          <div v-if="currentMediaInfo.timestamp_stats?.length" class="detail-section">
+            <h4>时间戳统计</h4>
+            <div v-for="ts in currentMediaInfo.timestamp_stats" :key="ts.kind" class="ts-section">
+              <div class="ts-title">
+                <el-tag :type="ts.kind === 'video' ? '' : 'warning'" size="small">
+                  {{ ts.kind === 'video' ? '视频' : '音频' }}
+                </el-tag>
+                <el-tag :type="ts.regular ? 'success' : 'danger'" size="small" style="margin-left: 8px">
+                  {{ ts.regular ? '恒等间隔' : '间隔不规则' }}
+                </el-tag>
+              </div>
+              <el-descriptions :column="3" border size="small">
+                <el-descriptions-item label="帧数">{{ ts.frames }}</el-descriptions-item>
+                <el-descriptions-item label="平均间隔">
+                  {{ formatDelta(ts.avg_delta, ts.timescale, ts.kind) }}
+                </el-descriptions-item>
+                <el-descriptions-item label="中位间隔">
+                  {{ formatDelta(ts.median_delta, ts.timescale, ts.kind) }}
+                </el-descriptions-item>
+                <el-descriptions-item label="最小/最大">
+                  {{ formatDelta(ts.min_delta, ts.timescale, ts.kind) }} /
+                  {{ formatDelta(ts.max_delta, ts.timescale, ts.kind) }}
+                </el-descriptions-item>
+                <el-descriptions-item label="抖动(标准差)">
+                  {{ ts.jitter_ms.toFixed(2) }} ms
+                </el-descriptions-item>
+                <el-descriptions-item label="停滞/跳变">
+                  {{ ts.stalls }} / {{ ts.jumps }}
+                </el-descriptions-item>
+              </el-descriptions>
+            </div>
+          </div>
         </template>
         <el-empty v-else-if="!detailsLoading" description="暂无媒体信息" />
       </div>
@@ -241,6 +288,8 @@ const createForm = reactive({
   configPath: '',
   configUrl: '',
   configLoop: true,
+  gridVideo: false,
+  gridAudio: false,
 })
 
 const fileSource = ref<'upload' | 'browse' | 'manual'>('browse')
@@ -295,6 +344,8 @@ function showCreateDialog() {
   createForm.configPath = ''
   createForm.configUrl = ''
   createForm.configLoop = true
+  createForm.gridVideo = false
+  createForm.gridAudio = false
   fileSource.value = 'browse'
   uploadFileName.value = ''
   uploadFileObj.value = null
@@ -315,6 +366,8 @@ function showEditDialog(row: any) {
   createForm.configPath = ''
   createForm.configUrl = ''
   createForm.configLoop = true
+  createForm.gridVideo = false
+  createForm.gridAudio = false
   fileSource.value = 'manual'
 
   if (row.type === 'file') {
@@ -322,6 +375,8 @@ function showEditDialog(row: any) {
       const cfg = JSON.parse(row.config)
       createForm.configPath = cfg.path || ''
       createForm.configLoop = cfg.loop ?? true
+      createForm.gridVideo = !!cfg.timestamp_grid?.video
+      createForm.gridAudio = !!cfg.timestamp_grid?.audio
     } catch {}
   } else if (row.type === 'rtsp') {
     try {
@@ -352,6 +407,18 @@ function formatDuration(seconds: number): string {
 function formatBitRate(bps: number): string {
   if (bps >= 1000000) return (bps / 1000000).toFixed(2) + ' Mbps'
   return (bps / 1000).toFixed(0) + ' Kbps'
+}
+
+function formatDelta(delta: number, timescale: number, kind: string): string {
+  if (!delta || !timescale) return '-'
+  if (kind === 'audio') {
+    // 音频以 采样数/帧 展示更直观；同时给 ms
+    const ms = (delta / timescale) * 1000
+    return `${delta}采样(${ms.toFixed(2)}ms)`
+  }
+  const ms = (delta / timescale) * 1000
+  const fps = timescale / delta
+  return `${ms.toFixed(2)}ms(${fps.toFixed(1)}fps)`
 }
 
 async function loadBreadDir(path: string) {
@@ -424,7 +491,14 @@ async function handleCreate() {
         return
       }
     }
-    config = JSON.stringify({ path: createForm.configPath, loop: createForm.configLoop })
+    config = JSON.stringify({
+      path: createForm.configPath,
+      loop: createForm.configLoop,
+      timestamp_grid: {
+        video: createForm.gridVideo,
+        audio: createForm.gridAudio,
+      },
+    })
   } else if (createForm.type === 'rtsp') {
     if (!createForm.configUrl) {
       ElMessage.warning('请输入RTSP URL')
@@ -609,5 +683,32 @@ async function handleDelete(id: string) {
 .image-error {
   color: #909399;
   font-size: 14px;
+}
+
+.grid-options {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.grid-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: #303133;
+}
+
+.grid-tip {
+  color: #909399;
+  font-size: 12px;
+}
+
+.ts-section {
+  margin-bottom: 12px;
+}
+
+.ts-title {
+  margin-bottom: 6px;
 }
 </style>

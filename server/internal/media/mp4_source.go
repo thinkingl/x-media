@@ -31,6 +31,10 @@ type MP4Source struct {
 	handler  FrameHandler
 	handlers []FrameHandler
 
+	// 时间戳网格化重打：Video/Audio 独立开关。
+	gridVideo bool
+	gridAudio bool
+
 	file    *os.File
 	mp4f    *mp4.File
 	streams []StreamInfo
@@ -58,6 +62,12 @@ type mp4Track struct {
 	isVideo   bool
 	isBase    bool  // 是否为基准 track（时长最长者），决定循环回绕节奏
 	loopDur   int64 // 已累计的循环偏移（自身 timescale），保证循环时时间戳单调递增
+
+	// 时间戳网格化重打：开启后该 track 的帧时间戳按固定间隔单调递增
+	// （不再跟随源 stts），消除 VFR/停滞/跳变造成的时间戳不规则。
+	gridEnabled bool  // 本 track 是否开启网格化
+	gridTS      int64 // 当前帧的网格时间戳（流内 timescale）
+	gridStep    int64 // 每帧固定步进（流内 timescale）
 }
 
 func NewMP4Source(config *InputConfig) (*MP4Source, error) {
@@ -68,11 +78,18 @@ func NewMP4Source(config *InputConfig) (*MP4Source, error) {
 	if id == "" {
 		id = "mp4_" + config.Path
 	}
+	var gridVideo, gridAudio bool
+	if config.TimestampGrid != nil {
+		gridVideo = config.TimestampGrid.Video
+		gridAudio = config.TimestampGrid.Audio
+	}
 	return &MP4Source{
-		id:     id,
-		path:   config.Path,
-		loop:   config.Loop,
-		status: StreamStatusStopped,
+		id:        id,
+		path:      config.Path,
+		loop:      config.Loop,
+		status:    StreamStatusStopped,
+		gridVideo: gridVideo,
+		gridAudio: gridAudio,
 	}, nil
 }
 
@@ -128,6 +145,11 @@ func (m *MP4Source) Start(ctx context.Context) error {
 		m.status = StreamStatusError
 		return err
 	}
+
+	// 时间戳网格化重打：按 track 计算固定步进（网格间隔）。
+	//   - 视频：timescale / fps（名义帧率），fps 不可用时用中位 stts 间隔兜底
+	//   - 音频：AAC 固定 1024 采样/帧（timescale=采样率时即 1024）
+	applyTimestampGrid(tracks, m.gridVideo, m.gridAudio)
 
 	ctx, m.cancel = context.WithCancel(ctx)
 	m.file = f
@@ -226,6 +248,69 @@ func buildMP4Tracks(mp4f *mp4.File) ([]StreamInfo, []*mp4Track, error) {
 	return streams, tracks, nil
 }
 
+// applyTimestampGrid 为各 track 计算网格化步进并开启网格模式（按配置）。
+// 开启后帧时间戳不再跟随源 stts，而是按固定步进单调递增：
+//   - 视频步进 = timescale/名义fps（fps 不可用时取 stts 中位间隔）
+//   - 音频步进 = AAC 每帧采样数（timescale=采样率时即 1024）
+func applyTimestampGrid(tracks []*mp4Track, gridVideo, gridAudio bool) {
+	for _, tr := range tracks {
+		if tr.isVideo && gridVideo {
+			step := gridStepForVideo(tr)
+			if step > 0 {
+				tr.gridEnabled = true
+				tr.gridStep = step
+				tr.gridTS = 0
+			}
+		} else if !tr.isVideo && gridAudio {
+			tr.gridEnabled = true
+			tr.gridStep = aacSamplesPerFrame
+			tr.gridTS = 0
+		}
+	}
+}
+
+// gridStepForVideo 计算视频轨道网格步进：优先按名义帧率（timescale/fps），
+// 不可用时取 stts 中位间隔，保证步进贴近源平均节奏。
+func gridStepForVideo(tr *mp4Track) int64 {
+	if tr.trak == nil || tr.trak.Mdia == nil || tr.trak.Mdia.Minf == nil || tr.trak.Mdia.Minf.Stbl == nil || tr.trak.Mdia.Minf.Stbl.Stts == nil {
+		return 0
+	}
+	ts := int64(tr.timescale)
+	if ts <= 0 {
+		ts = 90000
+	}
+	if fps := videoFPS(tr.trak); fps > 0 {
+		if step := int64(float64(ts)/fps + 0.5); step > 0 {
+			return step
+		}
+	}
+	return medianSttsDelta(tr.trak.Mdia.Minf.Stbl.Stts)
+}
+
+// medianSttsDelta 返回 stts 表的中位采样间隔（流内 timescale）；空表返回 0。
+func medianSttsDelta(stts *mp4.SttsBox) int64 {
+	if stts == nil || len(stts.SampleCount) == 0 {
+		return 0
+	}
+	total := uint64(0)
+	for _, c := range stts.SampleCount {
+		total += uint64(c)
+	}
+	if total == 0 {
+		return 0
+	}
+	// 找出中位数所在条目
+	mid := (total + 1) / 2
+	acc := uint64(0)
+	for i, c := range stts.SampleCount {
+		acc += uint64(c)
+		if acc >= mid {
+			return int64(stts.SampleTimeDelta[i])
+		}
+	}
+	return int64(stts.SampleTimeDelta[len(stts.SampleTimeDelta)-1])
+}
+
 // trackAbsDuration 返回轨道绝对时长（纳秒量纲），用于跨 timescale 比较时长。
 func (tr *mp4Track) trackAbsDuration() int64 {
 	ts := tr.timescale
@@ -283,6 +368,19 @@ func (m *MP4Source) emitNext(tr *mp4Track, ws []byte, tick *int, first *bool) (e
 	return true, false, nil
 }
 
+// trackDecodeTime 返回 track 指定 sample 的流内解码时间：
+// 网格模式下按 帧数×固定步进 计算（与源 stts 无关），否则用源 stts。
+func (tr *mp4Track) trackDecodeTime(sampleNr uint32) uint64 {
+	if tr.gridEnabled {
+		return uint64(int64(sampleNr-1) * tr.gridStep)
+	}
+	if tr.trak == nil || tr.trak.Mdia == nil || tr.trak.Mdia.Minf == nil || tr.trak.Mdia.Minf.Stbl == nil || tr.trak.Mdia.Minf.Stbl.Stts == nil {
+		return 0
+	}
+	dts, _ := tr.trak.Mdia.Minf.Stbl.Stts.GetDecodeTime(sampleNr)
+	return dts
+}
+
 // peekMediaAbs 返回 tr 下一个 sample 的绝对媒体时间（µs）；已读完或无 stts 返回 -1。
 // 用于非基准 track 按各自帧率对齐补发。
 func (m *MP4Source) peekMediaAbs(tr *mp4Track) int64 {
@@ -298,11 +396,10 @@ func (m *MP4Source) peekMediaAbs(tr *mp4Track) int64 {
 	if sampleNr > trak.GetNrSamples() {
 		return -1
 	}
-	stts := trak.Mdia.Minf.Stbl.Stts
-	if stts == nil {
+	if !tr.gridEnabled && trak.Mdia.Minf.Stbl.Stts == nil {
 		return -1
 	}
-	dts, _ := stts.GetDecodeTime(sampleNr)
+	dts := tr.trackDecodeTime(sampleNr)
 	media := int64(dts) + loopDur
 	if ts <= 0 {
 		ts = 90000
@@ -483,7 +580,7 @@ func (m *MP4Source) nextPaceTarget() time.Time {
 		if sampleNr > tr.trak.GetNrSamples() {
 			continue
 		}
-		dts, _ := tr.trak.Mdia.Minf.Stbl.Stts.GetDecodeTime(sampleNr)
+		dts := tr.trackDecodeTime(sampleNr)
 		media := int64(dts) + loopDur
 		cands = append(cands, cand{media: ConvertClock(media, int(ts), 1000000), ts: ts})
 	}
@@ -518,8 +615,7 @@ func (m *MP4Source) nextSample(tr *mp4Track) (f *Frame, done bool, err error) {
 		return nil, true, nil
 	}
 
-	stts := trak.Mdia.Minf.Stbl.Stts
-	dts, _ := stts.GetDecodeTime(sampleNr)
+	dts := tr.trackDecodeTime(sampleNr)
 	pts := int64(dts) + loopDur
 	if tr.isVideo {
 		if ctts := trak.Mdia.Minf.Stbl.Ctts; ctts != nil {
@@ -628,7 +724,10 @@ func (m *MP4Source) paceTarget() time.Time {
 		return time.Time{}
 	}
 	stts := base.trak.Mdia.Minf.Stbl.Stts
-	dts, _ := stts.GetDecodeTime(sampleNr)
+	if stts == nil {
+		return time.Time{}
+	}
+	dts := base.trackDecodeTime(sampleNr)
 	media := int64(dts) + loopDur
 	if media <= anchorMedia {
 		return time.Time{}
@@ -649,7 +748,7 @@ func (m *MP4Source) reAnchorPacing() {
 	}
 	media := base.loopDur
 	if nr := base.sampleNr; nr <= base.trak.GetNrSamples() {
-		if dts, _ := base.trak.Mdia.Minf.Stbl.Stts.GetDecodeTime(nr); dts > 0 {
+		if dts := base.trackDecodeTime(nr); dts > 0 {
 			media += int64(dts)
 		}
 	}
@@ -726,7 +825,11 @@ func (m *MP4Source) alignLoopDuration() {
 }
 
 // totalDuration 返回轨道总时长（流内 timescale）。
+// 网格模式下按 帧数×固定步进 计算，保证循环回绕后的网格时间轴连续。
 func (tr *mp4Track) totalDuration() int64 {
+	if tr.gridEnabled && tr.gridStep > 0 {
+		return int64(tr.trak.GetNrSamples()) * tr.gridStep
+	}
 	stts := tr.trak.Mdia.Minf.Stbl.Stts
 	if stts == nil {
 		return 0

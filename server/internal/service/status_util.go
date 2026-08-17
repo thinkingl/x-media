@@ -92,6 +92,10 @@ func startInputOnly(engine media.Engine, repo repository.InputRepository, id str
 		Speed:     config.Speed,
 		Transport: config.Transport,
 		Timeout:   config.TimeoutMs,
+		TimestampGrid: &media.TrackGridConfig{
+			Video: config.TimestampGrid != nil && config.TimestampGrid.Video != nil && *config.TimestampGrid.Video,
+			Audio: config.TimestampGrid != nil && config.TimestampGrid.Audio != nil && *config.TimestampGrid.Audio,
+		},
 	}
 	mi, err := engine.CreateInput(inputConfig)
 	if err != nil {
