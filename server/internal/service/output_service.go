@@ -190,6 +190,7 @@ func isValidOutputType(outputType string) bool {
 		model.OutputTypeRTSP:    true,
 		model.OutputTypeHTTPFLV: true,
 		model.OutputTypeHLS:     true,
+		model.OutputTypeWebRTC:  true,
 	}
 	return validTypes[outputType]
 }

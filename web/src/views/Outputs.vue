@@ -50,6 +50,7 @@
             <el-option label="RTMP" value="rtmp" />
             <el-option label="RTSP" value="rtsp" />
             <el-option label="HTTP-FLV" value="http-flv" />
+            <el-option label="WebRTC" value="webrtc" />
           </el-select>
         </el-form-item>
         <el-form-item v-if="form.type === 'rtmp'" label="RTMP URL">
@@ -227,6 +228,10 @@ function getStreamUrl(row: Output): string {
       // 生产：前端与 API 同端口(18090)；dev：vite 已代理 /live 到 18090。
       return `http://${location.host}/live/${row.id}.flv`
     }
+    if (row.type === 'webrtc') {
+      // WHEP 信令端点（浏览器 RTCPeerConnection 播放）
+      return `http://${location.host}/live/${row.id}/whep`
+    }
   } catch {}
   return ''
 }
@@ -329,6 +334,8 @@ function buildConfig(): string {
     return JSON.stringify({ mode: 'server', addr: form.configAddr, transport: form.rtspTransport || 'auto' })
   } else if (form.type === 'http-flv') {
     return JSON.stringify({ addr: '/live/' })
+  } else if (form.type === 'webrtc') {
+    return JSON.stringify({})
   }
   return '{}'
 }

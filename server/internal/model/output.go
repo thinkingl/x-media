@@ -60,4 +60,5 @@ const (
 	OutputTypeRTSP    = "rtsp"
 	OutputTypeHTTPFLV = "http-flv"
 	OutputTypeHLS     = "hls"
+	OutputTypeWebRTC  = "webrtc"
 )

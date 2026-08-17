@@ -175,6 +175,23 @@ func (s *Server) registerRoutes() {
 			c.JSON(400, gin.H{"code": 400, "message": "output is not HTTP-FLV"})
 		}
 	})
+
+	// WebRTC WHEP 信令：POST SDP offer → SDP answer
+	s.engine.POST("/live/:id/whep", func(c *gin.Context) {
+		outputID := c.Param("id")
+		out, err := s.mediaEngine.GetOutput(outputID)
+		if err != nil {
+			c.JSON(404, gin.H{"code": 404, "message": "output not found"})
+			return
+		}
+		if w, ok := out.(interface {
+			ServeWHEP(w http.ResponseWriter, r *http.Request)
+		}); ok {
+			w.ServeWHEP(c.Writer, c.Request)
+		} else {
+			c.JSON(400, gin.H{"code": 400, "message": "output is not WebRTC"})
+		}
+	})
 }
 
 // corsMiddleware CORS中间件

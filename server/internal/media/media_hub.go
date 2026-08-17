@@ -113,6 +113,8 @@ func (h *MediaHub) CreateOutput(config *OutputConfig) (Sink, error) {
 		sink, err = NewRTSPSink(config)
 	case "http-flv":
 		sink, err = NewHTTPFLVSink(config)
+	case "webrtc":
+		sink, err = NewWebRTCSink(config)
 	default:
 		return nil, ErrUnsupportedType
 	}
