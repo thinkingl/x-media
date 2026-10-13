@@ -196,7 +196,10 @@ func (s *WebRTCSink) WriteFrame(f *Frame) error {
 		return nil // 阶段1仅视频
 	}
 
-	// 关键帧：前置 SPS/PPS，缓存供新客户端重放
+	// 关键帧：前置 SPS/PPS，缓存供新客户端重放。
+	// 注意：只用本地变量，绝不改写 f.Payload —— 同一 *Frame 由 source fan-out
+	// 投递给多个 sink，原地改写会污染其它并发消费者。
+	var payload []byte
 	if f.Header.Flags&FlagKeyframe != 0 {
 		paramNals := make([][]byte, 0, 2+len(splitAnnexB(f.Payload)))
 		if len(sps) > 0 {
@@ -207,16 +210,18 @@ func (s *WebRTCSink) WriteFrame(f *Frame) error {
 		}
 		nalUnits := splitAnnexB(f.Payload)
 		nalUnits = append(paramNals, nalUnits...)
+		payload = joinNals(nalUnits)
 		s.mu.Lock()
-		s.lastKeyframe = joinNals(nalUnits)
+		s.lastKeyframe = payload
 		s.lastKeyPTS = f.Header.PTS
 		s.mu.Unlock()
-		f.Payload = s.lastKeyframe
+	} else {
+		payload = f.Payload
 	}
 
 	// 封装 RTP（并发写需串行，pion encoder 非并发安全）
 	s.encodeMu.Lock()
-	pkts, err := enc.Encode(splitAnnexB(f.Payload))
+	pkts, err := enc.Encode(splitAnnexB(payload))
 	s.encodeMu.Unlock()
 	if err != nil {
 		logger.Errorf("WebRTC H264 encode: %v", err)
