@@ -5,11 +5,13 @@ import (
 	"encoding/json"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 
 	"github.com/x-media/x-media-server/internal/config"
 	"github.com/x-media/x-media-server/pkg/errors"
+	"github.com/x-media/x-media-server/pkg/logger"
 )
 
 type LogService struct {
@@ -59,28 +61,55 @@ func (s *LogService) UpdateConfig(req *LogConfigResponse) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	// 先在副本上应用变更，校验/重建失败时不污染现配置
+	next := *s.cfg
+
 	if req.Level != "" {
 		validLevels := map[string]bool{"debug": true, "info": true, "warn": true, "error": true}
 		if !validLevels[req.Level] {
 			return errors.NewValidationError("无效的日志级别")
 		}
-		s.cfg.Level = req.Level
+		next.Level = req.Level
 	}
 	if req.Filename != "" {
-		s.cfg.Filename = req.Filename
+		// 热重建会按此路径打开文件：必须拒绝绝对路径与 .. 穿越，
+		// 否则本接口变成"任意路径写日志"。
+		if !isValidLogFilename(req.Filename) {
+			return errors.NewValidationError("日志文件名必须是不含 .. 的相对路径")
+		}
+		next.Filename = req.Filename
 	}
 	if req.MaxSize > 0 {
-		s.cfg.MaxSize = req.MaxSize
+		next.MaxSize = req.MaxSize
 	}
 	if req.MaxBackups > 0 {
-		s.cfg.MaxBackups = req.MaxBackups
+		next.MaxBackups = req.MaxBackups
 	}
 	if req.MaxAge > 0 {
-		s.cfg.MaxAge = req.MaxAge
+		next.MaxAge = req.MaxAge
 	}
-	s.cfg.Compress = req.Compress
+	next.Compress = req.Compress
 
+	// 热重建：使级别/文件/轮转修改立即生效（此前只改内存结构体，
+	// zap/lumberjack 早已构造完毕，修改完全无效）。
+	if err := logger.Rebuild(&next); err != nil {
+		return errors.NewInternalError(err)
+	}
+	*s.cfg = next
 	return nil
+}
+
+// isValidLogFilename 校验日志文件名：相对路径且不含 ".." 路径段。
+func isValidLogFilename(name string) bool {
+	if name == "" || filepath.IsAbs(name) {
+		return false
+	}
+	for _, part := range strings.Split(filepath.ToSlash(name), "/") {
+		if part == ".." {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *LogService) GetLogs(lines int) ([]string, error) {
