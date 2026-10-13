@@ -183,6 +183,27 @@ func buildStreamsFromDescription(desc *description.Session) ([]StreamInfo, error
 					CodecConfig: config,
 				})
 				channelID++
+			case *format.MPEG4Audio:
+				// MPEG4-GENERIC AAC（gortsplib v5 对标准 IPC/本项目 sink 的
+				// SDP 解析结果）。此前只认 format.Generic（死代码）导致
+				// 音频流既不通告也无法解包。
+				if tf.Config == nil {
+					continue
+				}
+				cfg, err := tf.Config.Marshal()
+				if err != nil {
+					logger.Warnf("RTSP input aac config marshal: %v", err)
+					continue
+				}
+				streams = append(streams, StreamInfo{
+					ChannelID:   channelID,
+					Kind:        "audio",
+					CodecID:     CodecAAC,
+					CodecName:   "AAC",
+					ClockRate:   int(tf.Config.SampleRate),
+					CodecConfig: cfg,
+				})
+				channelID++
 			}
 		}
 	}
@@ -284,6 +305,7 @@ func (r *RTSPInput) runSession(ctx context.Context, client *gortsplib.Client, de
 	var videoMedia *description.Media
 	var videoFmt *format.H264
 	var audioMedia *description.Media
+	var audioFmtMPEG4 *format.MPEG4Audio
 	var audioChannel uint8
 
 	for _, medi := range desc.Medias {
@@ -302,11 +324,19 @@ func (r *RTSPInput) runSession(ctx context.Context, client *gortsplib.Client, de
 				r.mu.Lock()
 				r.decoders[channelID] = dec
 				r.mu.Unlock()
+				// channelID 仅在匹配分支递增，与 buildStreamsFromDescription
+				// 保持一致（此前无条件递增，SDP 含不匹配格式时通道错位）。
+				channelID++
+			case *format.MPEG4Audio:
+				audioMedia = medi
+				audioFmtMPEG4 = tf
+				audioChannel = channelID
+				channelID++
 			case *format.Generic:
 				audioMedia = medi
 				audioChannel = channelID
+				channelID++
 			}
-			channelID++
 		}
 	}
 
@@ -325,8 +355,14 @@ func (r *RTSPInput) runSession(ctx context.Context, client *gortsplib.Client, de
 		client.OnPacketRTP(medi, format.Format(videoFmt), func(pkt *rtp.Packet) {
 			r.handleVideoPacket(medi, videoFmt, pkt, ch)
 		})
-		_ = audioMedia
-		_ = audioChannel
+	}
+	if audioMedia != nil && audioFmtMPEG4 != nil {
+		medi := audioMedia
+		af := audioFmtMPEG4
+		ch := audioChannel
+		client.OnPacketRTP(medi, format.Format(af), func(pkt *rtp.Packet) {
+			r.handleAudioPacket(medi, af, pkt, ch)
+		})
 	}
 
 	if _, err := client.Play(nil); err != nil {
@@ -413,6 +449,91 @@ func (r *RTSPInput) handleVideoPacket(medi *description.Media, f *format.H264, p
 	for _, h := range handlers {
 		h(frame)
 	}
+}
+
+// handleAudioPacket 解包 MPEG4-GENERIC RTP 为 AAC 帧并分发。
+//
+// 帧格式（RFC 3640）：AU-headers-length(12bit) + 若干
+// AU-header[Size(13bit)|Index(3bit)] + payload（逐 AU 拼接）。
+// 本项目 RTSPSink 与常见 IPC 均为一包一 AU；此处支持一包多 AU。
+func (r *RTSPInput) handleAudioPacket(medi *description.Media, f *format.MPEG4Audio, pkt *rtp.Packet, channelID uint8) {
+	r.mu.RLock()
+	handler := r.handler
+	handlers := r.handlers
+	r.mu.RUnlock()
+
+	sizeLength := f.SizeLength
+	if sizeLength <= 0 {
+		sizeLength = 13
+	}
+	indexLength := f.IndexLength
+	if indexLength <= 0 {
+		indexLength = 3
+	}
+	bitsPerAUHeader := sizeLength + indexLength
+	p := pkt.Payload
+	if bitsPerAUHeader <= 0 || len(p) < 2 {
+		return
+	}
+	auHeadersBits := int(p[0])<<4 | int(p[1])>>4
+	if auHeadersBits == 0 || auHeadersBits%bitsPerAUHeader != 0 {
+		return
+	}
+	auCount := auHeadersBits / bitsPerAUHeader
+	headerBytes := 2 + (auHeadersBits+15)/16*2 // 2 字节 AU-headers-length + 对齐的 AU-headers
+	if len(p) < headerBytes {
+		return
+	}
+
+	// 逐 AU 提取 payload（AU-header 从 bit 12 开始，前 12 bit 是长度域）
+	pts, _ := r.client.PacketPTS(medi, pkt)
+	offset := headerBytes
+	bitOffset := 12
+	for i := 0; i < auCount; i++ {
+		size := readBitsAt(p, bitOffset, sizeLength)
+		_ = readBitsAt(p, bitOffset+sizeLength, indexLength) // index 不使用
+		bitOffset += bitsPerAUHeader
+		if size <= 0 || offset+size > len(p) {
+			return
+		}
+		payload := make([]byte, size)
+		copy(payload, p[offset:offset+size])
+		offset += size
+
+		frame := &Frame{
+			Header: FrameHeader{
+				Magic:     FrameMagic,
+				Version:   FrameVersion,
+				ChannelID: channelID,
+				FrameType: FrameTypeAudio,
+				Codec:     CodecAAC,
+				PTS:       pts,
+				DTS:       pts,
+			},
+			Payload: payload,
+		}
+		if handler != nil {
+			handler(frame)
+		}
+		for _, h := range handlers {
+			h(frame)
+		}
+		// 同一包内多 AU 视为连续 AAC 帧（每帧 1024 采样）
+		pts += aacSamplesPerFrame
+	}
+}
+
+// readBitsAt 从 payload 的 bit 偏移处读取 n bit（MSB first）。
+func readBitsAt(p []byte, bitOffset, n int) int {
+	v := 0
+	for i := 0; i < n; i++ {
+		pos := bitOffset + i
+		if pos/8 >= len(p) {
+			return 0
+		}
+		v = v<<1 | int((p[pos/8]>>(7-pos%8))&1)
+	}
+	return v
 }
 
 func (r *RTSPInput) setError() {

@@ -249,10 +249,20 @@ func TestL3_MP4RelayToRTSP(t *testing.T) {
 
 	frames := recv.Frames()
 	assert.GreaterOrEqual(t, len(frames), 5, "should relay multiple frames")
+	videoCount, audioCount := 0, 0
 	for _, f := range frames {
-		assert.Equal(t, FrameTypeVideo, f.Header.FrameType)
-		assert.Equal(t, CodecH264, f.Header.Codec)
+		switch f.Header.FrameType {
+		case FrameTypeVideo:
+			videoCount++
+			assert.Equal(t, CodecH264, f.Header.Codec)
+		case FrameTypeAudio:
+			// 中继同时回传 AAC 音频（此前输入侧缺音频回调，断言只可能是视频）
+			audioCount++
+			assert.Equal(t, CodecAAC, f.Header.Codec)
+		}
 		assert.NotEmpty(t, f.Payload)
 	}
+	assert.GreaterOrEqual(t, videoCount, 1, "should relay video frames")
+	assert.GreaterOrEqual(t, audioCount, 1, "should relay audio frames")
 	t.Logf("MP4→RTSP→RTSP relayed %d frames", len(frames))
 }

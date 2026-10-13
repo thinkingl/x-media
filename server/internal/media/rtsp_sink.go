@@ -475,6 +475,22 @@ func packetSpreadInterval(numPackets int) time.Duration {
 	return 500 * time.Microsecond
 }
 
+// mpeg4GenericAUHeader 构造 RFC 3640 AAC-hbr 的 AU-header 区（4 字节）：
+//
+//	AU-headers-length(12bit，单位=bit，本例恒为 16) +
+//	AU-header[Size(13bit)|Index(3bit=0)] + 字节补齐
+//
+// 此前把长度域写成 16bit 值（00 10 ...），与 RFC 的位布局错开，
+// VLC/ffmpeg 等标准客户端无法解析我方 RTSP sink 输出的 AAC 音频。
+func mpeg4GenericAUHeader(auSize int) []byte {
+	return []byte{
+		0x01,                // AU-headers-length = 16 的高 8 位（低 4 位在下一字节高 nibble，为 0）
+		byte(auSize >> 9),   // Size[12:9]
+		byte(auSize >> 1),   // Size[8:1]
+		byte(auSize&1) << 7, // Size[0] | Index(3bit=0) | 补齐(4bit)
+	}
+}
+
 func (r *RTSPSink) writeAudio(f *Frame, stream *gortsplib.ServerStream) error {
 	r.mu.RLock()
 	aMedia := r.aMedia
@@ -495,13 +511,8 @@ func (r *RTSPSink) writeAudio(f *Frame, stream *gortsplib.ServerStream) error {
 	pts := uint32(ConvertClock(f.Header.PTS, clock, sampleRate))
 
 	auSize := len(f.Payload)
-	auHeader := uint16(auSize) << 3
-
 	payload := make([]byte, 4+auSize)
-	payload[0] = 0
-	payload[1] = 16 // AU-headers-length (bits)
-	payload[2] = byte(auHeader >> 8)
-	payload[3] = byte(auHeader)
+	copy(payload, mpeg4GenericAUHeader(auSize))
 	copy(payload[4:], f.Payload)
 
 	// 音频 RTP 包序列号必须随每帧递增；固定 0 会导致接收端判定乱序/丢包。
