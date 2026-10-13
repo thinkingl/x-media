@@ -19,8 +19,10 @@ func NewLogHandler(logSvc *service.LogService) *LogHandler {
 func (h *LogHandler) getLogs(c *gin.Context) {
 	linesStr := c.DefaultQuery("lines", "100")
 	lines, err := strconv.Atoi(linesStr)
-	if err != nil {
-		lines = 100
+	if err != nil || lines < 1 || lines > 1000 {
+		// 此前 lines=0/-1 返回整份日志（内存 DoS），非法值静默按 100 处理
+		errorResponse(c, http.StatusBadRequest, "lines 必须是 1-1000 的整数")
+		return
 	}
 
 	logs, err := h.logSvc.GetLogsJSON(lines)

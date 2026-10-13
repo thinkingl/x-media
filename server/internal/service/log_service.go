@@ -3,7 +3,9 @@ package service
 import (
 	"bufio"
 	"encoding/json"
+	"io"
 	"os"
+	"strings"
 	"sync"
 
 	"github.com/x-media/x-media-server/internal/config"
@@ -99,14 +101,45 @@ func (s *LogService) GetLogs(lines int) ([]string, error) {
 	}
 	defer file.Close()
 
-	var result []string
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		result = append(result, scanner.Text())
+	info, err := file.Stat()
+	if err != nil {
+		return nil, errors.NewInternalError(err)
 	}
 
+	// 只读尾部窗口：按每行预估 4KB + 64KB 余量估算，避免把整份大日志
+	//（曾达数十 MB）全量读进内存。
+	const avgLineBytes = 4096
+	window := int64(lines)*avgLineBytes + 64*1024
+	if lines <= 0 || window > info.Size() {
+		window = info.Size()
+	}
+	start := info.Size() - window
+	if start > 0 {
+		if _, err := file.Seek(start, io.SeekStart); err != nil {
+			return nil, errors.NewInternalError(err)
+		}
+	} else {
+		start = 0
+	}
+
+	scanner := bufio.NewScanner(file)
+	// 放大 token 上限：单行超过 64KB（如含大 payload/栈）不再让接口 500；
+	// 仍超限时返回已读部分而非整体失败。
+	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
+
+	var result []string
+	partial := start > 0 // 窗口起点可能落在某行中间，首行丢弃
+	for scanner.Scan() {
+		if partial {
+			partial = false
+			continue
+		}
+		result = append(result, scanner.Text())
+	}
 	if err := scanner.Err(); err != nil {
-		return nil, errors.NewInternalError(err)
+		if !strings.Contains(err.Error(), "token too long") {
+			return nil, errors.NewInternalError(err)
+		}
 	}
 
 	if lines > 0 && len(result) > lines {
