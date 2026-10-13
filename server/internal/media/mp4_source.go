@@ -133,6 +133,13 @@ func (m *MP4Source) Start(ctx context.Context) error {
 		m.status = StreamStatusError
 		return fmt.Errorf("parse mp4: %w", err)
 	}
+	// mp4ff 对仅含 ftyp 等无 moov 的文件返回 err==nil 且 Moov==nil，
+	// 后续解引用会 panic（且此时文件句柄尚未关闭 → fd 泄漏），必须先判空。
+	if mp4f == nil || mp4f.Moov == nil {
+		f.Close()
+		m.status = StreamStatusError
+		return fmt.Errorf("moov box not found: %s", m.path)
+	}
 	if mp4f.IsFragmented() {
 		f.Close()
 		m.status = StreamStatusError
@@ -168,6 +175,10 @@ func (m *MP4Source) Start(ctx context.Context) error {
 
 // buildMP4Tracks 从 mp4 文件提取轨道信息并初始化 sample 迭代状态。
 func buildMP4Tracks(mp4f *mp4.File) ([]StreamInfo, []*mp4Track, error) {
+	// 防御性判空：mp4ff 对无 moov 文件返回 err==nil 且 Moov==nil。
+	if mp4f == nil || mp4f.Moov == nil {
+		return nil, nil, fmt.Errorf("moov box not found")
+	}
 	var streams []StreamInfo
 	var tracks []*mp4Track
 
@@ -931,6 +942,13 @@ func (m *MP4Source) seek(channelID uint8, pts int64) {
 	m.mu.Lock()
 	for _, tr := range m.tracks {
 		if tr.info.ChannelID != channelID {
+			continue
+		}
+		// grid 模式下允许无 Stts 的 track 存活（见 buildMP4Tracks），
+		// 此处判空回退到样本 1，避免 nil 解引用。
+		if tr.trak == nil || tr.trak.Mdia == nil || tr.trak.Mdia.Minf == nil ||
+			tr.trak.Mdia.Minf.Stbl == nil || tr.trak.Mdia.Minf.Stbl.Stts == nil {
+			tr.sampleNr = 1
 			continue
 		}
 		nr, err := tr.trak.Mdia.Minf.Stbl.Stts.GetSampleNrAtTime(uint64(pts))

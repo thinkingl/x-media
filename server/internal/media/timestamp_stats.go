@@ -40,6 +40,11 @@ func AnalyzeMP4TimestampStats(filePath string) []TimestampDeltaStats {
 	}
 
 	var stats []TimestampDeltaStats
+	// mp4ff 对无 moov 文件返回 err==nil 且 Moov==nil，判空避免 panic
+	// （本函数处于上传/探测接口链路，输入外部可控）。
+	if mp4f == nil || mp4f.Moov == nil {
+		return nil
+	}
 	for _, trak := range mp4f.Moov.Traks {
 		if trak.Mdia == nil || trak.Mdia.Hdlr == nil || trak.Mdia.Minf == nil || trak.Mdia.Minf.Stbl == nil || trak.Mdia.Minf.Stbl.Stts == nil {
 			continue
