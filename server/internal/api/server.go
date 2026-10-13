@@ -1,6 +1,7 @@
 package api
 
 import (
+	"crypto/subtle"
 	"io"
 	"net/http"
 	"strings"
@@ -15,8 +16,10 @@ import (
 
 // ServerConfig 服务器配置
 type ServerConfig struct {
-	HTTPAddr   string
-	StaticPath string
+	HTTPAddr    string
+	StaticPath  string
+	APIKey      string
+	CORSOrigins []string
 }
 
 type httpHandler interface {
@@ -58,7 +61,7 @@ func NewServer(
 		logger.With(zap.Stack("stack")).Error("HTTP handler panic")
 		c.AbortWithStatus(http.StatusInternalServerError)
 	}))
-	engine.Use(corsMiddleware())
+	engine.Use(corsMiddleware(config.CORSOrigins))
 
 	s := &Server{
 		config:       config,
@@ -77,6 +80,23 @@ func NewServer(
 	s.registerRoutes()
 
 	return s
+}
+
+// authMiddleware 管理 API 鉴权：校验请求头 X-API-Key。
+// APIKey 为空表示未配置，拒绝所有请求（安全默认，避免匿名暴露管理面）。
+func authMiddleware(apiKey string) gin.HandlerFunc {
+	expected := []byte(apiKey)
+	return func(c *gin.Context) {
+		provided := []byte(c.GetHeader("X-API-Key"))
+		if len(expected) == 0 || subtle.ConstantTimeCompare(provided, expected) != 1 {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
+				"code":    http.StatusUnauthorized,
+				"message": "未授权：请在请求头携带有效的 X-API-Key",
+			})
+			return
+		}
+		c.Next()
+	}
 }
 
 func requestLogger() gin.HandlerFunc {
@@ -106,7 +126,8 @@ func (s *Server) Stop() error {
 
 // registerRoutes 注册路由
 func (s *Server) registerRoutes() {
-	api := s.engine.Group("/api/v1")
+	// 管理 API 需要 X-API-Key 鉴权
+	api := s.engine.Group("/api/v1", authMiddleware(s.config.APIKey))
 	{
 		// 输入端
 		inputs := api.Group("/inputs")
@@ -214,15 +235,30 @@ func (s *Server) registerRoutes() {
 	})
 }
 
-// corsMiddleware CORS中间件
-func corsMiddleware() gin.HandlerFunc {
+// corsMiddleware CORS 中间件：仅对白名单内的 Origin 下发跨域头。
+// origins 为空表示不启用跨域（前端与 API 同源部署无需 CORS）。
+func corsMiddleware(origins []string) gin.HandlerFunc {
+	allowed := make(map[string]bool, len(origins))
+	for _, o := range origins {
+		if o != "" {
+			allowed[o] = true
+		}
+	}
 	return func(c *gin.Context) {
-		c.Writer.Header().Set("Access-Control-Allow-Origin", "*")
-		c.Writer.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-		c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		origin := c.GetHeader("Origin")
+		if origin != "" && allowed[origin] {
+			c.Header("Access-Control-Allow-Origin", origin)
+			c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+			c.Header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-API-Key")
+			c.Header("Vary", "Origin")
+		}
 
 		if c.Request.Method == "OPTIONS" {
-			c.AbortWithStatus(204)
+			if origin != "" && allowed[origin] {
+				c.AbortWithStatus(http.StatusNoContent)
+				return
+			}
+			c.AbortWithStatus(http.StatusForbidden)
 			return
 		}
 

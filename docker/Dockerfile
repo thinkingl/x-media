@@ -16,6 +16,9 @@ WORKDIR /build
 COPY web/package.json web/package-lock.json ./
 RUN npm ci --registry https://registry.npmmirror.com
 COPY web/ .
+# VITE_API_KEY 注入前端产物（X-API-Key 请求头）；需与运行时 config.yaml 的 server.api_key 一致
+ARG VITE_API_KEY=change-me
+ENV VITE_API_KEY=${VITE_API_KEY}
 RUN npm run build
 
 FROM 172.16.240.100:5001/library/debian:bookworm-slim

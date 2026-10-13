@@ -72,9 +72,15 @@ func main() {
 	logHandler := api.NewLogHandler(logSvc)
 	fileHandler := api.NewFileHandler(fileSvc)
 	server := api.NewServer(&api.ServerConfig{
-		HTTPAddr:   cfg.Server.HTTPAddr,
-		StaticPath: *staticPath,
+		HTTPAddr:    cfg.Server.HTTPAddr,
+		StaticPath:  *staticPath,
+		APIKey:      cfg.Server.APIKey,
+		CORSOrigins: cfg.Server.CORSOrigins,
 	}, engine, inputSvc, outputSvc, pipeSvc, statsHandler, logHandler, fileHandler)
+
+	if cfg.Server.APIKey == "" {
+		logger.Warn("未配置 server.api_key：所有管理 API (/api/v1/*) 将拒绝请求，请在配置文件中设置 api_key")
+	}
 
 	// 启动服务器
 	go func() {

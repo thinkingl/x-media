@@ -2,6 +2,12 @@ server:
   http_addr: ":8080"
   rtmp_addr: ":1935"
   rtsp_addr: ":5544"
+  # 管理 API 鉴权密钥（请求头 X-API-Key）；为空则拒绝所有 /api/v1 请求。
+  # 部署时务必改成随机强随机串。
+  api_key: "change-me"
+  # 跨域白名单；为空则不下发 CORS 头（同源部署无需配置）
+  # cors_origins:
+  #   - "http://example.com"
 
 database:
   driver: "sqlite"

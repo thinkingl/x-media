@@ -19,6 +19,10 @@ type ServerConfig struct {
 	HTTPAddr string `yaml:"http_addr"`
 	RTMPAddr string `yaml:"rtmp_addr"`
 	RTSPAddr string `yaml:"rtsp_addr"`
+	// APIKey 管理 API 鉴权密钥（请求头 X-API-Key）；为空则拒绝所有管理 API
+	APIKey string `yaml:"api_key"`
+	// CORSOrigins 跨域白名单；为空则不下发 CORS 头
+	CORSOrigins []string `yaml:"cors_origins"`
 	// RTSP UDP transport 端口（可选；不配置则 RTSP 仅支持 TCP）
 	RTSPUDPRTPAddr    string `yaml:"rtsp_udp_rtp_addr"`
 	RTSPUDPRTCPAddr   string `yaml:"rtsp_udp_rtcp_addr"`

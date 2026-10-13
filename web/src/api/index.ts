@@ -5,6 +5,15 @@ const api = axios.create({
   timeout: 10000,
 })
 
+// 管理 API 鉴权：所有请求携带 X-API-Key（构建时经 VITE_API_KEY 注入）
+const apiKey = import.meta.env.VITE_API_KEY
+if (apiKey) {
+  api.interceptors.request.use((config) => {
+    config.headers['X-API-Key'] = apiKey
+    return config
+  })
+}
+
 export interface ApiResponse<T> {
   code: number
   message: string
