@@ -545,17 +545,23 @@ func (r *RTSPSink) Clients() []ClientInfo {
 
 	handler.mutex.RLock()
 	p, ok := handler.paths[path]
-	var readers map[*gortsplib.ServerSession]*rtspReader
+	var snapshots []*rtspReader
 	if ok {
-		readers = p.readers
+		// 在锁内拷贝指针快照：readers map 由 OnPlay/OnSessionClose 并发增删，
+		// 锁外迭代会触发 concurrent map iteration and write（运行时 fatal）。
+		// rtspReader 字段在 OnPlay 创建后不再变更，拷贝指针后可安全读取。
+		snapshots = make([]*rtspReader, 0, len(p.readers))
+		for _, rd := range p.readers {
+			snapshots = append(snapshots, rd)
+		}
 	}
 	handler.mutex.RUnlock()
 
-	if len(readers) == 0 {
+	if len(snapshots) == 0 {
 		return nil
 	}
-	out := make([]ClientInfo, 0, len(readers))
-	for _, rd := range readers {
+	out := make([]ClientInfo, 0, len(snapshots))
+	for _, rd := range snapshots {
 		out = append(out, ClientInfo{
 			Address:     rd.address,
 			UserAgent:   rd.userAgent,
