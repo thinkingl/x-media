@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/x-media/x-media-server/internal/config"
 	"go.uber.org/zap"
@@ -66,4 +67,27 @@ func TestSetLoggerHook(t *testing.T) {
 	Info("hook marker")
 	require.Equal(t, 1, logs.FilterMessage("hook marker").Len(),
 		"SetLogger 注入的 observer 应能观测到日志（测试钩子防回归）")
+}
+
+// TestCallerPointsToCallSite 复现 caller 定位失效：
+// sugar 包装层少一层 CallerSkip，所有日志 caller 恒为 pkg/logger/logger.go。
+func TestCallerPointsToCallSite(t *testing.T) {
+	core, logs := observer.New(zap.InfoLevel)
+	SetLogger(zap.New(core, zap.AddCaller()))
+	t.Cleanup(func() { _ = Init(&config.LogConfig{Level: "info", Filename: ""}) })
+
+	Infof("caller probe %d", 42)
+	require.Equal(t, 1, logs.Len())
+	entry := logs.All()[0]
+	require.NotNil(t, entry.Caller, "日志应带 caller")
+	assert.True(t, strings.HasSuffix(entry.Caller.File, "logger_test.go"),
+		"sugar 包装的 caller 应指向调用点（logger_test.go），实际: %s", entry.Caller.File)
+
+	// With() 返回的裸 logger 不经过包装函数，caller 必须仍是使用处（防过度补偿）
+	With().Info("via with")
+	require.Equal(t, 2, logs.Len())
+	entry2 := logs.All()[1]
+	require.NotNil(t, entry2.Caller)
+	assert.True(t, strings.HasSuffix(entry2.Caller.File, "logger_test.go"),
+		"With() 的 caller 应指向使用处，实际: %s", entry2.Caller.File)
 }

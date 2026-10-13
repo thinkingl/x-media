@@ -73,7 +73,10 @@ func Init(cfg *config.LogConfig) error {
 	core := zapcore.NewTee(cores...)
 
 	log = zap.New(core, zap.AddCaller(), zap.AddStacktrace(zapcore.ErrorLevel))
-	sugar = log.Sugar()
+	// CallerSkip(1) 抵消本包 Info/Warn/... 包装函数多出的一跳，
+	// 使 sugar 系列日志的 caller 指向真实业务调用点而非 pkg/logger/logger.go。
+	// 注意：With()/GetLogger() 返回裸 log（不经过包装函数），不要加 skip。
+	sugar = log.WithOptions(zap.AddCallerSkip(1)).Sugar()
 
 	return nil
 }
@@ -166,5 +169,5 @@ func GetLogger() *zap.Logger {
 // 用于断言日志限频行为；生产代码勿用）。
 func SetLogger(l *zap.Logger) {
 	log = l
-	sugar = l.Sugar()
+	sugar = l.WithOptions(zap.AddCallerSkip(1)).Sugar()
 }
