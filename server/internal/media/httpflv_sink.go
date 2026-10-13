@@ -112,13 +112,16 @@ func (h *HTTPFLVSink) WriteFrame(f *Frame) error {
 	h.mu.RLock()
 	ready := h.ready
 	status := h.status
+	// 在锁内取 writer 快照：configureLocked 会在写锁下整体替换 h.writer，
+	// 锁外读该指针字段构成数据竞争（管道重建窗口）。
+	w := h.writer
 	h.mu.RUnlock()
 
-	if status != StreamStatusRunning || !ready {
+	if status != StreamStatusRunning || !ready || w == nil {
 		return nil
 	}
 
-	tag := h.writer.EncodeTag(f)
+	tag := w.EncodeTag(f)
 	if len(tag) == 0 {
 		return nil
 	}
