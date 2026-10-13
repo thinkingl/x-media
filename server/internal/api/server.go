@@ -57,6 +57,7 @@ func NewServer(
 
 	// 添加中间件
 	engine.Use(requestLogger())
+	engine.Use(apiBodyLimit())
 	engine.Use(gin.CustomRecoveryWithWriter(io.Discard, func(c *gin.Context, recovered interface{}) {
 		logger.With(zap.Stack("stack")).Error("HTTP handler panic")
 		c.AbortWithStatus(http.StatusInternalServerError)
@@ -99,6 +100,19 @@ func authMiddleware(apiKey string) gin.HandlerFunc {
 	}
 }
 
+// apiBodyLimit 限制 API 请求体大小（上传接口有独立更大的限制，跳过）。
+// 流媒体长响应（/live/*、/uploads/*）不经过此中间件。
+func apiBodyLimit() gin.HandlerFunc {
+	const maxAPIBody = 1 << 20 // 1MB
+	return func(c *gin.Context) {
+		path := c.Request.URL.Path
+		if strings.HasPrefix(path, "/api/v1/") && !strings.HasPrefix(path, "/api/v1/files/upload") {
+			c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxAPIBody)
+		}
+		c.Next()
+	}
+}
+
 func requestLogger() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		start := time.Now()
@@ -107,11 +121,24 @@ func requestLogger() gin.HandlerFunc {
 	}
 }
 
-func (s *Server) Start() error {
-	s.httpServer = &http.Server{
-		Addr:    s.config.HTTPAddr,
-		Handler: s.engine,
+// newHTTPServer 构造带超时防护的 HTTP server。
+//
+// 注意：ReadTimeout/WriteTimeout 特意保持 0（无限）——/live/*（FLV/WHEP）
+// 与 /uploads 大文件都是长响应，WriteTimeout 会直接掐断流媒体连接。
+// 请求体攻击面由 apiBodyLimit 中间件与上传接口的 MaxBytesReader 覆盖。
+func newHTTPServer(addr string, handler http.Handler) *http.Server {
+	return &http.Server{
+		Addr:              addr,
+		Handler:           handler,
+		ReadHeaderTimeout: 5 * time.Second,   // slowloris：header 阶段必须有界
+		IdleTimeout:       120 * time.Second, // keep-alive 空闲连接回收
+		MaxHeaderBytes:    1 << 20,           // 1MB
 	}
+}
+
+// Start 启动服务器
+func (s *Server) Start() error {
+	s.httpServer = newHTTPServer(s.config.HTTPAddr, s.engine)
 
 	return s.httpServer.ListenAndServe()
 }
