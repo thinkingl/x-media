@@ -9,6 +9,8 @@ import (
 
 	"github.com/stretchr/testify/require"
 	"github.com/x-media/x-media-server/internal/config"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 func TestRotationRetention(t *testing.T) {
@@ -54,4 +56,14 @@ func TestRotationDefaults(t *testing.T) {
 	data, err := os.ReadFile(cfg.Filename)
 	require.NoError(t, err)
 	require.Contains(t, string(data), "retained log")
+}
+
+func TestSetLoggerHook(t *testing.T) {
+	core, logs := observer.New(zap.InfoLevel)
+	SetLogger(zap.New(core))
+	t.Cleanup(func() { _ = Init(&config.LogConfig{Level: "info", Filename: ""}) })
+
+	Info("hook marker")
+	require.Equal(t, 1, logs.FilterMessage("hook marker").Len(),
+		"SetLogger 注入的 observer 应能观测到日志（测试钩子防回归）")
 }

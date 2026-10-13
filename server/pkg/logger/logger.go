@@ -161,3 +161,10 @@ func GetLogger() *zap.Logger {
 	}
 	return zap.NewNop()
 }
+
+// SetLogger 替换全局 logger（仅供测试注入观测钩子，如 zaptest/observer，
+// 用于断言日志限频行为；生产代码勿用）。
+func SetLogger(l *zap.Logger) {
+	log = l
+	sugar = l.Sugar()
+}

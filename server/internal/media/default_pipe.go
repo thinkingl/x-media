@@ -4,6 +4,7 @@ import (
 	"context"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/x-media/x-media-server/pkg/logger"
 )
@@ -110,6 +111,8 @@ func (p *DefaultPipe) Start(ctx context.Context) error {
 // sinkWriter 消费缓冲并写入 sink。
 func (p *DefaultPipe) sinkWriter(ctx context.Context) {
 	var written int64
+	var failCount int64
+	var lastFailWarn time.Time
 	exitReason := "context cancelled"
 	defer func() {
 		logger.Infof("pipe sinkWriter exited [%s -> %s] reason=%q written=%d", p.source.ID(), p.sink.ID(), exitReason, written)
@@ -125,8 +128,18 @@ func (p *DefaultPipe) sinkWriter(ctx context.Context) {
 				return
 			}
 			if err := p.sink.WriteFrame(f); err != nil {
-				logger.Warnf("pipe write failed %s -> %s: %v", p.source.ID(), p.sink.ID(), err)
+				failCount++
+				// 限频：首次与每 10 秒最多一条 Warn。
+				// 此前按帧刷屏（30-60fps × N 管道 → 每秒数百条）。
+				if failCount == 1 || time.Since(lastFailWarn) >= 10*time.Second {
+					lastFailWarn = time.Now()
+					logger.Warnf("pipe write failed (%d consecutive) %s -> %s: %v", failCount, p.source.ID(), p.sink.ID(), err)
+				}
 				continue
+			}
+			if failCount > 0 {
+				logger.Infof("pipe write recovered %s -> %s after %d failures", p.source.ID(), p.sink.ID(), failCount)
+				failCount = 0
 			}
 			written++
 			if written%300 == 0 {

@@ -50,6 +50,8 @@ type MP4Source struct {
 	paceAnchor      time.Time
 	paceAnchorMedia int64
 	paceAnchored    bool
+	// idleLogged idle 状态迁移去重（仅进入/恢复时各打一条日志）
+	idleLogged bool
 }
 
 // mp4Track 单个媒体轨道的运行时状态。
@@ -504,13 +506,29 @@ func (m *MP4Source) readLoop(ctx context.Context) {
 		}
 
 		if !emitted && !baseDone {
-			m.mu.RLock()
-			var st []string
-			for _, tr := range tracks {
-				st = append(st, fmt.Sprintf("%s:play=%v nr=%d total=%d", tr.info.Kind, tr.play, tr.sampleNr, tr.trak.GetNrSamples()))
+			// 状态迁移才打日志：进入 idle 打一条 Warn（含完整 track 状态），
+			// idle 期间静默 —— 此前按节流周期刷屏（30~200 条/秒）。
+			m.mu.Lock()
+			newIdle := !m.idleLogged
+			m.idleLogged = true
+			m.mu.Unlock()
+			if newIdle {
+				m.mu.RLock()
+				var st []string
+				for _, tr := range tracks {
+					st = append(st, fmt.Sprintf("%s:play=%v nr=%d total=%d", tr.info.Kind, tr.play, tr.sampleNr, tr.trak.GetNrSamples()))
+				}
+				m.mu.RUnlock()
+				logger.Warnf("MP4 source idle [%s] baseDone=%v tracks=%v", m.id, baseDone, st)
 			}
-			m.mu.RUnlock()
-			logger.Warnf("MP4 source idle [%s] baseDone=%v tracks=%v", m.id, baseDone, st)
+		} else {
+			m.mu.Lock()
+			wasIdle := m.idleLogged
+			m.idleLogged = false
+			m.mu.Unlock()
+			if wasIdle {
+				logger.Infof("MP4 source resumed [%s]", m.id)
+			}
 		}
 
 		if baseDone {

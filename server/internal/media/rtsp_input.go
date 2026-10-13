@@ -400,7 +400,7 @@ func (r *RTSPInput) handleVideoPacket(medi *description.Media, f *format.H264, p
 		return
 	}
 	if r.pktCount%50 == 0 {
-		logger.Infof("RTSP input packet [%s] ch=%d count=%d seq=%d ts=%d", r.id, channelID, r.pktCount, pkt.SequenceNumber, pkt.Timestamp)
+		logger.Debugf("RTSP input packet [%s] ch=%d count=%d seq=%d ts=%d", r.id, channelID, r.pktCount, pkt.SequenceNumber, pkt.Timestamp)
 	}
 	r.pktCount++
 
