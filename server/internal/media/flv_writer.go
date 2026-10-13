@@ -3,6 +3,7 @@ package media
 import (
 	"bytes"
 	"encoding/binary"
+	"sync"
 
 	"github.com/Eyevinn/mp4ff/hevc"
 )
@@ -13,12 +14,12 @@ import (
 // H.264 在 FLV 中的 AVCC 封装用 composition time offset（CTS = PTS - DTS）。
 
 const (
-	flvCodecH264        = 7
-	flvCodecAAC         = 10
-	flvAVCPacketTypeSeq    = 0 // 视频 sequence header
-	flvAVCPacketTypeNALU   = 1
-	flvAACPacketTypeSeq    = 0 // 音频 sequence header
-	flvAACPacketTypeRaw    = 1
+	flvCodecH264         = 7
+	flvCodecAAC          = 10
+	flvAVCPacketTypeSeq  = 0 // 视频 sequence header
+	flvAVCPacketTypeNALU = 1
+	flvAACPacketTypeSeq  = 0 // 音频 sequence header
+	flvAACPacketTypeRaw  = 1
 
 	// onMetaData 中 videocodecid 的约定值（ffmpeg 使用）：
 	// H264=7，HEVC=120（ffmpeg 的 FLV_CODECID_HEVC 映射）。
@@ -27,12 +28,12 @@ const (
 	// Enhanced RTMP / ExVideoTagHeader（HEVC 等）：字节0 为
 	// FLV_IS_EX_HEADER | packetType | frametype，随后 4 字节 fourcc("hvc1")。
 	// 常量与 FFmpeg libavformat/flv.h 保持一致，保证 ffmpeg/VLC 可解。
-	flvIsExHeader         = 0x80
-	flvExPacketTypeSeq    = 0 // PacketTypeSequenceStart
-	flvExPacketTypeFrames = 1 // PacketTypeCodedFrames（带 CTS）
-	flvExPacketTypeFramesX = 3 // PacketTypeCodedFramesX（PTS==DTS，无 CTS）
-	flvExFrameKey         = 0x10 // FLV_FRAME_KEY = 1<<4
-	flvExFrameInter       = 0x20 // FLV_FRAME_INTER = 2<<4
+	flvIsExHeader          = 0x80
+	flvExPacketTypeSeq     = 0    // PacketTypeSequenceStart
+	flvExPacketTypeFrames  = 1    // PacketTypeCodedFrames（带 CTS）
+	flvExPacketTypeFramesX = 3    // PacketTypeCodedFramesX（PTS==DTS，无 CTS）
+	flvExFrameKey          = 0x10 // FLV_FRAME_KEY = 1<<4
+	flvExFrameInter        = 0x20 // FLV_FRAME_INTER = 2<<4
 )
 
 var flvHeader = []byte{
@@ -48,17 +49,19 @@ type FLVWriter struct {
 	hasVideo bool
 	hasAudio bool
 	clocks   map[uint8]int // ChannelID → ClockRate
+	// clocksMu 保护 clocks：Configure（写）与 sinkWriter 编码（读）可能并发。
+	clocksMu sync.RWMutex
 
 	// 单调流时钟：FLV tag 时间戳必须是单调递增的相对时钟。
 	// 源帧 DTS 是绝对媒体时间（含 loopDur 累计），loop 回绕时会跳回小值，
 	// 直接用它会导致播放器时间轴错乱/帧率失控。这里改为**累加帧间 delta**：
 	//   videoAcc += max(0, curDTS - prevDTS)
 	// 回绕时 delta<0 被钳制为 0（时间戳暂停不后退），后续正常递增，天然单调。
-	videoAcc    int64 // 视频累积时间戳（流内 timescale）
+	videoAcc     int64 // 视频累积时间戳（流内 timescale）
 	prevVideoDTS int64
 	hasPrevVideo bool
 	// audioAcc 音频累积时钟（单位：采样数，每帧 +1024 AAC 采样）。
-	audioAcc    int64
+	audioAcc     int64
 	hasPrevAudio bool
 
 	// HEVC 参数集缓存（从 CodecConfig 提取，Configure 时填充）。
@@ -80,10 +83,12 @@ func NewFLVWriter() *FLVWriter {
 
 // Reset 重置状态（如循环时重新开始）。
 func (w *FLVWriter) Reset() {
+	w.clocksMu.Lock()
+	w.clocks = make(map[uint8]int)
+	w.clocksMu.Unlock()
 	w.started = false
 	w.hasVideo = false
 	w.hasAudio = false
-	w.clocks = make(map[uint8]int)
 	w.videoAcc = 0
 	w.prevVideoDTS = 0
 	w.hasPrevVideo = false
@@ -133,6 +138,8 @@ func (w *FLVWriter) nextAudioTS(pts int64) int64 {
 
 // SetClockRate 注册子通道时钟率（由 Configure 调用）。
 func (w *FLVWriter) SetClockRate(channelID uint8, rate int) {
+	w.clocksMu.Lock()
+	defer w.clocksMu.Unlock()
 	w.clocks[channelID] = rate
 }
 
@@ -314,7 +321,7 @@ func (w *FLVWriter) videoSequenceHeader(config []byte) []byte {
 	// AVCDecoderConfigurationRecord
 	avcC := make([]byte, 0, 32)
 	avcC = append(avcC, 0x01, 0x64, 0x00, 0x1f, 0xff) // version, profile, compat, level, 0xfc|3
-	avcC = append(avcC, 0xe1)                           // lengthSizeMinusOne=3, numSPS=1
+	avcC = append(avcC, 0xe1)                         // lengthSizeMinusOne=3, numSPS=1
 	avcC = append(avcC, byte(len(sps)>>8), byte(len(sps)))
 	avcC = append(avcC, sps...)
 	avcC = append(avcC, 0x01) // numPPS
@@ -493,7 +500,10 @@ func (w *FLVWriter) audioTag(f *Frame) []byte {
 
 // clockOf 返回子通道时钟率，未注册时用默认值。
 func (w *FLVWriter) clockOf(channelID uint8, fallback int) int {
-	if rate, ok := w.clocks[channelID]; ok && rate > 0 {
+	w.clocksMu.RLock()
+	rate, ok := w.clocks[channelID]
+	w.clocksMu.RUnlock()
+	if ok && rate > 0 {
 		return rate
 	}
 	if fallback > 0 {
