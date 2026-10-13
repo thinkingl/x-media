@@ -39,6 +39,8 @@ type RTSPInput struct {
 	pktCount  uint64 // 收到的 RTP 包计数（诊断用）
 	cancel    context.CancelFunc
 	done      chan struct{}
+	// reconnectBackoff 断流后的重连退避间隔（测试可注入）。
+	reconnectBackoff time.Duration
 }
 
 func NewRTSPInput(config *InputConfig) (*RTSPInput, error) {
@@ -50,12 +52,13 @@ func NewRTSPInput(config *InputConfig) (*RTSPInput, error) {
 		id = utils.GenerateID()
 	}
 	return &RTSPInput{
-		id:        id,
-		url:       config.URL,
-		status:    StreamStatusStopped,
-		decoders:  make(map[uint8]*rtph264.Decoder),
-		transport: config.Transport,
-		udpBuf:    config.UDPReadBufferSize,
+		id:               id,
+		url:              config.URL,
+		status:           StreamStatusStopped,
+		decoders:         make(map[uint8]*rtph264.Decoder),
+		transport:        config.Transport,
+		udpBuf:           config.UDPReadBufferSize,
+		reconnectBackoff: 3 * time.Second,
 	}, nil
 }
 
@@ -82,12 +85,33 @@ func (r *RTSPInput) Start(ctx context.Context) error {
 		return fmt.Errorf("parse rtsp url: %w", err)
 	}
 
-	// 预检 TCP 连通性，避免 Describe 无超时挂起。
-	conn, err := net.DialTimeout("tcp", u.Host, 5*time.Second)
+	client, desc, streams, err := r.connectOnce(u)
 	if err != nil {
 		r.status = StreamStatusError
 		r.mu.Unlock()
-		return fmt.Errorf("rtsp connect %s: %w", u.Host, err)
+		return err
+	}
+
+	ctx, r.cancel = context.WithCancel(ctx)
+	r.done = make(chan struct{})
+	r.client = client
+	r.streams = streams
+	r.status = StreamStatusRunning
+	r.mu.Unlock()
+
+	go r.readLoop(ctx, client, desc, u)
+
+	logger.Infof("RTSP input started: %s, url: %s, streams: %d", r.id, r.url, len(streams))
+	return nil
+}
+
+// connectOnce 建立一次 RTSP 会话：TCP 预检 + client 启动 + Describe。
+// 供 Start 与断流后的重连共用。
+func (r *RTSPInput) connectOnce(u *base.URL) (*gortsplib.Client, *description.Session, []StreamInfo, error) {
+	// 预检 TCP 连通性，避免 Describe 无超时挂起。
+	conn, err := net.DialTimeout("tcp", u.Host, 5*time.Second)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("rtsp connect %s: %w", u.Host, err)
 	}
 	conn.Close()
 
@@ -106,36 +130,21 @@ func (r *RTSPInput) Start(ctx context.Context) error {
 		client.UDPReadBufferSize = r.udpBuf
 	}
 	if err := client.Start(); err != nil {
-		r.status = StreamStatusError
-		r.mu.Unlock()
-		return fmt.Errorf("rtsp client start: %w", err)
+		return nil, nil, nil, fmt.Errorf("rtsp client start: %w", err)
 	}
 
 	desc, _, err := client.Describe(u)
 	if err != nil {
-		r.status = StreamStatusError
-		r.mu.Unlock()
-		return fmt.Errorf("rtsp describe: %w", err)
+		client.Close()
+		return nil, nil, nil, fmt.Errorf("rtsp describe: %w", err)
 	}
 
 	streams, err := buildStreamsFromDescription(desc)
 	if err != nil {
-		r.status = StreamStatusError
-		r.mu.Unlock()
-		return fmt.Errorf("rtsp media unsupported: %w", err)
+		client.Close()
+		return nil, nil, nil, fmt.Errorf("rtsp media unsupported: %w", err)
 	}
-
-	ctx, r.cancel = context.WithCancel(ctx)
-	r.done = make(chan struct{})
-	r.client = client
-	r.streams = streams
-	r.status = StreamStatusRunning
-	r.mu.Unlock()
-
-	go r.readLoop(ctx, client, desc, streams, u)
-
-	logger.Infof("RTSP input started: %s, url: %s, streams: %d", r.id, r.url, len(streams))
-	return nil
+	return client, desc, streams, nil
 }
 
 // buildStreamsFromDescription 从 SDP 提取 StreamInfo。
@@ -210,9 +219,65 @@ func aacConfigFromFMTP(fmtp map[string]string) []byte {
 	return b[:]
 }
 
-// readLoop 拉流并解包。
-func (r *RTSPInput) readLoop(ctx context.Context, client *gortsplib.Client, desc *description.Session, streams []StreamInfo, u *base.URL) {
+// readLoop 拉流主循环：会话运行 → 断开检测 → 退避重连。
+//
+// 远端断开时 gortsplib 的 client.Wait() 返回断开原因；此前只等 ctx.Done，
+// 断流后 status 永远 running、无帧、不重试。现在检测到断开后置 error，
+// 按 reconnectBackoff 退避重连（连接失败同样退避重试）。
+func (r *RTSPInput) readLoop(ctx context.Context, client *gortsplib.Client, desc *description.Session, u *base.URL) {
 	defer close(r.done)
+
+	failures := 0
+	for {
+		stopped := r.runSession(ctx, client, desc)
+		if stopped {
+			return // Stop（ctx 取消）
+		}
+		failures++
+		r.setError()
+		if failures == 1 || failures%10 == 0 {
+			logger.Warnf("RTSP input session ended (%d consecutive) [%s], retrying in %s", failures, r.id, r.reconnectBackoff)
+		}
+		if !sleepWithContext(ctx, r.reconnectBackoff) {
+			return
+		}
+		for {
+			c2, desc2, _, err := r.connectOnce(u)
+			if err == nil {
+				client, desc = c2, desc2
+				// 更新 client 字段：handleVideoPacket 用其换算 PTS
+				r.mu.Lock()
+				r.client = c2
+				r.mu.Unlock()
+				break
+			}
+			failures++
+			if failures == 1 || failures%10 == 0 {
+				logger.Warnf("RTSP input reconnect failed (%d consecutive) [%s]: %v", failures, r.id, err)
+			}
+			if !sleepWithContext(ctx, r.reconnectBackoff) {
+				return
+			}
+		}
+	}
+}
+
+// sleepWithContext 退避等待；ctx 取消返回 false。
+func sleepWithContext(ctx context.Context, d time.Duration) bool {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-t.C:
+		return true
+	}
+}
+
+// runSession 运行一次 RTSP 会话（decoder 初始化 → SetupAll → 回调注册 →
+// Play → 等待会话结束）。返回 true 表示 ctx 取消（正常停止），
+// false 表示会话断开或建立失败（触发外层重连循环）。
+func (r *RTSPInput) runSession(ctx context.Context, client *gortsplib.Client, desc *description.Session) bool {
 
 	channelID := uint8(0)
 	videoChannel := uint8(0)
@@ -232,7 +297,7 @@ func (r *RTSPInput) readLoop(ctx context.Context, client *gortsplib.Client, desc
 				if err != nil {
 					logger.Errorf("RTSP input h264 decoder: %v", err)
 					r.setError()
-					return
+					return false
 				}
 				r.mu.Lock()
 				r.decoders[channelID] = dec
@@ -249,7 +314,7 @@ func (r *RTSPInput) readLoop(ctx context.Context, client *gortsplib.Client, desc
 	if err := client.SetupAll(desc.BaseURL, desc.Medias); err != nil {
 		logger.Errorf("RTSP input setup: %v", err)
 		r.setError()
-		return
+		return false
 	}
 	logger.Infof("RTSP input setup OK [%s] medias=%d", r.id, len(desc.Medias))
 
@@ -267,13 +332,26 @@ func (r *RTSPInput) readLoop(ctx context.Context, client *gortsplib.Client, desc
 	if _, err := client.Play(nil); err != nil {
 		logger.Errorf("RTSP input play: %v", err)
 		r.setError()
-		return
+		return false
 	}
 	logger.Infof("RTSP input play OK [%s]", r.id)
 
-	// 阻塞直到 context 取消
-	<-ctx.Done()
-	client.Close()
+	// Play 成功：状态置回 running（重连场景），随后等待会话结束
+	r.mu.Lock()
+	r.status = StreamStatusRunning
+	r.mu.Unlock()
+
+	// 等待 context 取消（Stop）或连接断开（远端关闭/超时/keepalive 失败）
+	waitDone := make(chan error, 1)
+	go func() { waitDone <- client.Wait() }()
+	select {
+	case <-ctx.Done():
+		client.Close()
+		return true
+	case err := <-waitDone:
+		logger.Warnf("RTSP input disconnected [%s]: %v", r.id, err)
+		return false
+	}
 }
 
 func (r *RTSPInput) handleVideoPacket(medi *description.Media, f *format.H264, pkt *rtp.Packet, channelID uint8) {
