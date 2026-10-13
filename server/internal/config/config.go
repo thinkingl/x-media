@@ -11,6 +11,7 @@ type Config struct {
 	Server   ServerConfig   `yaml:"server"`
 	Database DatabaseConfig `yaml:"database"`
 	Log      LogConfig      `yaml:"log"`
+	Media    MediaConfig    `yaml:"media"`
 }
 
 // ServerConfig 服务器配置
@@ -19,11 +20,11 @@ type ServerConfig struct {
 	RTMPAddr string `yaml:"rtmp_addr"`
 	RTSPAddr string `yaml:"rtsp_addr"`
 	// RTSP UDP transport 端口（可选；不配置则 RTSP 仅支持 TCP）
-	RTSPUDPRTPAddr   string `yaml:"rtsp_udp_rtp_addr"`
-	RTSPUDPRTCPAddr  string `yaml:"rtsp_udp_rtcp_addr"`
-	RTSPMulticastIP  string `yaml:"rtsp_multicast_ip"`
-	RTSPMulticastRTP int    `yaml:"rtsp_multicast_rtp_port"`
-	RTSPMulticastRTCP int   `yaml:"rtsp_multicast_rtcp_port"`
+	RTSPUDPRTPAddr    string `yaml:"rtsp_udp_rtp_addr"`
+	RTSPUDPRTCPAddr   string `yaml:"rtsp_udp_rtcp_addr"`
+	RTSPMulticastIP   string `yaml:"rtsp_multicast_ip"`
+	RTSPMulticastRTP  int    `yaml:"rtsp_multicast_rtp_port"`
+	RTSPMulticastRTCP int    `yaml:"rtsp_multicast_rtcp_port"`
 }
 
 // DatabaseConfig 数据库配置
@@ -40,6 +41,12 @@ type LogConfig struct {
 	MaxBackups int    `yaml:"max_backups"`
 	MaxAge     int    `yaml:"max_age"`
 	Compress   bool   `yaml:"compress"`
+}
+
+// MediaConfig 媒体相关配置
+type MediaConfig struct {
+	// Roots 是文件浏览接口允许访问的媒体根目录白名单
+	Roots []string `yaml:"roots"`
 }
 
 // Load 加载配置文件
@@ -66,6 +73,9 @@ func Load(filename string) (*Config, error) {
 			MaxBackups: 5,
 			MaxAge:     30,
 			Compress:   true,
+		},
+		Media: MediaConfig{
+			Roots: []string{"./uploads", "./test_data"},
 		},
 	}
 

@@ -13,10 +13,56 @@ import (
 
 type FileService struct {
 	uploadDir string
+	// roots 是允许浏览的媒体根目录（已归一化为绝对路径）。
+	// 任何目录浏览请求都必须落在其中某个根之内，防止任意目录遍历。
+	roots []string
 }
 
-func NewFileService(uploadDir string) *FileService {
-	return &FileService{uploadDir: uploadDir}
+// NewFileService 创建文件服务。
+// roots 为允许浏览的媒体根目录；为空时回退为仅 uploadDir。
+func NewFileService(uploadDir string, roots []string) *FileService {
+	normalized := make([]string, 0, len(roots)+1)
+	seen := make(map[string]bool, len(roots)+1)
+	add := func(p string) {
+		if p == "" {
+			return
+		}
+		abs, err := filepath.Abs(filepath.Clean(p))
+		if err != nil || seen[abs] {
+			return
+		}
+		seen[abs] = true
+		normalized = append(normalized, abs)
+	}
+	for _, r := range roots {
+		add(r)
+	}
+	add(uploadDir) // 上传目录始终可浏览
+	if len(normalized) == 0 {
+		normalized = []string{filepath.Clean(uploadDir)}
+	}
+	return &FileService{uploadDir: uploadDir, roots: normalized}
+}
+
+// resolvePath 将请求路径解析为媒体根目录内的绝对路径。
+// 空路径或 "/" 映射到第一个媒体根；越界路径返回 400 校验错误。
+func (s *FileService) resolvePath(dirPath string) (string, error) {
+	if dirPath == "" || dirPath == "/" {
+		return s.roots[0], nil
+	}
+
+	abs, err := filepath.Abs(filepath.Clean(dirPath))
+	if err != nil {
+		return "", errors.NewValidationError("无效的路径: " + dirPath)
+	}
+
+	sep := string(filepath.Separator)
+	for _, root := range s.roots {
+		if abs == root || strings.HasPrefix(abs, root+sep) {
+			return abs, nil
+		}
+	}
+	return "", errors.NewValidationError("路径超出允许的媒体根目录: " + dirPath)
 }
 
 type FileEntry struct {
@@ -27,8 +73,9 @@ type FileEntry struct {
 }
 
 func (s *FileService) ListDir(dirPath string) ([]FileEntry, error) {
-	if dirPath == "" {
-		dirPath = "/"
+	dirPath, err := s.resolvePath(dirPath)
+	if err != nil {
+		return nil, err
 	}
 
 	info, err := os.Stat(dirPath)

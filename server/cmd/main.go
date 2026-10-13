@@ -66,7 +66,7 @@ func main() {
 	pipeSvc := service.NewPipeService(pipeRepo, inputRepo, outputRepo, engine)
 	statsSvc := service.NewStatsService(inputRepo, outputRepo, pipeRepo)
 	logSvc := service.NewLogService(&cfg.Log)
-	fileSvc := service.NewFileService("./uploads")
+	fileSvc := service.NewFileService("./uploads", cfg.Media.Roots)
 
 	statsHandler := api.NewStatsHandler(statsSvc)
 	logHandler := api.NewLogHandler(logSvc)
