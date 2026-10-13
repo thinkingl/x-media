@@ -42,6 +42,11 @@ const (
 	cmdReleaseStream = "releaseStream"
 	cmdFCPublish   = "FCPublish"
 	cmdOnMetaData  = "@setDataFrame"
+
+	// RTMP 传输超时：服务端收下 TCP 后不回包/写缓冲打满时，必须有界返回，
+	// 否则 Connect 持锁挂死会阻塞 Stop 与整个关停流程。
+	rtmpConnectTimeout = 5 * time.Second
+	rtmpWriteTimeout   = 5 * time.Second
 )
 
 // rtmpClient 原生 RTMP 推流客户端。
@@ -103,6 +108,8 @@ func (c *rtmpClient) Connect(addr string) error {
 	}
 	c.conn = conn
 	c.reader = bufio.NewReaderSize(conn, 64*1024)
+	// 握手/协商阶段统一 deadline：服务端不回包时有界失败，不永久阻塞。
+	_ = conn.SetDeadline(time.Now().Add(rtmpConnectTimeout))
 
 	if err := c.handshake(); err != nil {
 		conn.Close()
@@ -141,6 +148,9 @@ func (c *rtmpClient) Connect(addr string) error {
 		conn.Close()
 		return err
 	}
+
+	// 连接建立成功：清除握手 deadline，长连接读写不再受其约束。
+	_ = conn.SetDeadline(time.Time{})
 
 	c.connected = true
 	logger.Infof("RTMP connected: %s, app=%s stream=%s", addr, c.app, c.streamKey)
@@ -355,6 +365,7 @@ func (c *rtmpClient) SendData(msgType byte, ts uint32, payload []byte) error {
 	if !c.connected || c.closed {
 		return fmt.Errorf("rtmp not connected")
 	}
+	_ = c.conn.SetWriteDeadline(time.Now().Add(rtmpWriteTimeout))
 	return c.writeChunkedMessage(6, msgType, ts, payload)
 }
 

@@ -5,6 +5,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/x-media/x-media-server/pkg/logger"
 )
@@ -29,6 +30,11 @@ type RTMPSink struct {
 	streams []StreamInfo
 	metaSent bool
 	seqSent  bool
+
+	// 重连状态：连接/发送失败后按退避重试，不再置永久 Error。
+	failCount        int
+	nextRetryAt      time.Time
+	reconnectBackoff time.Duration
 }
 
 // NewRTMPSink 创建 RTMP sink。config.URL 为 rtmp://host[:port]/app/stream。
@@ -52,6 +58,8 @@ func NewRTMPSink(config *OutputConfig) (*RTMPSink, error) {
 		status: StreamStatusStopped,
 		client: c,
 		writer: NewFLVWriter(),
+
+		reconnectBackoff: 3 * time.Second,
 	}, nil
 }
 
@@ -88,7 +96,11 @@ func (r *RTMPSink) Configure(streams []StreamInfo) error {
 	return nil
 }
 
-// WriteFrame 首次调用时连接 RTMP server 并发 metadata + sequence header。
+// WriteFrame 懒连接（带退避重连）并发送帧。
+//
+// 连接/发送失败时：关闭旧 client、重建、按 reconnectBackoff 退避，
+// 退避期内的帧直接丢弃（媒体场景丢帧优于阻塞与刷屏）。
+// status 只由 Start/Stop 管理，不再因连接失败进入永久 Error。
 func (r *RTMPSink) WriteFrame(f *Frame) error {
 	r.mu.RLock()
 	status := r.status
@@ -99,19 +111,28 @@ func (r *RTMPSink) WriteFrame(f *Frame) error {
 		return nil
 	}
 
-	// 懒连接
+	// 懒连接 / 退避后重连
 	r.mu.Lock()
 	if !r.started {
-		if err := r.client.Connect(r.addr); err != nil {
+		if time.Now().Before(r.nextRetryAt) {
 			r.mu.Unlock()
-			r.status = StreamStatusError
-			return err
+			return nil // 退避期内丢帧
+		}
+		if err := r.client.Connect(r.addr); err != nil {
+			r.markFailLocked(err)
+			r.mu.Unlock()
+			return nil // 丢当前帧；后续帧驱动重连（限频日志见 markFailLocked）
 		}
 		r.started = true
+		if r.failCount > 0 {
+			logger.Infof("RTMP sink recovered: %s", r.id)
+		}
+		r.failCount = 0
+		r.nextRetryAt = time.Time{}
 	}
 	r.mu.Unlock()
 
-	// 发送 metadata + sequence headers（首次）
+	// 发送 metadata + sequence headers（首次或重连后）
 	if !r.metaSent {
 		r.sendMetadata()
 		r.sendSequenceHeaders()
@@ -121,7 +142,37 @@ func (r *RTMPSink) WriteFrame(f *Frame) error {
 	if len(data) == 0 {
 		return nil
 	}
-	return r.client.SendData(tagType, ts, data)
+	if err := r.client.SendData(tagType, ts, data); err != nil {
+		// 发送失败视为连接断开：重置连接态，下一帧在退避后重连
+		r.markFail(err)
+	}
+	return nil
+}
+
+// markFail 连接/发送失败处理（可并发调用，内部加锁）。
+func (r *RTMPSink) markFail(err error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.markFailLocked(err)
+}
+
+// markFailLocked 连接/发送失败处理（调用方需持 r.mu）。
+//
+// 关闭旧 client 并重建（rtmpClient.Close 是一次性的），重置协商标志，
+// 设置退避窗口；日志限频：首次与每连续 10 次各打一条 Warn，避免按帧刷屏。
+func (r *RTMPSink) markFailLocked(err error) {
+	_ = r.client.Close()
+	if c, cerr := newRTMPClient(r.url); cerr == nil {
+		r.client = c
+	}
+	r.started = false
+	r.metaSent = false
+	r.seqSent = false
+	r.failCount++
+	r.nextRetryAt = time.Now().Add(r.reconnectBackoff)
+	if r.failCount == 1 || r.failCount%10 == 0 {
+		logger.Warnf("RTMP sink connection failed (%d consecutive): %s: %v", r.failCount, r.id, err)
+	}
 }
 
 // sendMetadata 发送 onMetaData。
@@ -214,8 +265,19 @@ func (r *RTMPSink) Stop() error {
 	}
 	r.ready = false
 	r.status = StreamStatusStopped
+	// 重置连接态：否则 Stop→Start 后 started 仍为 true，
+	// 跳过懒连接直接向已关闭的 client 发送 → 永远 "rtmp not connected"。
+	r.started = false
+	r.metaSent = false
+	r.seqSent = false
+	r.failCount = 0
+	r.nextRetryAt = time.Time{}
 	if r.client != nil {
 		_ = r.client.Close()
+		// 重建 client：rtmpClient.Close 是一次性的（closed 永久置位）。
+		if c, err := newRTMPClient(r.url); err == nil {
+			r.client = c
+		}
 	}
 	logger.Infof("RTMP sink stopped: %s", r.id)
 	return nil

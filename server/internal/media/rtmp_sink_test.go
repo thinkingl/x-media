@@ -133,7 +133,18 @@ func TestRTMPSink_ConnectionFailure(t *testing.T) {
 	defer sink.Stop()
 
 	err = sink.WriteFrame(testFrame(0, FrameTypeVideo, CodecH264, 0, []byte{0, 0, 0, 1, 0x65}))
-	assert.Error(t, err, "should fail to connect")
+	assert.NoError(t, err, "连接失败时应丢帧而非返回错误（避免 pipe 按帧刷 Warn）")
+	assert.Equal(t, StreamStatusRunning, sink.Status(), "连接失败不得置永久 Error（应按退避重试）")
+	sink.mu.RLock()
+	failCount := sink.failCount
+	inBackoff := time.Now().Before(sink.nextRetryAt)
+	sink.mu.RUnlock()
+	assert.Equal(t, 1, failCount, "应记录连续失败次数")
+	assert.True(t, inBackoff, "应进入重连退避窗口")
+	// 退避期内的帧应快速丢弃（不阻塞、不再次连接）
+	start := time.Now()
+	assert.NoError(t, sink.WriteFrame(testFrame(0, FrameTypeVideo, CodecH264, 3000, []byte{0, 0, 0, 1, 0x65})))
+	assert.Less(t, time.Since(start), time.Second, "退避期内 WriteFrame 不应尝试连接")
 }
 
 func TestRTMPSink_BadURL(t *testing.T) {
