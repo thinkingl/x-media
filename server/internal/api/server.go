@@ -1,12 +1,16 @@
 package api
 
 import (
+	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/x-media/x-media-server/internal/media"
 	"github.com/x-media/x-media-server/internal/service"
+	"github.com/x-media/x-media-server/pkg/logger"
+	"go.uber.org/zap"
 )
 
 // ServerConfig 服务器配置
@@ -49,8 +53,11 @@ func NewServer(
 	engine := gin.New()
 
 	// 添加中间件
-	engine.Use(gin.Logger())
-	engine.Use(gin.Recovery())
+	engine.Use(requestLogger())
+	engine.Use(gin.CustomRecoveryWithWriter(io.Discard, func(c *gin.Context, recovered interface{}) {
+		logger.With(zap.Stack("stack")).Error("HTTP handler panic")
+		c.AbortWithStatus(http.StatusInternalServerError)
+	}))
 	engine.Use(corsMiddleware())
 
 	s := &Server{
@@ -72,7 +79,14 @@ func NewServer(
 	return s
 }
 
-// Start 启动服务器
+func requestLogger() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		start := time.Now()
+		c.Next()
+		logger.Infof("HTTP %s %s status=%d duration=%s", c.Request.Method, c.FullPath(), c.Writer.Status(), time.Since(start))
+	}
+}
+
 func (s *Server) Start() error {
 	s.httpServer = &http.Server{
 		Addr:    s.config.HTTPAddr,

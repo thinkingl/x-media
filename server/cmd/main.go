@@ -15,6 +15,7 @@ import (
 	"github.com/x-media/x-media-server/internal/repository"
 	"github.com/x-media/x-media-server/internal/service"
 	"github.com/x-media/x-media-server/pkg/logger"
+	"go.uber.org/zap"
 )
 
 func main() {
@@ -34,6 +35,7 @@ func main() {
 		log.Fatalf("初始化日志失败: %v", err)
 	}
 	defer logger.Sync()
+	defer zap.RedirectStdLog(logger.GetLogger())()
 
 	logger.Info("启动 X-Media Server...")
 

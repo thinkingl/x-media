@@ -15,6 +15,15 @@ var sugar *zap.SugaredLogger
 
 // Init 初始化日志
 func Init(cfg *config.LogConfig) error {
+	if cfg.MaxSize <= 0 {
+		cfg.MaxSize = 100
+	}
+	if cfg.MaxBackups <= 0 {
+		cfg.MaxBackups = 5
+	}
+	if cfg.MaxAge <= 0 {
+		cfg.MaxAge = 30
+	}
 	level := zapcore.InfoLevel
 	switch cfg.Level {
 	case "debug":
