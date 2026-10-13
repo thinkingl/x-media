@@ -200,6 +200,14 @@ func (s *Server) registerRoutes() {
 		})
 	}
 
+	// 上传目录静态服务：nosniff 阻止浏览器对媒体文件做 MIME 嗅探执行
+	// （与上传扩展名白名单互为双保险，防同源存储型 XSS）。
+	s.engine.Use(func(c *gin.Context) {
+		if strings.HasPrefix(c.Request.URL.Path, "/uploads/") {
+			c.Header("X-Content-Type-Options", "nosniff")
+		}
+		c.Next()
+	})
 	s.engine.Static("/uploads", "./uploads")
 
 	s.engine.GET("/live/:filename", func(c *gin.Context) {

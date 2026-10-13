@@ -3,6 +3,7 @@ package service
 import (
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,6 +17,17 @@ type FileService struct {
 	// roots 是允许浏览的媒体根目录（已归一化为绝对路径）。
 	// 任何目录浏览请求都必须落在其中某个根之内，防止任意目录遍历。
 	roots []string
+	// MaxUploadBytes 单次上传的最大字节数（超出即拒绝并清理半成品文件）。
+	MaxUploadBytes int64
+}
+
+// defaultMaxUploadBytes 默认单次上传上限（2GiB）。
+const defaultMaxUploadBytes = 2 << 30
+
+// allowedMediaExts 允许的媒体文件扩展名（上传白名单与文件校验共用）。
+var allowedMediaExts = map[string]bool{
+	".mp4": true, ".flv": true, ".ts": true,
+	".avi": true, ".mkv": true, ".mov": true,
 }
 
 // NewFileService 创建文件服务。
@@ -41,7 +53,7 @@ func NewFileService(uploadDir string, roots []string) *FileService {
 	if len(normalized) == 0 {
 		normalized = []string{filepath.Clean(uploadDir)}
 	}
-	return &FileService{uploadDir: uploadDir, roots: normalized}
+	return &FileService{uploadDir: uploadDir, roots: normalized, MaxUploadBytes: defaultMaxUploadBytes}
 }
 
 // resolvePath 将请求路径解析为媒体根目录内的绝对路径。
@@ -120,12 +132,18 @@ func (s *FileService) ListDir(dirPath string) ([]FileEntry, error) {
 }
 
 func (s *FileService) Upload(fileName string, reader io.Reader) (string, error) {
+	// 扩展名白名单：任意文件（.html/.svg/.js 等）落盘后经 /uploads 静态服务
+	// 返回即同源存储型 XSS；无扩展名同样拒绝。
+	ext := strings.ToLower(filepath.Ext(fileName))
+	if !allowedMediaExts[ext] {
+		return "", errors.NewValidationError("不支持的文件类型: " + ext)
+	}
+
 	if err := os.MkdirAll(s.uploadDir, 0755); err != nil {
 		return "", errors.NewInternalError(err)
 	}
 
 	id := utils.GenerateID()
-	ext := filepath.Ext(fileName)
 	saveName := id + ext
 	savePath := filepath.Join(s.uploadDir, saveName)
 
@@ -135,10 +153,21 @@ func (s *FileService) Upload(fileName string, reader io.Reader) (string, error) 
 	}
 	defer f.Close()
 
-	n, err := io.Copy(f, reader)
+	// LimitReader 读 max+1 字节：读到 max+1 即可判定超限，
+	// 超限时删除半成品文件，防止磁盘耗尽。
+	limit := s.MaxUploadBytes
+	if limit <= 0 {
+		limit = defaultMaxUploadBytes
+	}
+	n, err := io.Copy(f, io.LimitReader(reader, limit+1))
 	if err != nil {
 		os.Remove(savePath)
 		return "", errors.NewInternalError(err)
+	}
+	if n > limit {
+		os.Remove(savePath)
+		return "", errors.NewAppError(http.StatusRequestEntityTooLarge,
+			fmt.Sprintf("上传内容超过大小限制（%d 字节）", limit), nil)
 	}
 
 	_ = n // bytes written
@@ -163,11 +192,7 @@ func (s *FileService) ValidateFilePath(path string) error {
 	}
 
 	ext := strings.ToLower(filepath.Ext(path))
-	allowed := map[string]bool{
-		".mp4": true, ".flv": true, ".ts": true,
-		".avi": true, ".mkv": true, ".mov": true,
-	}
-	if !allowed[ext] {
+	if !allowedMediaExts[ext] {
 		return errors.NewValidationError(fmt.Sprintf("不支持的文件格式: %s", ext))
 	}
 
