@@ -589,12 +589,26 @@ func (r *RTSPSink) Stop() error {
 	if r.status == StreamStatusStopped {
 		return nil
 	}
-	if r.stream != nil {
-		r.stream.Close()
+	stream := r.stream
+	if stream != nil {
+		stream.Close()
 		r.stream = nil
 	}
 	r.ready = false
 	r.status = StreamStatusStopped
+
+	// 删除本 sink 注册的 path：残留会让 DESCRIBE/SETUP 返回 200+空 stream，
+	// 且 onPlay 闭包反向钉住 sink 造成泄漏。仅当 path 仍指向本 sink 的
+	// stream 时删除（同地址重建的新 sink 不受影响）。锁序与
+	// configureLocked 一致：先 r.mu 再 handler.mutex。
+	if r.handler != nil {
+		path := "live/" + r.id
+		r.handler.mutex.Lock()
+		if p, ok := r.handler.paths[path]; ok && p != nil && p.stream == stream {
+			delete(r.handler.paths, path)
+		}
+		r.handler.mutex.Unlock()
+	}
 	logger.Infof("RTSP sink stopped: %s", r.id)
 	return nil
 }

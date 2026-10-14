@@ -107,6 +107,11 @@ func (h *RTSPServerHandler) OnDescribe(ctx *gortsplib.ServerHandlerOnDescribeCtx
 		logger.Infof("RTSP DESCRIBE -> 404: %s", path)
 		return &base.Response{StatusCode: base.StatusNotFound}, nil, nil
 	}
+	if p.stream == nil {
+		// 防御竞态：sink 已 Stop 但 path 尚未删除的窗口
+		logger.Infof("RTSP DESCRIBE -> 404 (stream closed): %s", path)
+		return &base.Response{StatusCode: base.StatusNotFound}, nil, nil
+	}
 
 	logger.Infof("RTSP DESCRIBE -> 200: %s", path)
 	return &base.Response{StatusCode: base.StatusOK}, p.stream, nil
@@ -160,6 +165,11 @@ func (h *RTSPServerHandler) OnSetup(ctx *gortsplib.ServerHandlerOnSetupCtx) (
 	h.mutex.RUnlock()
 	if !ok {
 		logger.Infof("RTSP SETUP -> 404: %s", path)
+		return &base.Response{StatusCode: base.StatusNotFound}, nil, nil
+	}
+	if p.stream == nil {
+		// 防御竞态：sink 已 Stop 但 path 尚未删除的窗口
+		logger.Infof("RTSP SETUP -> 404 (stream closed): %s", path)
 		return &base.Response{StatusCode: base.StatusNotFound}, nil, nil
 	}
 
