@@ -118,7 +118,8 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+defineOptions({ name: 'Test' })
+import { computed, nextTick, onActivated, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { getOutputs } from '@/api'
 import { useStreamTestStore } from '@/stores/streamTest'
@@ -159,7 +160,12 @@ const isTesting = computed(
 
 onMounted(async () => {
   await loadOutputs()
-  // 重挂载时重新 attach 已建立的媒体流（切 Tab 回来）
+})
+
+// keep-alive 激活（首次进入 + 每次切 Tab 回来）时恢复媒体流：
+// 组件被缓存时 DOM 会从文档摘除，浏览器自动暂停 video，
+// 重新激活后需重新挂回 srcObject 并 play()。
+onActivated(async () => {
   await nextTick()
   if (videoEl.value) store.attachWebRTCVideo(videoEl.value)
   if (flvVideoEl.value) store.attachFLVVideo(flvVideoEl.value)

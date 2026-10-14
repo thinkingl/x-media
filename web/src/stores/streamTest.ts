@@ -96,10 +96,14 @@ export const useStreamTestStore = defineStore('streamTest', () => {
     }
   }
 
-  // attachWebRTCVideo 将已建立的媒体流绑定到 video 元素（组件重挂载时调用）。
+  // attachWebRTCVideo 将已建立的媒体流绑定到 video 元素并恢复播放
+  // （组件重挂载/keep-alive 重新激活时调用，video 从文档摘除后浏览器会暂停）。
   function attachWebRTCVideo(video: HTMLVideoElement) {
     if (trackStream) {
       video.srcObject = trackStream
+      try {
+        video.play()
+      } catch {}
     }
   }
 
@@ -174,14 +178,27 @@ export const useStreamTestStore = defineStore('streamTest', () => {
         flvPlayer.attachMediaElement(attachedVideo)
       }
       await flvPlayer.load()
-      if (attachedVideo) {
-        await flvPlayer.play()
-      }
+      // 先标记播放中让 video 元素可见（v-show），再 play()：
+      // play() 的 promise 在 MSE 缓冲出数据后才 resolve，若元素处于
+      // display:none 或 src 被重置，Chrome 会以 "play() interrupted by pause()" 拒绝。
       flvConnecting.value = false
       flvPlaying.value = true
       flvStatus.value = 'playing'
       flvStartTime = performance.now()
       startFLVTimer()
+      if (attachedVideo) {
+        try {
+          await attachedVideo.play()
+        } catch (e) {
+          // 被自动暂停打断（autoplay 策略）：video 已 muted+playsinline，
+          // 稍后缓冲出数据时浏览器会自动开始播放，不视为失败。
+          setTimeout(() => {
+            try {
+              flvPlayer?.play()
+            } catch {}
+          }, 150)
+        }
+      }
     } catch (e: any) {
       flvError.value = e.message || 'FLV 播放失败'
       flvStatus.value = 'failed'
@@ -192,7 +209,17 @@ export const useStreamTestStore = defineStore('streamTest', () => {
   }
 
   // attachFLVVideo 绑定 flv.js 到 video 元素（组件挂载/重挂载时调用）。
+  // 幂等：已绑定同一元素时仅确保播放中（startFLV 后 watch 会重复触发，
+  // 重复 attachMediaElement 会重建 MSE 源导致 play() 被 pause() 打断）。
   function attachFLVVideo(video: HTMLVideoElement) {
+    if (attachedVideo === video) {
+      if (flvPlayer && video.paused) {
+        try {
+          flvPlayer.play()
+        } catch {}
+      }
+      return
+    }
     attachedVideo = video
     if (flvPlayer) {
       try {
