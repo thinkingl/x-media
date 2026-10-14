@@ -54,6 +54,11 @@ type webrtcTrackPair struct {
 	closeCh chan struct{}
 	once    sync.Once
 
+	// writeFn 实际发送函数；默认 videoTrack.WriteRTP，测试可注入失败。
+	writeFn func(*rtp.Packet) error
+	// onClose 写失败时的清理回调（由 sink 注册：unregister + pc.Close）。
+	onClose func()
+
 	// 统计
 	dropped atomic.Int64
 }
@@ -70,6 +75,14 @@ func (s *WebRTCSink) newWebRTCTrackPair(track *webrtc.TrackLocalStaticRTP, addr 
 	return pair
 }
 
+// write 实际发送一个 RTP 包（writeFn 可注入以测试失败路径）。
+func (p *webrtcTrackPair) write(pkt *rtp.Packet) error {
+	if p.writeFn != nil {
+		return p.writeFn(pkt)
+	}
+	return p.videoTrack.WriteRTP(pkt)
+}
+
 // writeLoop 消费发送队列并逐包写入 SRTP/UDP。关键帧分片间做 pacing。
 func (p *webrtcTrackPair) writeLoop() {
 	for {
@@ -77,9 +90,15 @@ func (p *webrtcTrackPair) writeLoop() {
 		case <-p.closeCh:
 			return
 		case pkt := <-p.queue:
-			if err := p.videoTrack.WriteRTP(pkt); err != nil {
-				// 网络不可达：标记客户端失效（由上层移除）
-				logger.Warnf("WebRTC track write failed: %v", err)
+			if err := p.write(pkt); err != nil {
+				// 本地写失败不必然触发连接状态迁移：主动停止并回调清理，
+				// 避免 pair 滞留 clients map、队列无人消费、PeerConnection
+				// 资源延迟释放（此前直接 return，无人移除）。
+				logger.Warnf("WebRTC track write failed, dropping client: %v", err)
+				p.stop()
+				if p.onClose != nil {
+					p.onClose()
+				}
 				return
 			}
 		}
@@ -310,4 +329,18 @@ func (s *WebRTCSink) unregisterClient(pc *webrtc.PeerConnection) {
 	s.clientsMu.Lock()
 	delete(s.clients, pc)
 	s.clientsMu.Unlock()
+}
+
+// dropClient 移除并彻底释放一个客户端：map 删除 + 停止发送 goroutine +
+// 关闭 PeerConnection（释放 ICE/UDP/DTLS 资源）。幂等，可同时用于
+// 写失败回调与连接状态回调（pc.Close 触发的 Closed 回调再次进入也安全）。
+func (s *WebRTCSink) dropClient(pc *webrtc.PeerConnection) {
+	s.clientsMu.Lock()
+	pair := s.clients[pc]
+	delete(s.clients, pc)
+	s.clientsMu.Unlock()
+	if pair != nil {
+		pair.stop()
+	}
+	_ = pc.Close()
 }

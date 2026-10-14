@@ -49,15 +49,16 @@ func (s *WebRTCSink) ServeWHEP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 注册客户端；连接关闭时移除
+	// 注册客户端；连接关闭/写失败时彻底清理（含 pc.Close 资源释放）
 	pair := s.newWebRTCTrackPair(track, remoteAddr(r))
+	pair.onClose = func() { s.dropClient(pc) }
 	s.registerClient(pc, pair)
 	pc.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
 		logger.Infof("WebRTC peer [%s] state: %s", s.id, state)
 		if state == webrtc.PeerConnectionStateFailed ||
 			state == webrtc.PeerConnectionStateClosed {
-			s.unregisterClient(pc)
-			pair.stop()
+			// 此前 Failed 分支不 pc.Close → ICE/UDP/DTLS 资源泄漏
+			s.dropClient(pc)
 		}
 	})
 
