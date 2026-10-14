@@ -9,6 +9,10 @@ export const useStreamTestStore = defineStore('streamTest', () => {
   // ---- WebRTC 状态 ----
   let pc: RTCPeerConnection | null = null
   let statsTimer: number | null = null
+  // wrGeneration 递增使过期异步流程失效：快速两次 start/stop 时，
+  // 挂起的 await（createOffer/fetch/setRemoteDescription）不得再动
+  // 新连接的状态（否则 SDP 交叉污染到新的 RTCPeerConnection）。
+  let wrGeneration = 0
   const wrConnecting = ref(false)
   const wrConnected = ref(false)
   const wrStatus = ref('')
@@ -26,6 +30,9 @@ export const useStreamTestStore = defineStore('streamTest', () => {
   // ---- HTTP-FLV 状态 ----
   let flvPlayer: any = null
   let flvTimer: number | null = null
+  // flvGeneration 使过期的 load()/错误回调失效：旧 player 的迟到事件
+  // 不得销毁新建的 player（此前 ERROR 回调直接 destroyFLVPlayer()）。
+  let flvGeneration = 0
   const flvConnecting = ref(false)
   const flvPlaying = ref(false)
   const flvStatus = ref('')
@@ -38,6 +45,7 @@ export const useStreamTestStore = defineStore('streamTest', () => {
   // ---- WebRTC 方法 ----
   async function startWebRTC(url: string) {
     stopWebRTC()
+    const gen = wrGeneration
     wrConnecting.value = true
     wrStatus.value = 'connecting'
     wrConnected.value = false
@@ -52,21 +60,25 @@ export const useStreamTestStore = defineStore('streamTest', () => {
     firstFrameTime = 0
 
     try {
-      pc = new RTCPeerConnection()
-      pc.addTransceiver('video', { direction: 'recvonly' })
+      // 局部引用：后续所有 await/回调只用 conn，杜绝共享 pc 变量导致的
+      // 过期流程写入新连接。
+      const conn = new RTCPeerConnection()
+      pc = conn
+      conn.addTransceiver('video', { direction: 'recvonly' })
 
-      pc.ontrack = (ev) => {
+      conn.ontrack = (ev) => {
+        if (gen !== wrGeneration) return
         trackStream = ev.streams[0]
-        emitStreamToVideo()
       }
 
-      pc.onconnectionstatechange = () => {
-        const st = pc?.connectionState
+      conn.onconnectionstatechange = () => {
+        if (gen !== wrGeneration) return
+        const st = conn.connectionState
         wrStatus.value = st || ''
         if (st === 'connected') {
           wrConnected.value = true
           wrConnecting.value = false
-          startStatsTimer()
+          startStatsTimer(conn)
         } else if (st === 'failed' || st === 'disconnected' || st === 'closed') {
           wrConnecting.value = false
           wrConnected.value = false
@@ -75,8 +87,8 @@ export const useStreamTestStore = defineStore('streamTest', () => {
         }
       }
 
-      const offer = await pc.createOffer()
-      await pc.setLocalDescription(offer)
+      const offer = await conn.createOffer()
+      await conn.setLocalDescription(offer)
       const resp = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/sdp' },
@@ -87,8 +99,10 @@ export const useStreamTestStore = defineStore('streamTest', () => {
         throw new Error(`WHEP 信令失败 (${resp.status}): ${text.slice(0, 200)}`)
       }
       const answer = await resp.text()
-      await pc.setRemoteDescription({ type: 'answer', sdp: answer })
+      if (gen !== wrGeneration) return // 已被新的 start/stop 取代
+      await conn.setRemoteDescription({ type: 'answer', sdp: answer })
     } catch (e: any) {
+      if (gen !== wrGeneration) return // 过期流程不触碰新连接状态
       wrConnecting.value = false
       wrStatus.value = 'failed'
       wrError.value = e.message || 'WebRTC 测试失败'
@@ -107,18 +121,14 @@ export const useStreamTestStore = defineStore('streamTest', () => {
     }
   }
 
-  function emitStreamToVideo() {
-    // store 不直接持有 video 元素；由组件挂载时 attach。
-    // 此处仅记录状态，组件通过 watch 处理。
-  }
-
-  function startStatsTimer() {
+  function startStatsTimer(conn: RTCPeerConnection) {
+    stopStatsTimer() // 防止断线重连叠加多个 interval
     lastTime = performance.now()
     lastBytes = 0
     statsTimer = window.setInterval(async () => {
-      if (!pc) return
+      if (pc !== conn) return // 连接已替换，停止统计
       try {
-        const stats = await pc.getStats()
+        const stats = await conn.getStats()
         const now = performance.now()
         stats.forEach((s) => {
           if (s.type === 'inbound-rtp' && s.kind === 'video') {
@@ -130,6 +140,12 @@ export const useStreamTestStore = defineStore('streamTest', () => {
             }
             lastBytes = s.bytesReceived || 0
             lastTime = now
+            if (s.frameWidth && s.frameHeight) {
+              resolution.value = `${s.frameWidth}x${s.frameHeight}`
+            }
+            if (s.framesPerSecond) {
+              frameRate.value = Number(s.framesPerSecond).toFixed(1)
+            }
             if (!firstFrameTime && s.packetsReceived > 0) firstFrameTime = now
             if (firstFrameTime) wrDuration.value = `${((now - firstFrameTime) / 1000).toFixed(1)} s`
           }
@@ -148,6 +164,7 @@ export const useStreamTestStore = defineStore('streamTest', () => {
   // ---- HTTP-FLV 方法 ----
   async function startFLV(url: string, video?: HTMLVideoElement) {
     stopFLV()
+    const gen = flvGeneration
     if (!flvjs.isSupported()) {
       flvError.value = '当前浏览器不支持 FLV 播放 (需要 MSE)'
       flvStatus.value = 'failed'
@@ -162,12 +179,15 @@ export const useStreamTestStore = defineStore('streamTest', () => {
     flvStartTime = 0
     if (video) attachedVideo = video
 
+    let player: any = null
     try {
-      flvPlayer = flvjs.createPlayer(
+      player = flvjs.createPlayer(
         { type: 'flv', isLive: true, url },
         { enableStashBuffer: false, autoCleanupSourceBuffer: true },
       )
-      flvPlayer.on(flvjs.Events.ERROR, (errType: any, errDetail: any) => {
+      flvPlayer = player
+      player.on(flvjs.Events.ERROR, (errType: any, errDetail: any) => {
+        if (gen !== flvGeneration || flvPlayer !== player) return // 旧 player 的迟到错误
         flvError.value = `FLV 错误: ${errType} ${errDetail}`
         flvStatus.value = 'failed'
         flvConnecting.value = false
@@ -175,9 +195,10 @@ export const useStreamTestStore = defineStore('streamTest', () => {
         destroyFLVPlayer()
       })
       if (attachedVideo) {
-        flvPlayer.attachMediaElement(attachedVideo)
+        player.attachMediaElement(attachedVideo)
       }
-      await flvPlayer.load()
+      await player.load()
+      if (gen !== flvGeneration || flvPlayer !== player) return // 已被取代
       // 先标记播放中让 video 元素可见（v-show），再 play()：
       // play() 的 promise 在 MSE 缓冲出数据后才 resolve，若元素处于
       // display:none 或 src 被重置，Chrome 会以 "play() interrupted by pause()" 拒绝。
@@ -193,18 +214,23 @@ export const useStreamTestStore = defineStore('streamTest', () => {
           // 被自动暂停打断（autoplay 策略）：video 已 muted+playsinline，
           // 稍后缓冲出数据时浏览器会自动开始播放，不视为失败。
           setTimeout(() => {
-            try {
-              flvPlayer?.play()
-            } catch {}
+            if (gen === flvGeneration && flvPlayer === player) {
+              try {
+                player.play()
+              } catch {}
+            }
           }, 150)
         }
       }
     } catch (e: any) {
+      if (gen !== flvGeneration) return // 过期流程不触碰新 player 状态
       flvError.value = e.message || 'FLV 播放失败'
       flvStatus.value = 'failed'
       flvConnecting.value = false
       flvPlaying.value = false
-      destroyFLVPlayer()
+      if (flvPlayer === player) {
+        destroyFLVPlayer()
+      }
     }
   }
 
@@ -256,6 +282,7 @@ export const useStreamTestStore = defineStore('streamTest', () => {
 
   // ---- 公共 ----
   function stopWebRTC() {
+    wrGeneration++ // 使挂起的信令流程全部失效
     stopStatsTimer()
     if (pc) {
       pc.ontrack = null
@@ -271,6 +298,7 @@ export const useStreamTestStore = defineStore('streamTest', () => {
   }
 
   function stopFLV() {
+    flvGeneration++ // 使过期的 load()/错误回调失效
     if (flvTimer !== null) {
       clearInterval(flvTimer)
       flvTimer = null

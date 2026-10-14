@@ -17,6 +17,7 @@
           <el-input v-model="url" placeholder="请输入要测试的流地址">
             <template #append>
               <el-button :loading="testing" @click="startTest">测试</el-button>
+              <el-button v-if="isTesting" @click="stopTest">停止测试</el-button>
             </template>
           </el-input>
         </el-form-item>
@@ -232,6 +233,12 @@ async function startTest() {
   } finally {
     testing.value = false
   }
+}
+
+// 主动停止：释放 WebRTC 连接/FLV 播放器（此前只能刷新页面释放）
+function stopTest() {
+  store.stopWebRTC()
+  store.stopFLV()
 }
 
 // 监听播放状态变化，确保 video 元素就绪后 attach
