@@ -3,6 +3,8 @@ package service
 import (
 	"context"
 	"encoding/json"
+	stderrors "errors"
+	"net/http"
 
 	"github.com/x-media/x-media-server/internal/media"
 	"github.com/x-media/x-media-server/internal/model"
@@ -10,6 +12,7 @@ import (
 	"github.com/x-media/x-media-server/pkg/errors"
 	"github.com/x-media/x-media-server/pkg/logger"
 	"github.com/x-media/x-media-server/pkg/utils"
+	"gorm.io/gorm"
 )
 
 // PipeService 管道服务
@@ -115,6 +118,10 @@ func (s *PipeService) Create(req *CreatePipeRequest) (*model.Pipe, error) {
 	}
 
 	if err := s.pipeRepo.Create(pipe); err != nil {
+		// 查重 TOCTOU 被 (input_id, output_id) 唯一索引兜底拦截
+		if stderrors.Is(err, gorm.ErrDuplicatedKey) {
+			return nil, errors.NewAppError(http.StatusConflict, "该管道已存在", err)
+		}
 		return nil, errors.NewInternalError(err)
 	}
 

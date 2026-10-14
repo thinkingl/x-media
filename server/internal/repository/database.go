@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/glebarez/sqlite"
@@ -62,11 +63,20 @@ func InitDB(cfg *config.DatabaseConfig) (*gorm.DB, error) {
 	}
 
 	// 打开数据库
-	db, err := gorm.Open(sqlite.Open(cfg.DSN), &gorm.Config{
+	db, err := gorm.Open(sqlite.Open(buildSQLiteDSN(cfg.DSN)), &gorm.Config{
 		Logger: databaseLogger{level: logger.Warn},
+		// 约束冲突翻译为 gorm.ErrDuplicatedKey，供服务层映射 409
+		TranslateError: true,
 	})
 	if err != nil {
 		return nil, err
+	}
+
+	// 连接池：SQLite 单写者模型，固定 1 连接 + busy_timeout 避免
+	// database is locked（媒体 goroutine 与 HTTP 并发写）。
+	if sqlDB, err := db.DB(); err == nil {
+		sqlDB.SetMaxOpenConns(1)
+		sqlDB.SetMaxIdleConns(1)
 	}
 
 	// 自动迁移
@@ -76,8 +86,23 @@ func InitDB(cfg *config.DatabaseConfig) (*gorm.DB, error) {
 		&model.Pipe{},
 		&model.Stat{},
 	); err != nil {
-		return nil, err
+		// 不阻塞启动：唯一索引可能因历史重复数据创建失败，
+		// 打出可操作的告警待人工清理。
+		appLogger.Warnf("database migration incomplete (可能存在重复数据需人工清理): %v", err)
 	}
 
 	return db, nil
+}
+
+// buildSQLiteDSN 为 DSN 追加并发安全所需的 pragma：
+// busy_timeout（等待而非直接报 locked）与 WAL（读写并发）。
+func buildSQLiteDSN(dsn string) string {
+	const params = "_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)"
+	if strings.Contains(dsn, "?") {
+		return dsn + "&" + params
+	}
+	if !strings.HasPrefix(dsn, "file:") {
+		dsn = "file:" + dsn
+	}
+	return dsn + "?" + params
 }
