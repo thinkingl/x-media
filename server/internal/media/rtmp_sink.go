@@ -29,7 +29,6 @@ type RTMPSink struct {
 
 	streams []StreamInfo
 	metaSent bool
-	seqSent  bool
 
 	// 重连状态：连接/发送失败后按退避重试，不再置永久 Error。
 	failCount        int
@@ -167,7 +166,6 @@ func (r *RTMPSink) markFailLocked(err error) {
 	}
 	r.started = false
 	r.metaSent = false
-	r.seqSent = false
 	r.failCount++
 	r.nextRetryAt = time.Now().Add(r.reconnectBackoff)
 	if r.failCount == 1 || r.failCount%10 == 0 {
@@ -250,7 +248,6 @@ func (r *RTMPSink) sendSequenceHeaders() {
 			}
 		}
 	}
-	r.seqSent = true
 }
 
 func (r *RTMPSink) Notify(sig *Signal) error {
@@ -269,7 +266,6 @@ func (r *RTMPSink) Stop() error {
 	// 跳过懒连接直接向已关闭的 client 发送 → 永远 "rtmp not connected"。
 	r.started = false
 	r.metaSent = false
-	r.seqSent = false
 	r.failCount = 0
 	r.nextRetryAt = time.Time{}
 	if r.client != nil {

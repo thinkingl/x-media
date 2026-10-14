@@ -574,8 +574,8 @@ func (m *MP4Source) readLoop(ctx context.Context) {
 	}
 }
 
-// nextPaceTarget 基于所有 track 中"下一帧最早媒体时间"计算墙钟调度目标。
-// 与 paceTarget 不同：不再只用视频基准 track，而是取音视频各自下一帧的最早者，
+// nextPaceTarget 基于所有 track 中"下一帧最早媒体时间"计算墙钟调度目标：
+// 不只用视频基准 track，而是取音视频各自下一帧的最早者，
 // 使音频按其自身时钟（11.4ms）与视频（40ms）交错匀速发送，避免音频攒批突发。
 func (m *MP4Source) nextPaceTarget() time.Time {
 	m.mu.RLock()
@@ -727,42 +727,6 @@ func (m *MP4Source) throttle() time.Duration {
 	return 5 * time.Millisecond
 }
 
-// paceTarget 返回下一帧的墙钟调度目标（无漂移节流）。
-// 以基准 track 的媒体时间轴（dts+loopDur，自身 timescale）锚定单调墙钟，
-// 使发送节奏与媒体时间戳精确一致，消除固定 sleep + 处理开销造成的累计漂移。
-// 返回零值表示当前无法调度（暂停/无样本/无基准轨道）。
-func (m *MP4Source) paceTarget() time.Time {
-	m.mu.RLock()
-	base := m.baseTr
-	if base == nil || base.trak == nil || base.trak.Mdia == nil ||
-		base.trak.Mdia.Minf == nil || base.trak.Mdia.Minf.Stbl == nil ||
-		base.trak.Mdia.Minf.Stbl.Stts == nil {
-		m.mu.RUnlock()
-		return time.Time{}
-	}
-	sampleNr := base.sampleNr
-	loopDur := base.loopDur
-	ts := int64(base.timescale)
-	anchor := m.paceAnchor
-	anchorMedia := m.paceAnchorMedia
-	m.mu.RUnlock()
-	if ts <= 0 {
-		ts = 90000
-	}
-	if sampleNr > base.trak.GetNrSamples() {
-		return time.Time{}
-	}
-	stts := base.trak.Mdia.Minf.Stbl.Stts
-	if stts == nil {
-		return time.Time{}
-	}
-	dts := base.trackDecodeTime(sampleNr)
-	media := int64(dts) + loopDur
-	if media <= anchorMedia {
-		return time.Time{}
-	}
-	return anchor.Add(time.Duration((media - anchorMedia) * int64(time.Second) / ts))
-}
 
 // reAnchorPacing 在媒体时间轴相对墙钟跳变后重置无漂移节流锚点，
 // 避免按旧锚点休眠造成长时间等待或突发追赶。Start/Seek/Resume 时调用。

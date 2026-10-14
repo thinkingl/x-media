@@ -23,17 +23,6 @@ type ChannelMapping struct {
 	OutputChannelID uint8 `json:"output_channel_id"`
 }
 
-// PipeConfig 管道配置
-type PipeConfig struct {
-	InputID           string `json:"input_id"`
-	OutputID          string `json:"output_id"`
-	AutoStart         *bool  `json:"auto_start,omitempty"`
-	BufferSize        int    `json:"buffer_size,omitempty"`
-	RestartOnError    *bool  `json:"restart_on_error,omitempty"`
-	MaxRestartCount   int    `json:"max_restart_count,omitempty"`
-	RestartIntervalMs int    `json:"restart_interval_ms,omitempty"`
-}
-
 // PipeStatus 管道状态常量
 const (
 	PipeStatusStopped = "stopped"

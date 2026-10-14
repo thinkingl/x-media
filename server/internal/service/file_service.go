@@ -173,28 +173,3 @@ func (s *FileService) Upload(fileName string, reader io.Reader) (string, error) 
 	_ = n // bytes written
 	return savePath, nil
 }
-
-func (s *FileService) ValidateFilePath(path string) error {
-	if path == "" {
-		return errors.NewValidationError("文件路径不能为空")
-	}
-
-	info, err := os.Stat(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return errors.NewNotFoundError("文件", path)
-		}
-		return errors.NewInternalError(err)
-	}
-
-	if info.IsDir() {
-		return errors.NewValidationError(fmt.Sprintf("路径是目录，不是文件: %s", path))
-	}
-
-	ext := strings.ToLower(filepath.Ext(path))
-	if !allowedMediaExts[ext] {
-		return errors.NewValidationError(fmt.Sprintf("不支持的文件格式: %s", ext))
-	}
-
-	return nil
-}

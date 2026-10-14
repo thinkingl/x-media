@@ -84,7 +84,6 @@ func InitDB(cfg *config.DatabaseConfig) (*gorm.DB, error) {
 		&model.Input{},
 		&model.Output{},
 		&model.Pipe{},
-		&model.Stat{},
 	); err != nil {
 		// 不阻塞启动：唯一索引可能因历史重复数据创建失败，
 		// 打出可操作的告警待人工清理。

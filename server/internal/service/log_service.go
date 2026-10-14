@@ -15,18 +15,12 @@ import (
 )
 
 type LogService struct {
-	mu     sync.RWMutex
-	cfg    *config.LogConfig
-	buffer []string
-	maxBuf int
+	mu  sync.RWMutex
+	cfg *config.LogConfig
 }
 
 func NewLogService(cfg *config.LogConfig) *LogService {
-	return &LogService{
-		cfg:    cfg,
-		buffer: make([]string, 0, 100),
-		maxBuf: 1000,
-	}
+	return &LogService{cfg: cfg}
 }
 
 type LogEntry struct {
@@ -118,7 +112,7 @@ func (s *LogService) GetLogs(lines int) ([]string, error) {
 	s.mu.RUnlock()
 
 	if filename == "" {
-		return s.buffer, nil
+		return []string{}, nil
 	}
 
 	file, err := os.Open(filename)
@@ -176,16 +170,6 @@ func (s *LogService) GetLogs(lines int) ([]string, error) {
 	}
 
 	return result, nil
-}
-
-func (s *LogService) AddLog(entry string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	s.buffer = append(s.buffer, entry)
-	if len(s.buffer) > s.maxBuf {
-		s.buffer = s.buffer[len(s.buffer)-s.maxBuf:]
-	}
 }
 
 func (s *LogService) GetLogsJSON(lines int) ([]LogEntry, error) {

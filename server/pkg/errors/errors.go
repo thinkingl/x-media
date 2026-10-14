@@ -34,29 +34,6 @@ func NewAppError(code int, message string, err error) *AppError {
 	}
 }
 
-// 预定义错误
-var (
-	ErrNotFound = &AppError{
-		Code:    http.StatusNotFound,
-		Message: "资源不存在",
-	}
-
-	ErrBadRequest = &AppError{
-		Code:    http.StatusBadRequest,
-		Message: "请求参数错误",
-	}
-
-	ErrInternal = &AppError{
-		Code:    http.StatusInternalServerError,
-		Message: "内部服务器错误",
-	}
-
-	ErrConflict = &AppError{
-		Code:    http.StatusConflict,
-		Message: "资源冲突",
-	}
-)
-
 // NewNotFoundError 创建未找到错误
 func NewNotFoundError(resource string, id string) *AppError {
 	return &AppError{

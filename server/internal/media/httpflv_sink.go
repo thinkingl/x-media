@@ -413,6 +413,3 @@ func (r *flvReader) Read(p []byte) (int, error) {
 	}
 	return n, nil
 }
-
-// 让 time 导入不因当前未使用而报错（保留供超时逻辑）。
-var _ = time.Second

@@ -120,7 +120,7 @@
 
 <script setup lang="ts">
 defineOptions({ name: 'Test' })
-import { computed, nextTick, onActivated, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onActivated, onMounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { getOutputs } from '@/api'
 import { useStreamTestStore } from '@/stores/streamTest'
@@ -170,11 +170,6 @@ onActivated(async () => {
   await nextTick()
   if (videoEl.value) store.attachWebRTCVideo(videoEl.value)
   if (flvVideoEl.value) store.attachFLVVideo(flvVideoEl.value)
-})
-
-// 切 Tab 不停止测试；仅当组件内主动停止时才调用 store 的 stop
-onBeforeUnmount(() => {
-  // 不做任何事：播放器/连接由 store 保持，切 Tab 继续
 })
 
 async function loadOutputs() {
