@@ -475,20 +475,19 @@ func packetSpreadInterval(numPackets int) time.Duration {
 	return 500 * time.Microsecond
 }
 
-// mpeg4GenericAUHeader 构造 RFC 3640 AAC-hbr 的 AU-header 区（4 字节）：
+// mpeg4GenericAUHeader 构造 AAC-hbr（MPEG4-GENERIC）的 AU-header 区（4 字节）：
 //
-//	AU-headers-length(12bit，单位=bit，本例恒为 16) +
-//	AU-header[Size(13bit)|Index(3bit=0)] + 字节补齐
+//	2 字节 AU-headers-length（值=16，即一个 AU-header 的位数） +
+//	AU-header[Size(13bit)|Index(3bit=0)，按 16bit 写]
 //
-// 此前把长度域写成 16bit 值（00 10 ...），与 RFC 的位布局错开，
-// VLC/ffmpeg 等标准客户端无法解析我方 RTSP sink 输出的 AAC 音频。
+// 布局必须与主流客户端一致：ffmpeg libavformat/rtpdec_mpeg4.c 的
+// rtp_parse_mp4_au 按 AV_RB16 读长度域、跳过 2 字节后从 bit16 读 Size。
+// 此前按 RFC 3640 的 12bit 紧打包实现（AU-header 从 bit12 起）在
+// AU size≥512 时与其实测分叉：ffmpeg 解析出 5712 报
+// "First AU larger than packet size"，音频零采样。
 func mpeg4GenericAUHeader(auSize int) []byte {
-	return []byte{
-		0x01,                // AU-headers-length = 16 的高 8 位（低 4 位在下一字节高 nibble，为 0）
-		byte(auSize >> 9),   // Size[12:9]
-		byte(auSize >> 1),   // Size[8:1]
-		byte(auSize&1) << 7, // Size[0] | Index(3bit=0) | 补齐(4bit)
-	}
+	h := uint16(auSize) << 3 // Size(13bit) | Index(3bit=0)
+	return []byte{0x00, 0x10, byte(h >> 8), byte(h)}
 }
 
 func (r *RTSPSink) writeAudio(f *Frame, stream *gortsplib.ServerStream) error {

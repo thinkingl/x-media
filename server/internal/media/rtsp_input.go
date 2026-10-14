@@ -466,10 +466,51 @@ func (r *RTSPInput) handleVideoPacket(medi *description.Media, f *format.H264, p
 	}
 }
 
+// parseMPEG4GenericAUs 解析 AAC-hbr（MPEG4-GENERIC）RTP 负载的 AU 头区。
+//
+// 布局与主流客户端一致（ffmpeg libavformat/rtpdec_mpeg4.c 的 rtp_parse_mp4_au：
+// AV_RB16 读 AU-headers-length、跳过 2 字节后从 bit16 起位打包读 Size/Index）。
+// 返回各 AU 的字节尺寸与头区总字节数；畸形负载返回 ok=false。
+func parseMPEG4GenericAUs(p []byte, sizeLength, indexLength int) (sizes []int, headerBytes int, ok bool) {
+	bitsPerAUHeader := sizeLength + indexLength
+	if bitsPerAUHeader <= 0 || len(p) < 2 {
+		return nil, 0, false
+	}
+	auHeadersBits := int(p[0])<<8 | int(p[1]) // ffmpeg: AV_RB16
+	if auHeadersBits == 0 || auHeadersBits%bitsPerAUHeader != 0 {
+		return nil, 0, false
+	}
+	auCount := auHeadersBits / bitsPerAUHeader
+	headerBytes = 2 + (auHeadersBits+7)/8 // 2 字节长度域 + AU-headers（补齐到字节）
+	if len(p) < headerBytes {
+		return nil, 0, false
+	}
+
+	sizes = make([]int, 0, auCount)
+	bitOffset := 16 // 长度域占 2 字节，AU-header 从 bit16 起
+	total := 0
+	for i := 0; i < auCount; i++ {
+		if bitOffset+bitsPerAUHeader > headerBytes*8 {
+			return nil, 0, false
+		}
+		size := readBitsAt(p, bitOffset, sizeLength)
+		bitOffset += bitsPerAUHeader
+		if size <= 0 {
+			return nil, 0, false
+		}
+		sizes = append(sizes, size)
+		total += size
+	}
+	if headerBytes+total > len(p) {
+		return nil, 0, false
+	}
+	return sizes, headerBytes, true
+}
+
 // handleAudioPacket 解包 MPEG4-GENERIC RTP 为 AAC 帧并分发。
 //
-// 帧格式（RFC 3640）：AU-headers-length(12bit) + 若干
-// AU-header[Size(13bit)|Index(3bit)] + payload（逐 AU 拼接）。
+// 帧格式：2 字节 AU-headers-length + 字节对齐的 AU-header 区 +
+// payload（逐 AU 拼接），见 parseMPEG4GenericAUs。
 // 本项目 RTSPSink 与常见 IPC 均为一包一 AU；此处支持一包多 AU。
 func (r *RTSPInput) handleAudioPacket(medi *description.Media, f *format.MPEG4Audio, pkt *rtp.Packet, channelID uint8) {
 	r.mu.RLock()
@@ -486,32 +527,16 @@ func (r *RTSPInput) handleAudioPacket(medi *description.Media, f *format.MPEG4Au
 	if indexLength <= 0 {
 		indexLength = 3
 	}
-	bitsPerAUHeader := sizeLength + indexLength
 	p := pkt.Payload
-	if bitsPerAUHeader <= 0 || len(p) < 2 {
-		return
-	}
-	auHeadersBits := int(p[0])<<4 | int(p[1])>>4
-	if auHeadersBits == 0 || auHeadersBits%bitsPerAUHeader != 0 {
-		return
-	}
-	auCount := auHeadersBits / bitsPerAUHeader
-	headerBytes := 2 + (auHeadersBits+15)/16*2 // 2 字节 AU-headers-length + 对齐的 AU-headers
-	if len(p) < headerBytes {
+	sizes, headerBytes, ok := parseMPEG4GenericAUs(p, sizeLength, indexLength)
+	if !ok {
 		return
 	}
 
-	// 逐 AU 提取 payload（AU-header 从 bit 12 开始，前 12 bit 是长度域）
+	// 逐 AU 提取 payload
 	pts, _ := r.client.PacketPTS(medi, pkt)
 	offset := headerBytes
-	bitOffset := 12
-	for i := 0; i < auCount; i++ {
-		size := readBitsAt(p, bitOffset, sizeLength)
-		_ = readBitsAt(p, bitOffset+sizeLength, indexLength) // index 不使用
-		bitOffset += bitsPerAUHeader
-		if size <= 0 || offset+size > len(p) {
-			return
-		}
+	for _, size := range sizes {
 		payload := make([]byte, size)
 		copy(payload, p[offset:offset+size])
 		offset += size

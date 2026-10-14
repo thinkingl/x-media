@@ -9,15 +9,20 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestMpeg4GenericAUHeaderRFC3640 防回退：AU-header 区必须是 RFC 3640
-// 位布局（12bit 长度域 + 13bit size + 3bit index + 补齐）。
-func TestMpeg4GenericAUHeaderRFC3640(t *testing.T) {
-	// AU size=4 → 01 00 02 00（此前非标准实现为 00 10 00 20）
-	assert.Equal(t, []byte{0x01, 0x00, 0x02, 0x00}, mpeg4GenericAUHeader(4))
-	// AU size=0x123 (291) → size=0b0_0010_0100_011
-	assert.Equal(t, []byte{0x01, 0x00, 0x91, 0x80}, mpeg4GenericAUHeader(0x123))
-	// AU size=8191（13bit 上限）
-	assert.Equal(t, []byte{0x01, 0x0F, 0xFF, 0x80}, mpeg4GenericAUHeader(8191))
+// TestMpeg4GenericAUHeaderByteAligned 防回退：AU-header 区必须是
+// 2 字节长度域 + 字节对齐布局 —— ffmpeg（libavformat/rtpdec_mpeg4.c
+// rtp_parse_mp4_au：AV_RB16 读长度、buf+=2 后从 bit16 读 size）与
+// VLC 等主流客户端均按此解析。此前按 RFC 12bit 紧打包实现导致
+// ffmpeg 报 "First AU larger than packet size"、音频零采样。
+func TestMpeg4GenericAUHeaderByteAligned(t *testing.T) {
+	// AU size=4 → [00 10][4<<3=0x0020]
+	assert.Equal(t, []byte{0x00, 0x10, 0x00, 0x20}, mpeg4GenericAUHeader(4))
+	// AU size=0x123 (291) → 291<<3 = 0x0918
+	assert.Equal(t, []byte{0x00, 0x10, 0x09, 0x18}, mpeg4GenericAUHeader(0x123))
+	// AU size=8191（13bit 上限）→ 0xFFF8
+	assert.Equal(t, []byte{0x00, 0x10, 0xFF, 0xF8}, mpeg4GenericAUHeader(8191))
+	// AU size=357（实测出问题的分叉尺寸段）→ 357<<3 = 0x0B28
+	assert.Equal(t, []byte{0x00, 0x10, 0x0B, 0x28}, mpeg4GenericAUHeader(357))
 }
 
 // TestRTSPInputReceivesAACAudio 复现 RTSP 输入音频缺失：
@@ -125,4 +130,31 @@ func TestRTSPInputReceivesAACAudio(t *testing.T) {
 	for _, f := range videoFrames {
 		assert.Equal(t, uint8(0), f.Header.ChannelID, "视频应保持 channel 0")
 	}
+}
+
+// TestParseMPEG4GenericAUsByteAligned 验证输入侧按字节对齐布局解析
+// （与 ffmpeg rtp_parse_mp4_au 一致：RB16 长度域，AU-header 从字节2开始）。
+func TestParseMPEG4GenericAUsByteAligned(t *testing.T) {
+	// 单 AU：size=357 → [00 10][0B 28] + 357 字节负载
+	payload := make([]byte, 4+357)
+	copy(payload, []byte{0x00, 0x10, 0x0B, 0x28})
+	sizes, headerBytes, ok := parseMPEG4GenericAUs(payload, 13, 3)
+	require.True(t, ok, "字节对齐布局必须可解析")
+	assert.Equal(t, 4, headerBytes)
+	require.Len(t, sizes, 1)
+	assert.Equal(t, 357, sizes[0], "size≥512 分叉段必须解析正确（此前 12bit 紧打包读出 5712）")
+
+	// 多 AU：2 个 AU（size 100, 200）→ 长度域 = 2*16=32 bits
+	p2 := make([]byte, 6+300)
+	p2[0], p2[1] = 0x00, 0x20 // AU-headers-length = 32 bits
+	h1, h2 := uint16(100)<<3, uint16(200)<<3
+	copy(p2[2:], []byte{byte(h1 >> 8), byte(h1), byte(h2 >> 8), byte(h2)})
+	sizes2, headerBytes2, ok2 := parseMPEG4GenericAUs(p2, 13, 3)
+	require.True(t, ok2)
+	assert.Equal(t, 6, headerBytes2)
+	assert.Equal(t, []int{100, 200}, sizes2)
+
+	// 畸形：长度域与头尺寸不匹配 → 拒绝
+	_, _, ok3 := parseMPEG4GenericAUs([]byte{0x00, 0x10, 0x00}, 13, 3)
+	assert.False(t, ok3, "截断包必须拒绝")
 }
