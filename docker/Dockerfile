@@ -33,8 +33,13 @@ COPY --from=backend-builder /build/x-media-server .
 COPY --from=frontend-builder /build/dist ./web/dist
 COPY docker/config.yaml ./config.yaml
 
-RUN mkdir -p /app/data /app/logs
+RUN mkdir -p /app/data /app/logs /app/uploads && \
+    useradd -r -u 10001 -m xmedia && \
+    chown -R xmedia:xmedia /app
 
-EXPOSE 18090 8080 1935 5544
+# 非 root 运行（bind mount 的宿主目录需对 uid 10001 可写）
+USER xmedia
+
+EXPOSE 8080 1935 5544
 
 CMD ["./x-media-server", "-c", "config.yaml", "-s", "/app/web/dist"]

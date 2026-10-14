@@ -1,0 +1,30 @@
+# VCS / IDE
+.git
+.idea
+.vscode
+*.swp
+*.swo
+
+# Go 构建产物与运行时数据（不应进入构建上下文）
+server/bin/
+server/data/
+server/logs/
+server/coverage.out
+server/coverage.html
+server/uploads/
+
+# 前端依赖与产物：npm ci / 构建在容器内进行。
+# 特别是 web/node_modules —— Dockerfile 在 npm ci 之后 COPY web/，
+# 若宿主 node_modules 进入上下文会覆盖容器内安装的依赖。
+web/node_modules/
+web/dist/
+
+# 测试媒体与日志（体积大）
+test_data/
+uploads/
+*.log
+*.db
+*.sqlite
+
+# Docker 自身
+docker-compose.yml
