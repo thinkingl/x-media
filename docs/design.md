@@ -132,25 +132,14 @@ CREATE TABLE stats (
 
 | 参数 | 类型 | 必填 | 默认值 | 说明 |
 |------|------|------|--------|------|
-| url | string | 是 | - | RTMP推流地址，格式：`rtmp://host[:port]/app/stream_key` |
-| chunk_size | integer | 否 | 4096 | RTMP chunk大小（字节） |
-| reconnect | boolean | 否 | true | 断线是否自动重连 |
-| reconnect_interval_ms | integer | 否 | 5000 | 重连间隔时间（毫秒） |
-| connect_timeout_ms | integer | 否 | 10000 | 连接超时时间（毫秒） |
-| write_timeout_ms | integer | 否 | 5000 | 写数据超时时间（毫秒） |
-| tls_enable | boolean | 否 | false | 是否启用RTMPS（TLS加密） |
-| tls_cert_file | string | 否 | - | TLS证书文件路径（tls_enable为true时必填） |
-| tls_key_file | string | 否 | - | TLS密钥文件路径（tls_enable为true时必填） |
+| url | string | 是 | - | RTMP推流地址，格式：`rtmp://host[:port]/app/stream_key`（唯一生效字段） |
+
+固定行为（当前版本无独立配置项）：chunk 大小协商为 4096；连接/写超时 5s；
+连接或发送失败自动关闭重建并按 3s 退避重连（限频日志）。RTMPS（TLS）未实现。
 
 ```json
 {
-    "url": "rtmp://live.example.com/live/stream_key",
-    "chunk_size": 4096,
-    "reconnect": true,
-    "reconnect_interval_ms": 5000,
-    "connect_timeout_ms": 10000,
-    "write_timeout_ms": 5000,
-    "tls_enable": false
+    "url": "rtmp://live.example.com/live/stream_key"
 }
 ```
 
@@ -158,94 +147,97 @@ CREATE TABLE stats (
 
 | 参数 | 类型 | 必填 | 默认值 | 说明 |
 |------|------|------|--------|------|
-| mode | string | 是 | - | 输出模式："push"（推流到远程服务器）、"server"（本地启动服务） |
-| url | string | 条件必填 | - | 推流目标地址（mode为"push"时必填），格式：`rtsp://[user:password@]host[:port]/path` |
-| addr | string | 条件必填 | ":5544" | 本地监听地址（mode为"server"时使用） |
-| transport | string | 否 | "tcp" | 传输协议，可选值："tcp"（interleaved模式）、"udp" |
-| reconnect | boolean | 否 | true | 断线是否自动重连（mode为"push"时有效） |
-| reconnect_interval_ms | integer | 否 | 5000 | 重连间隔时间（毫秒） |
-| auth_enable | boolean | 否 | false | 是否启用认证（mode为"server"时有效） |
-| username | string | 否 | - | 认证用户名 |
-| password | string | 否 | - | 认证密码 |
-| tls_enable | boolean | 否 | false | 是否启用RTSPS（TLS加密） |
-| tls_cert_file | string | 否 | - | TLS证书文件路径 |
-| tls_key_file | string | 否 | - | TLS密钥文件路径 |
+| mode | string | 是 | - | 仅支持 `"server"`（本地启动 RTSP 服务）；`push` 模式未实现 |
+| addr | string（server 模式必填） | - | - | 本地监听地址，如 `":5544"` 或 `"127.0.0.1:0"`；同地址多输出共享一个 server（引用计数管理） |
+| transport | string | 否 | "auto" | 拉流端传输策略，可选值："auto"/"tcp"/"udp"/"udp-multicast" |
 
-```json
-{
-    "mode": "push",
-    "url": "rtsp://media.example.com/live/stream1",
-    "transport": "tcp",
-    "reconnect": true,
-    "reconnect_interval_ms": 5000
-}
-```
+拉流地址：`rtsp://<host><addr>/live/<output_id>`。认证/TLS 未实现。
 
 ```json
 {
     "mode": "server",
     "addr": ":5544",
-    "transport": "tcp",
-    "auth_enable": true,
-    "username": "admin",
-    "password": "password123"
+    "transport": "auto"
 }
 ```
 
 **HTTP-FLV输出配置：**
 
+HTTP-FLV 不独立监听，由主 HTTP 服务（`server.http_addr`）提供：
+`GET /live/<output_id>.flv`。
+
 | 参数 | 类型 | 必填 | 默认值 | 说明 |
 |------|------|------|--------|------|
-| addr | string | 否 | ":8080" | HTTP服务监听地址 |
-| url_pattern | string | 否 | "/" | URL路径前缀 |
-| enable_https | boolean | 否 | false | 是否启用HTTPS |
-| https_addr | string | 否 | ":4433" | HTTPS监听地址 |
-| tls_cert_file | string | 否 | - | TLS证书文件路径 |
-| tls_key_file | string | 否 | - | TLS密钥文件路径 |
-| gop_num | integer | 否 | 0 | GOP缓存数量，0表示不缓存 |
-| single_gop_max_frame_num | integer | 否 | 0 | 单个GOP最大帧数，0表示不限制 |
-| cross_domain | boolean | 否 | true | 是否允许跨域访问 |
-| cors_origin | string | 否 | "*" | 允许的跨域来源 |
+| addr | string | 是 | - | 输出标识用途（校验必填）；实际流由主 HTTP 服务的 `/live/<output_id>.flv` 提供 |
+
+HTTPS/独立监听/gop_num 等高级参数未实现（固定 2MB GOP 环形缓冲）。
 
 ```json
 {
-    "addr": ":8080",
-    "url_pattern": "/live/",
-    "enable_https": false,
-    "gop_num": 2,
-    "single_gop_max_frame_num": 0,
-    "cross_domain": true,
-    "cors_origin": "*"
+    "addr": "/live/"
 }
 ```
 
+**WebRTC输出配置：**
+
+| 参数 | 类型 | 必填 | 默认值 | 说明 |
+|------|------|------|--------|------|
+| （无） | - | - | - | 无配置项；H264 视频直通，经主 HTTP 服务 `POST /live/<output_id>/whep`（WHEP 信令）提供 |
+
 ### 4.3 管道配置
 
-管道连接输入端和输出端，支持以下配置：
+管道连接输入端和输出端，支持以下配置（`POST /api/v1/pipes`）：
 
 | 参数 | 类型 | 必填 | 默认值 | 说明 |
 |------|------|------|--------|------|
 | input_id | string | 是 | - | 输入端ID |
 | output_id | string | 是 | - | 输出端ID |
-| auto_start | boolean | 否 | false | 创建后是否自动启动 |
-| buffer_size | integer | 否 | 1024 | 数据缓冲区大小（KB） |
-| restart_on_error | boolean | 否 | true | 发生错误时是否自动重启 |
-| max_restart_count | integer | 否 | 3 | 最大自动重启次数，-1表示无限重试 |
-| restart_interval_ms | integer | 否 | 5000 | 重启间隔时间（毫秒） |
+| channel_map | string(JSON) | 否 | "" | 子通道映射（`ChannelMapping[]` 的 JSON 字符串） |
+| mux_sync | boolean | 否 | false | 音视频时间戳同步标记 |
+
+约束：一个输入可接多个输出（fan-out），但一个输出只允许接一个输入
+（`(input_id, output_id)` 有数据库唯一索引兜底，重复创建返回 409）。
 
 ```json
 {
     "input_id": "input_001",
     "output_id": "output_001",
-    "auto_start": true,
-    "buffer_size": 1024,
-    "restart_on_error": true,
-    "max_restart_count": 3,
-    "restart_interval_ms": 5000
+    "channel_map": "",
+    "mux_sync": false
 }
 ```
 
+### 4.4 服务配置（config.yaml）
+
+```yaml
+server:
+  http_addr: ":8080"        # HTTP API + 前端 + /live/* 拉流
+  rtmp_addr: ":1935"        # 当前未被引擎消费（预留）
+  rtsp_addr: ":5544"        # 当前未被引擎消费（预留；RTSP 监听地址由输出配置 addr 决定）
+  api_key: "change-me"      # 管理 API 鉴权：请求头 X-API-Key；为空则拒绝所有 /api/v1/*
+  cors_origins: []          # CORS 白名单；为空则不下发跨域头（同源部署无需配置）
+
+media:
+  roots: ["./uploads", "./test_data"]  # 文件浏览接口允许访问的媒体根目录白名单
+
+database:
+  driver: "sqlite"          # 当前仅支持 sqlite
+  dsn: "./data/x-media.db"  # 启用 WAL + busy_timeout(5000)
+
+log:
+  level: "info"             # debug/info/warn/error；可通过 PUT /api/v1/logs/config 热更新
+  filename: "./logs/x-media.log"
+  max_size: 100             # 单文件 MB 上限，超出轮转
+  max_backups: 5            # 保留备份数
+  max_age: 30               # 备份保留天数
+  compress: true            # 轮转备份 gzip 压缩
+```
+
 ## 5. API 设计
+
+所有 `/api/v1/*` 管理接口需携带请求头 `X-API-Key`（值为 config.yaml 的
+`server.api_key`；为空则全部拒绝）。`/live/*`、`/uploads/*` 与前端静态
+文件豁免鉴权（播放器无法携带自定义请求头）。
 
 ### 5.1 RESTful API
 
@@ -258,6 +250,7 @@ PUT    /api/v1/inputs/:id      更新输入端
 DELETE /api/v1/inputs/:id      删除输入端
 POST   /api/v1/inputs/:id/start  启动输入端
 POST   /api/v1/inputs/:id/stop   停止输入端
+POST   /api/v1/inputs/:id/probe  探测媒体文件信息
 ```
 
 #### 输出端管理
@@ -269,6 +262,7 @@ PUT    /api/v1/outputs/:id     更新输出端
 DELETE /api/v1/outputs/:id     删除输出端
 POST   /api/v1/outputs/:id/start  启动输出端
 POST   /api/v1/outputs/:id/stop   停止输出端
+GET    /api/v1/outputs/:id/clients  当前拉流客户端列表
 ```
 
 #### 管道管理
@@ -276,6 +270,7 @@ POST   /api/v1/outputs/:id/stop   停止输出端
 POST   /api/v1/pipes           创建管道
 GET    /api/v1/pipes           获取所有管道
 GET    /api/v1/pipes/:id       获取单个管道
+PUT    /api/v1/pipes/:id       更新管道
 DELETE /api/v1/pipes/:id       删除管道
 POST   /api/v1/pipes/:id/start  启动管道
 POST   /api/v1/pipes/:id/stop   停止管道
@@ -284,57 +279,29 @@ POST   /api/v1/pipes/:id/stop   停止管道
 #### 统计信息
 ```
 GET    /api/v1/stats           获取总体统计
-GET    /api/v1/stats/inputs/:id  获取输入端统计
-GET    /api/v1/stats/outputs/:id  获取输出端统计
-GET    /api/v1/stats/pipes/:id   获取管道统计
 ```
 
 #### 日志管理
 ```
-GET    /api/v1/logs            获取日志列表
+GET    /api/v1/logs?lines=N    获取最近 N 行日志（1-1000，尾部读取）
 GET    /api/v1/logs/config     获取日志配置
-PUT    /api/v1/logs/config     更新日志配置
-GET    /api/v1/logs/stream     WebSocket日志流
+PUT    /api/v1/logs/config     更新日志配置（热生效）
 ```
 
-### 5.2 WebSocket 事件
-
-```json
-// 流状态变化
-{
-    "event": "stream.status",
-    "data": {
-        "entity_type": "input",
-        "entity_id": "xxx",
-        "status": "running",
-        "timestamp": "2024-01-01T00:00:00Z"
-    }
-}
-
-// 统计数据更新
-{
-    "event": "stats.update",
-    "data": {
-        "entity_type": "pipe",
-        "entity_id": "xxx",
-        "bytes_in": 1024000,
-        "bytes_out": 1024000,
-        "bitrate": 2000000,
-        "fps": 30
-    }
-}
-
-// 日志输出
-{
-    "event": "log",
-    "data": {
-        "level": "info",
-        "message": "Stream started",
-        "timestamp": "2024-01-01T00:00:00Z",
-        "fields": {}
-    }
-}
+#### 文件与工具
 ```
+GET    /api/v1/files/list?path=   列目录（限 media.roots 白名单内）
+POST   /api/v1/files/upload       上传媒体文件（扩展名白名单，≤2GiB）
+POST   /api/v1/tools/test-stream  探测流地址可达性
+```
+
+> 历史契约中的 `GET /stats/{inputs,outputs,pipes}/:id` 与
+> `GET /logs/stream` 未实现，已从契约中移除。
+
+### 5.2 实时事件
+
+WebSocket 事件推送（`stream.status`/`stats.update`/`log`）未实现；
+前端通过轮询 `GET /api/v1/stats` 与 `GET /api/v1/logs` 获取状态。
 
 ## 6. 项目结构与旧章节作废声明
 

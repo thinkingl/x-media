@@ -17,7 +17,7 @@ X-Media: Go media streaming platform with Vue3 web UI. Supports MP4/RTSP inputs,
   - `pkg/` — shared utilities (logger with lumberjack rotation, errors, utils)
   - `test/fixtures/test.mp4` — test media file
 - `web/` — Vue3 + TypeScript frontend (Vite, Element Plus, Pinia)
-  - `src/views/` — Dashboard, Inputs, Outputs, Pipes, Logs
+  - `src/views/` — Dashboard, Inputs, Outputs, Pipes, Logs, Test
   - `src/stores/` — Pinia stores
   - `src/api/` — Axios API layer
 - `docker/` — Dockerfile (multi-stage: Go backend + Node frontend) + config.yaml
@@ -32,6 +32,8 @@ X-Media: Go media streaming platform with Vue3 web UI. Supports MP4/RTSP inputs,
 make build         # 纯 Go，无需 CGO（SQLite 用纯 Go 实现）
 make test          # go test ./... -v -count=1
 make test-coverage # generates coverage.out and coverage.html
+make e2e           # 基准参照式端到端测试（需 ffmpeg，见 docs/e2e-reference-test.md）
+make e2e-gen       # 重新生成基准参照 fixture（test/fixtures/ref_*）
 make lint          # go vet ./...
 make fmt           # go fmt ./...
 make deps          # go mod tidy
@@ -42,7 +44,7 @@ make run           # build + start with -c config.yaml
 
 ```bash
 npm install
-npm run dev        # dev server on :18091, proxies /api and /uploads to :18090
+npm run dev        # dev server on :18091, proxies /api, /uploads and /live to :18090
 npm run build      # vue-tsc + vite build, outputs to dist/
 ```
 
@@ -74,8 +76,9 @@ docker-compose down
 - Services take repo + engine dependencies via constructor
 - Config loaded from YAML via `-c` flag (default: `config.yaml`)
 - Frontend served as static files via `-s` flag (SPA fallback via `NoRoute`)
-- CORS middleware allows all origins (`*`)
+- CORS 默认关闭（同源部署无需），白名单经 `server.cors_origins` 配置
 - Unified JSON response: `{"code": N, "message": "...", "data": ...}`
+- 管理 API (`/api/v1/*`) 需要请求头 `X-API-Key`（config.yaml `server.api_key`，为空则全部拒绝）；dev key 见 `server/config_dev.yaml` 与 `web/.env.development`（两者需一致）；`/live/*`、`/uploads/*`、静态文件豁免
 
 ## Environment quirks
 
