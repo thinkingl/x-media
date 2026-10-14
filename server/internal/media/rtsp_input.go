@@ -77,6 +77,18 @@ func (r *RTSPInput) Start(ctx context.Context) error {
 		r.mu.Unlock()
 		return nil
 	}
+	// readLoop 仍在运行（断流重连中，status=Error）：不得重复启动第二个
+	// readLoop —— 两个循环共享 r.client/decoders，会造成双会话、帧重复
+	// 分发甚至 PacketPTS 跨 client 的 nil 解引用。重连成功后由循环自行
+	// 置回 Running。
+	if r.done != nil {
+		select {
+		case <-r.done: // 上一个 readLoop 已退出，允许重新 Start
+		default:
+			r.mu.Unlock()
+			return nil
+		}
+	}
 
 	u, err := base.ParseURL(r.url)
 	if err != nil {
