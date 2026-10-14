@@ -26,7 +26,8 @@ type Source interface {
 	// SetFrameHandler 注册帧回调（Pipe 会注册自己作为转发入口）。
 	SetFrameHandler(h FrameHandler)
 	// AddFrameHandler 追加帧回调，支持多 sink 订阅同一 source（fan-out）。
-	AddFrameHandler(h FrameHandler)
+	// 返回 remove 闭包（幂等）：管道 Stop 时解绑，避免闭包经 sink 钉住旧资源。
+	AddFrameHandler(h FrameHandler) (remove func())
 }
 
 // FrameHandler 帧回调。数据面：Source → Pipe → Sink，单向高吞吐。

@@ -23,6 +23,7 @@ type DefaultPipe struct {
 	started bool
 	ctx     context.Context
 	cancel  context.CancelFunc
+	unbind  func() // source 帧回调解绑闭包（mu 保护）
 
 	inFlight chan *Frame // 待写入 sink 的缓冲队列
 	stopped  atomic.Bool
@@ -48,10 +49,22 @@ func (p *DefaultPipe) Bind(source Source, sink Sink) error {
 	}
 	p.source = source
 	p.sink = sink
-	source.AddFrameHandler(func(f *Frame) {
+	p.unbind = source.AddFrameHandler(func(f *Frame) {
 		p.routeFrame(f)
 	})
 	return nil
+}
+
+// Unbind 解除对 source 的帧订阅（幂等）：否则闭包经 sink 钉住旧资源，
+// 反复停启管道会造成泄漏。
+func (p *DefaultPipe) Unbind() {
+	p.mu.Lock()
+	unbind := p.unbind
+	p.unbind = nil
+	p.mu.Unlock()
+	if unbind != nil {
+		unbind()
+	}
 }
 
 // routeFrame 数据面入口：尽量入队，队列满则丢帧并计数。
@@ -162,6 +175,7 @@ func (p *DefaultPipe) Stop() error {
 		p.cancel()
 	}
 	p.mu.Unlock()
+	p.Unbind() // 解除帧订阅，避免闭包钉住 sink 造成泄漏
 	logger.Infof("pipe stopped: %s -> %s (dropped=%d written=%d)", p.source.ID(), p.sink.ID(), p.dropped.Load(), p.written.Load())
 	return nil
 }

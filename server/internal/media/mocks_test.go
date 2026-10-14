@@ -13,14 +13,14 @@ import (
 type MockSource struct {
 	mu sync.Mutex
 
-	id      string
-	status  StreamStatus
-	streams []StreamInfo
-	handler FrameHandler
+	id       string
+	status   StreamStatus
+	streams  []StreamInfo
+	handler  FrameHandler
 	handlers []FrameHandler
 
-	started  bool
-	stopped  bool
+	started        bool
+	stopped        bool
 	subscribeCalls int
 	subscribed     []uint8
 	signals        []*Signal
@@ -144,10 +144,33 @@ func (m *MockSource) SetFrameHandler(h FrameHandler) {
 	m.handler = h
 }
 
-func (m *MockSource) AddFrameHandler(h FrameHandler) {
+func (m *MockSource) AddFrameHandler(h FrameHandler) func() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.handlers = append(m.handlers, h)
+	idx := len(m.handlers) - 1
+	removed := false // 仅在 m.mu 写锁下访问
+	return func() {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		if !removed {
+			removed = true
+			m.handlers[idx] = nil
+		}
+	}
+}
+
+// HandlerCount 返回非空帧回调数量（测试用）。
+func (m *MockSource) HandlerCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	n := 0
+	for _, h := range m.handlers {
+		if h != nil {
+			n++
+		}
+	}
+	return n
 }
 
 // Push 主动向所有已注册帧回调推送一帧（模拟 demux 产出）。
@@ -160,7 +183,9 @@ func (m *MockSource) Push(f *Frame) {
 	hs = append(hs, m.handlers...)
 	m.mu.Unlock()
 	for _, h := range hs {
-		h(f)
+		if h != nil {
+			h(f)
+		}
 	}
 }
 
@@ -183,10 +208,10 @@ func (m *MockSource) PushEvent(sig *Signal) {
 type MockSink struct {
 	mu sync.Mutex
 
-	id     string
-	status StreamStatus
-	frames []*Frame
-	events []*Signal
+	id      string
+	status  StreamStatus
+	frames  []*Frame
+	events  []*Signal
 	streams []StreamInfo
 	started bool
 	stopped bool

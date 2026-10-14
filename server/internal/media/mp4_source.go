@@ -999,23 +999,40 @@ func (m *MP4Source) SetFrameHandler(h FrameHandler) {
 	m.handler = h
 }
 
-func (m *MP4Source) AddFrameHandler(h FrameHandler) {
+func (m *MP4Source) AddFrameHandler(h FrameHandler) func() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.handlers = append(m.handlers, h)
+	idx := len(m.handlers) - 1
+	// FrameHandler 是 func，不可比较，无法按值查找：注册时记录下标，
+	// 移除时置 nil（emit 跳过），下标保持稳定。
+	removed := false // 仅在 m.mu 写锁下访问
+	return func() {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		if !removed {
+			removed = true
+			m.handlers[idx] = nil
+		}
+	}
 }
 
 // emit 将帧派发给所有已注册的帧回调。
 func (m *MP4Source) emit(f *Frame) {
 	m.mu.RLock()
-	hs := m.handlers
+	// 拷贝快照：remove 会在写锁下将对应槽位置 nil，锁外直接迭代共享
+	// 切片会与之竞争。
+	hs := make([]FrameHandler, len(m.handlers))
+	copy(hs, m.handlers)
 	single := m.handler
 	m.mu.RUnlock()
 	if single != nil {
 		single(f)
 	}
 	for _, h := range hs {
-		h(f)
+		if h != nil { // 已 remove
+			h(f)
+		}
 	}
 }
 

@@ -394,7 +394,8 @@ func (r *RTSPInput) handleVideoPacket(medi *description.Media, f *format.H264, p
 	r.mu.RLock()
 	dec := r.decoders[channelID]
 	handler := r.handler
-	handlers := r.handlers
+	handlers := make([]FrameHandler, len(r.handlers))
+	copy(handlers, r.handlers)
 	r.mu.RUnlock()
 	if dec == nil {
 		return
@@ -447,7 +448,9 @@ func (r *RTSPInput) handleVideoPacket(medi *description.Media, f *format.H264, p
 		handler(frame)
 	}
 	for _, h := range handlers {
-		h(frame)
+		if h != nil { // 已 remove
+			h(frame)
+		}
 	}
 }
 
@@ -459,7 +462,8 @@ func (r *RTSPInput) handleVideoPacket(medi *description.Media, f *format.H264, p
 func (r *RTSPInput) handleAudioPacket(medi *description.Media, f *format.MPEG4Audio, pkt *rtp.Packet, channelID uint8) {
 	r.mu.RLock()
 	handler := r.handler
-	handlers := r.handlers
+	handlers := make([]FrameHandler, len(r.handlers))
+	copy(handlers, r.handlers)
 	r.mu.RUnlock()
 
 	sizeLength := f.SizeLength
@@ -516,7 +520,9 @@ func (r *RTSPInput) handleAudioPacket(medi *description.Media, f *format.MPEG4Au
 			handler(frame)
 		}
 		for _, h := range handlers {
-			h(frame)
+			if h != nil { // 已 remove
+				h(frame)
+			}
 		}
 		// 同一包内多 AU 视为连续 AAC 帧（每帧 1024 采样）
 		pts += aacSamplesPerFrame
@@ -602,8 +608,19 @@ func (r *RTSPInput) SetFrameHandler(h FrameHandler) {
 	r.handler = h
 }
 
-func (r *RTSPInput) AddFrameHandler(h FrameHandler) {
+func (r *RTSPInput) AddFrameHandler(h FrameHandler) func() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.handlers = append(r.handlers, h)
+	idx := len(r.handlers) - 1
+	// FrameHandler 不可比较：按下标移除（置 nil，分发时跳过）
+	removed := false // 仅在 r.mu 写锁下访问
+	return func() {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		if !removed {
+			removed = true
+			r.handlers[idx] = nil
+		}
+	}
 }
