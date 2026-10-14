@@ -608,6 +608,9 @@ func (r *RTSPSink) Stop() error {
 			delete(r.handler.paths, path)
 		}
 		r.handler.mutex.Unlock()
+		// 释放 server 引用：最后一个 sink Stop 时关闭监听与 UDP 端口
+		r.handler = nil
+		globalRTSPManager.Release(r.addr)
 	}
 	logger.Infof("RTSP sink stopped: %s", r.id)
 	return nil

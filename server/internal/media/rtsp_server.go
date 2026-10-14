@@ -286,6 +286,9 @@ type RTSPServerManager struct {
 	mu      sync.RWMutex
 	servers map[string]*gortsplib.Server
 	handler map[string]*RTSPServerHandler
+	// refs 每个 addr 的引用计数（共享该 server 的 sink 数）：
+	// GetOrCreate 增加，Release 减少，归零时关闭并释放监听/UDP 端口。
+	refs map[string]int
 
 	// UDP/multicast transport 配置（可选；不配置则仅支持 TCP）
 	udpRTPAddr    string
@@ -301,6 +304,7 @@ type RTSPServerManager struct {
 var globalRTSPManager = &RTSPServerManager{
 	servers: make(map[string]*gortsplib.Server),
 	handler: make(map[string]*RTSPServerHandler),
+	refs:    make(map[string]int),
 }
 
 // ConfigureUDP 配置 RTSP 的 UDP/multicast transport 支持。
@@ -332,6 +336,7 @@ func (m *RTSPServerManager) GetOrCreate(addr string) (*RTSPServerHandler, error)
 	defer m.mu.Unlock()
 
 	if h, ok := m.handler[addr]; ok {
+		m.refs[addr]++
 		return h, nil
 	}
 
@@ -368,8 +373,32 @@ func (m *RTSPServerManager) GetOrCreate(addr string) (*RTSPServerHandler, error)
 
 	m.servers[addr] = srv
 	m.handler[addr] = h
+	m.refs[addr] = 1
 	logger.Infof("RTSP server started on %s (udp=%s/%s)", addr, rtpAddr, rtcpAddr)
 	return h, nil
+}
+
+// Release 释放一个 addr 的引用；归零时关闭 server（此前生产代码从不关闭，
+// 输出反复增删/换地址会累积监听 socket 与 UDP 端口）。
+// Close 在锁外执行：它会等待活跃会话结束，持锁会阻塞整个管理器。
+func (m *RTSPServerManager) Release(addr string) {
+	m.mu.Lock()
+	n := m.refs[addr] - 1
+	if n > 0 {
+		m.refs[addr] = n
+		m.mu.Unlock()
+		return
+	}
+	delete(m.refs, addr)
+	srv := m.servers[addr]
+	delete(m.servers, addr)
+	delete(m.handler, addr)
+	m.mu.Unlock()
+
+	if srv != nil {
+		srv.Close()
+		logger.Infof("RTSP server released on %s", addr)
+	}
 }
 
 // findFreeUDPPair 探测一对连续的空闲 UDP 端口（RTP 偶数、RTCP = RTP+1），
@@ -417,6 +446,7 @@ func (m *RTSPServerManager) StopAll() {
 	}
 	m.servers = make(map[string]*gortsplib.Server)
 	m.handler = make(map[string]*RTSPServerHandler)
+	m.refs = make(map[string]int)
 }
 
 func trimLeadingSlash(s string) string {

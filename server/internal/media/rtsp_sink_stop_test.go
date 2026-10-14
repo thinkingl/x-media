@@ -22,11 +22,13 @@ func TestRTSPSinkStopRemovesPath(t *testing.T) {
 	sink.handler.mutex.RUnlock()
 	require.True(t, ok, "Configure 后 path 应注册")
 
+	// Stop 前捕获 handler（Stop 会置 sink.handler=nil 并释放 server 引用）
+	handler := sink.handler
 	require.NoError(t, sink.Stop())
 
-	sink.handler.mutex.RLock()
-	_, ok = sink.handler.paths[path]
-	sink.handler.mutex.RUnlock()
+	handler.mutex.RLock()
+	_, ok = handler.paths[path]
+	handler.mutex.RUnlock()
 	require.False(t, ok, "Stop 后 path 必须删除（残留钉住 sink 且让 DESCRIBE 返回 200+空 stream）")
 }
 
@@ -37,9 +39,10 @@ func TestRTSPDescribeAfterStop404(t *testing.T) {
 	sink := newRTSPTestSink(t)
 	require.NoError(t, sink.Configure(flvTestStreams()))
 	path := "live/" + sink.ID()
+	handler := sink.handler // Stop 会置 sink.handler=nil
 	require.NoError(t, sink.Stop())
 
-	resp, stream, err := sink.handler.OnDescribe(&gortsplib.ServerHandlerOnDescribeCtx{Path: path})
+	resp, stream, err := handler.OnDescribe(&gortsplib.ServerHandlerOnDescribeCtx{Path: path})
 	require.NoError(t, err)
 	assert.Equal(t, base.StatusNotFound, resp.StatusCode, "Stop 后 DESCRIBE 必须 404（旧代码 200+nil stream）")
 	assert.Nil(t, stream)
