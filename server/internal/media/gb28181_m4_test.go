@@ -131,6 +131,29 @@ func TestGB28181Sink_TCPRoleOverride(t *testing.T) {
 	assert.True(t, bytes.Contains(assemblePS(pkts), []byte{0x00, 0x00, 0x01, 0xE0}), "视频 PES")
 }
 
+// TestGB28181Sink_TCPLengthFraming KDM/海康类平台要求 TCP 媒体用 RFC 4571 长度前缀
+// 组帧（[2字节大端长度][RTP]），而非国标 Annex C.2 的 $-组帧——实测对照：平台自有
+// IPC 的 TCP 流以长度前缀发送（`0574 8060...`），`$-帧`被平台全量判为
+// "wrong tcp rtp data length"。tcp_framing=length 时设备必须切换组帧。
+func TestGB28181Sink_TCPLengthFraming(t *testing.T) {
+	sink, platform := startGB28181StreamSink(t, func(c *GB28181Config) {
+		c.TCPFraming = "length"
+	})
+	require.NoError(t, sink.Configure(gbStreamsH264AAC()))
+	platform.setTCPFraming("length")
+
+	const ssrc = uint32(0x778899AA)
+	platform.inviteTCPPlatformListens(t, ssrc, "passive", "active")
+	stop := startGB28181SyntheticWriter(sink)
+	defer stop()
+
+	pkts := platform.waitRTP(t, 20, 5*time.Second)
+	assertRTPBasics(t, pkts, ssrc)
+	ps := assemblePS(pkts)
+	assert.True(t, bytes.Contains(ps, []byte{0x00, 0x00, 0x01, 0xBA}), "PS pack header（长度前缀路径）")
+	assert.True(t, bytes.Contains(ps, []byte{0x00, 0x00, 0x01, 0x65}), "IDR（长度前缀路径）")
+}
+
 // TestGB28181Sink_RTPMTU rtp_mtu=1200：所有 RTP 负载 ≤1200（老旧平台/隧道场景）。
 func TestGB28181Sink_RTPMTU(t *testing.T) {
 	sink, platform := startGB28181StreamSink(t, func(c *GB28181Config) {

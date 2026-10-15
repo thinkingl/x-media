@@ -219,6 +219,16 @@ func (s *Server) SetMediaMTU(mtu int) {
 	s.mu.Unlock()
 }
 
+// SetMediaTCPFraming selects the RTP-over-TCP framing for live media:
+// "dollar" (default, GB/T 28181 Annex C.2) or "length" (RFC 4571 length
+// prefix, required by KDM/Hikvision-class platforms).
+// Local patch: x-media GB28181 sink design §5.9 (KDM 实测).
+func (s *Server) SetMediaTCPFraming(framing string) {
+	s.mu.Lock()
+	s.cfg.TCPFraming = framing
+	s.mu.Unlock()
+}
+
 // LiveSessionInfo describes the current INVITE media session (local patch,
 // x-media design §9: output clients view).
 type LiveSessionInfo struct {
@@ -1770,10 +1780,12 @@ func (s *Server) handleInvite(ctx context.Context, msg SipMessage, fromAddr net.
 	// Spawn goroutine draining AU + PS mux + RTP push
 	go func() {
 		defer mediaCancel()
-		// Read the media options under s.mu (the host may push codecs/MTU
-		// via SetMediaCodecs/SetMediaMTU after Start — local patch, §5.7/§5.9).
+		// Read the media options under s.mu (the host may push codecs/MTU/
+		// TCP framing via SetMediaCodecs/SetMediaMTU/SetMediaTCPFraming
+		// after Start — local patch, §5.7/§5.9).
 		s.mu.Lock()
 		videoCodec, audioCodec, mtu := s.cfg.VideoCodec, s.cfg.AudioCodec, s.cfg.RTPMTU
+		tcpFraming := s.cfg.TCPFraming
 		s.mu.Unlock()
 
 		// Passive answer: wait for the platform's dial before streaming;
@@ -1789,6 +1801,7 @@ func (s *Server) handleInvite(ctx context.Context, msg SipMessage, fromAddr net.
 		pusher := NewRtpPusher(mediaConn, rtpDest)
 		pusher.SetMetricsHooks(s.metrics)
 		pusher.SetMTU(mtu)
+		pusher.SetTCPFraming(tcpFraming)
 		if tcpConn != nil {
 			pusher.SetTCPConn(tcpConn)
 		}

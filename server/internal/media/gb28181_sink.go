@@ -31,8 +31,11 @@ type GB28181Config struct {
 	SIPDomain    string // SIP 域（必填）
 	Password     string // 摘要认证密码（必填）
 
-	Transport  string // 信令传输 udp（默认）/tcp/tcp-out
-	TCPRole    string // TCP 媒体角色 auto（默认）/active/passive，M4 生效（§5.9）
+	Transport string // 信令传输 udp（默认）/tcp/tcp-out
+	TCPRole   string // TCP 媒体角色 auto（默认）/active/passive，M4 生效（§5.9）
+	// TCPFraming RTP-over-TCP 组帧："dollar"（默认，国标 Annex C.2 $-组帧）/
+	// "length"（RFC 4571 长度前缀；科达 KDM/海康类平台实测期望，§5.9）。
+	TCPFraming string
 	RTPMTU     int    // RTP 负载上限（默认 1400），M3 生效
 	VideoCodec string // auto（默认，跟随源）/h264（遇 H265 源拒绝启动）
 
@@ -105,6 +108,14 @@ func (c *GB28181Config) applyDefaultsAndValidate() error {
 	default:
 		return fmt.Errorf("gb28181: TCP 角色（tcp_role）%q 无效（可选 auto/active/passive）", c.TCPRole)
 	}
+	if c.TCPFraming == "" {
+		c.TCPFraming = "dollar"
+	}
+	switch c.TCPFraming {
+	case "dollar", "length":
+	default:
+		return fmt.Errorf("gb28181: TCP 组帧（tcp_framing）%q 无效（可选 dollar/length）", c.TCPFraming)
+	}
 	if c.VideoCodec == "" {
 		c.VideoCodec = "auto"
 	}
@@ -162,6 +173,7 @@ func (c *GB28181Config) toDeviceConfig() device.Config {
 		HeartbeatTimeoutCount: c.HeartbeatTimeoutCount,
 		Transport:             c.Transport,
 		TCPRole:               c.TCPRole,
+		TCPFraming:            c.TCPFraming,
 		RTPMTU:                c.RTPMTU,
 		LocalIP:               c.LocalIP,
 		MediaTCPPort:          c.MediaTCPPort,
@@ -237,6 +249,7 @@ func (s *GB28181Sink) Start(ctx context.Context) error {
 	server.SetControlHandlers(s.controlCallbacks())
 	server.SetConfigHandlers(s.configCallbacks())
 	server.SetMediaMTU(s.cfg.RTPMTU)
+	server.SetMediaTCPFraming(s.cfg.TCPFraming)
 
 	ctx, cancel := context.WithCancel(ctx)
 	s.server = server
@@ -319,6 +332,7 @@ func (s *GB28181Sink) Configure(streams []StreamInfo) error {
 		video, audio := s.pipe.videoCodecName()
 		server.SetMediaCodecs(video, audio)
 		server.SetMediaMTU(s.cfg.RTPMTU)
+		server.SetMediaTCPFraming(s.cfg.TCPFraming)
 	}
 	return nil
 }

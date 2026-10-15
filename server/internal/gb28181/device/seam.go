@@ -94,6 +94,11 @@ type Config struct {
 	// "active" (device dials the platform), "passive" (device listens).
 	// Local patch (§5.9: vendor implementations that invert setup).
 	TCPRole string `yaml:"tcp_role,omitempty"`
+	// TCPFraming selects the RTP-over-TCP framing: "" / "dollar" (GB/T
+	// 28181 Annex C.2, [0x24][channel][len16][RTP]) or "length"
+	// (RFC 4571, [len16][RTP]) — the latter is required by
+	// KDM/Hikvision-class platforms. Local patch (§5.9, KDM 实测).
+	TCPFraming string `yaml:"tcp_framing,omitempty"`
 	// LocalIP overrides the advertised contact address (Contact headers).
 	// Empty = auto: route-probed local IP, upgraded to the NAT-external
 	// address learned from response Via received/rport when available.

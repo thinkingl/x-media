@@ -150,6 +150,13 @@
                   <el-option label="被动" value="passive" />
                 </el-select>
               </el-form-item>
+              <el-form-item label="TCP 组帧">
+                <el-select v-model="gb.tcp_framing">
+                  <el-option label="$ 组帧（国标 Annex C.2）" value="dollar" />
+                  <el-option label="长度前缀（科达/海康类）" value="length" />
+                </el-select>
+                <span class="form-hint">科达 KDM 平台需选「长度前缀」</span>
+              </el-form-item>
               <el-form-item label="RTP MTU">
                 <el-input-number v-model="gb.rtp_mtu" :min="400" :max="1400" controls-position="right" />
               </el-form-item>
@@ -309,6 +316,7 @@ const gbDefaults = {
   password: '',
   transport: 'udp',
   tcp_role: 'auto',
+  tcp_framing: 'dollar',
   rtp_mtu: 1400,
   video_codec: 'auto',
   local_sip_port: 0,

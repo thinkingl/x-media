@@ -60,6 +60,9 @@ type fakeSIPPlatform struct {
 	tcpAcceptedRemote string
 	// M4：最近一次 INVITE 的应答 SDP（KDM 匹配契约断言用）。
 	lastInviteAnswer string
+	// M4+：TCP 媒体组帧模式："dollar"（默认，国标 Annex C.2）或
+	// "length"（RFC 4571 长度前缀，KDM/海康类平台实测行为）。
+	tcpFraming string
 }
 
 type fakeSIPEvent struct {
@@ -405,7 +408,22 @@ func (p *fakeSIPPlatform) contactsOf(method string) []string {
 
 // readRTPFramed 读取 TCP 媒体流（GB/T 28181 附录 C.2 $-帧：
 // 0x24 | channel(1B) | 长度(2B 大端) | RTP 包），解析为 RTP 包收集。
+// setTCPFraming 设置 TCP 媒体组帧模式（"dollar" 默认 / "length"）。
+// 仅影响此后接受到的媒体连接。
+func (p *fakeSIPPlatform) setTCPFraming(mode string) {
+	p.mu.Lock()
+	p.tcpFraming = mode
+	p.mu.Unlock()
+}
+
 func (p *fakeSIPPlatform) readRTPFramed(conn net.Conn) {
+	p.mu.Lock()
+	framing := p.tcpFraming
+	p.mu.Unlock()
+	if framing == "length" {
+		p.readRTPLengthPrefixed(conn)
+		return
+	}
 	header := make([]byte, 4)
 	for {
 		if _, err := io.ReadFull(conn, header); err != nil {
@@ -415,6 +433,33 @@ func (p *fakeSIPPlatform) readRTPFramed(conn net.Conn) {
 			return // 非 $-帧，协议错误，停止读取
 		}
 		n := int(header[2])<<8 | int(header[3])
+		buf := make([]byte, n)
+		if _, err := io.ReadFull(conn, buf); err != nil {
+			return
+		}
+		var pkt rtp.Packet
+		if err := pkt.Unmarshal(buf); err != nil {
+			continue
+		}
+		pkt.Payload = append([]byte(nil), pkt.Payload...)
+		p.mu.Lock()
+		p.rtpPackets = append(p.rtpPackets, pkt)
+		p.mu.Unlock()
+	}
+}
+
+// readRTPLengthPrefixed 按 RFC 4571 长度前缀解析（[2字节大端长度][RTP]），
+// 与 KDM/海康类平台收流端一致。
+func (p *fakeSIPPlatform) readRTPLengthPrefixed(conn net.Conn) {
+	lenBuf := make([]byte, 2)
+	for {
+		if _, err := io.ReadFull(conn, lenBuf); err != nil {
+			return
+		}
+		n := int(lenBuf[0])<<8 | int(lenBuf[1])
+		if n < 12 {
+			return // 长度不足以容纳 RTP 头，协议错误
+		}
 		buf := make([]byte, n)
 		if _, err := io.ReadFull(conn, buf); err != nil {
 			return

@@ -167,6 +167,7 @@ func buildMediaOutputConfig(id, outputType string, c *model.OutputConfig) *media
 		Password:                   c.Password,
 		Transport:                  c.Transport,
 		TCPRole:                    c.TCPRole,
+		TCPFraming:                 c.TCPFraming,
 		RTPMTU:                     c.RTPMTU,
 		VideoCodec:                 c.VideoCodec,
 		LocalSIPPort:               c.LocalSIPPort,

@@ -29,6 +29,12 @@ type RtpPusher struct {
 	// Local patch (x-media §5.9).
 	mtu int
 
+	// tcpFraming selects the RTP-over-TCP framing: "" (= "dollar", GB/T
+	// 28181 Annex C.2 / RTSP-interleaved [$][channel][len16][RTP]) or
+	// "length" (RFC 4571 [len16][RTP], required by KDM/Hikvision-class
+	// platforms). Local patch (x-media §5.9, KDM 实测).
+	tcpFraming string
+
 	// metrics receives PSBytesOut for every frame handed to the wire
 	// (issue #40); nil = no-op.
 	metrics metrics.Hooks
@@ -69,6 +75,20 @@ func (rp *RtpPusher) SetTCPConn(conn *net.TCPConn) {
 	rp.tcpConn = conn
 }
 
+// SetTCPFraming selects the RTP-over-TCP framing: "dollar" (default per
+// GB/T 28181 Annex C.2) or "length" (RFC 4571 2-byte length prefix, as
+// required by KDM/Hikvision-class platforms). Call before the first
+// SendFrame. Local patch (x-media §5.9, KDM 实测).
+func (rp *RtpPusher) SetTCPFraming(framing string) {
+	rp.mu.Lock()
+	defer rp.mu.Unlock()
+	if framing == "length" {
+		rp.tcpFraming = "length"
+	} else {
+		rp.tcpFraming = "dollar"
+	}
+}
+
 // BuildRtpPacket builds an RTP packet using pion/rtp.
 // Returns the marshaled packet bytes ready for UDP transmission.
 //
@@ -96,11 +116,25 @@ func BuildRtpPacket(payload []byte, marker bool, ssrc uint32, seqNum uint16, tim
 	return buf, nil
 }
 
-// writeRTPOverTCP frames an RTP packet with GB/T 28181 $-framing.
-// RTSP-interleaved style (Annex C.2 as demuxed by GB28181 platforms and
-// ZLMediaKit/wvp-class receivers):
-// [0x24 '$'] [channel 0x00] [2-byte big-endian length] [RTP packet bytes]
-func writeRTPOverTCP(conn net.Conn, rtpPkt []byte) error {
+// writeRTPOverTCP frames an RTP packet for TCP transport.
+//
+// Two framing conventions exist in the field:
+//
+//   - "dollar" (default): GB/T 28181 Annex C.2 / RTSP-interleaved style as
+//     demuxed by GB28181 platforms and ZLMediaKit/wvp-class receivers:
+//     [0x24 '$'] [channel 0x00] [2-byte big-endian length] [RTP bytes].
+//   - "length": RFC 4571 style, [2-byte big-endian length] [RTP bytes] —
+//     required by KDM/Hikvision-class platforms (实测: KDM 收流端把
+//     $-组帧全量判为 "wrong tcp rtp data length"). Local patch, §5.9.
+func writeRTPOverTCP(conn net.Conn, rtpPkt []byte, framing string) error {
+	if framing == "length" {
+		frame := make([]byte, 2+len(rtpPkt))
+		frame[0] = byte(len(rtpPkt) >> 8)
+		frame[1] = byte(len(rtpPkt))
+		copy(frame[2:], rtpPkt)
+		_, err := conn.Write(frame)
+		return err
+	}
 	frame := make([]byte, 4+len(rtpPkt))
 	frame[0] = 0x24 // '$' framing byte
 	frame[1] = 0x00 // channel
@@ -157,9 +191,10 @@ func (rp *RtpPusher) SendFrame(psData []byte, isKeyFrame bool, pts time.Time, ss
 			return fmt.Errorf("failed to build RTP packet for fragment %d: %w", fragmentIndex, err)
 		}
 
-		// Send via UDP or TCP (with $-framing for TCP per GB/T 28181 Annex C.2)
+		// Send via UDP or TCP (framing per configuration: $-framing default,
+		// RFC 4571 length prefix for KDM/Hikvision-class platforms)
 		if rp.tcpConn != nil {
-			if err := writeRTPOverTCP(rp.tcpConn, rtpBuf); err != nil {
+			if err := writeRTPOverTCP(rp.tcpConn, rtpBuf, rp.tcpFraming); err != nil {
 				return fmt.Errorf("failed to send RTP packet fragment %d over TCP: %w", fragmentIndex, err)
 			}
 		} else {

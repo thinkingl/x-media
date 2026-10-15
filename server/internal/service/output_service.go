@@ -281,6 +281,11 @@ func validateGB28181Config(c *model.OutputConfig) error {
 	default:
 		return errors.NewValidationError("TCP 角色（tcp_role）无效(可选: auto/active/passive)")
 	}
+	switch c.TCPFraming {
+	case "", "dollar", "length":
+	default:
+		return errors.NewValidationError("TCP 组帧（tcp_framing）无效(可选: dollar/length)")
+	}
 	switch c.VideoCodec {
 	case "", "auto", "h264":
 	default:

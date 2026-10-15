@@ -54,6 +54,7 @@ type OutputConfig struct {
 	ChannelID    string `json:"channel_id,omitempty"`
 	SIPDomain    string `json:"sip_domain,omitempty"`
 	TCPRole      string `json:"tcp_role,omitempty"`
+	TCPFraming   string `json:"tcp_framing,omitempty"`
 	RTPMTU       int    `json:"rtp_mtu,omitempty"`
 	VideoCodec   string `json:"video_codec,omitempty"`
 	LocalSIPPort int    `json:"local_sip_port,omitempty"`

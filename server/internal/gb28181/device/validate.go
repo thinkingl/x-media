@@ -102,6 +102,12 @@ func (c Config) Validate() error {
 	if c.MediaTCPPort < 0 || c.MediaTCPPort > 65535 {
 		return fmt.Errorf("device.Config.MediaTCPPort %d out of range 0-65535", c.MediaTCPPort)
 	}
+	// TCPFraming (local patch, x-media §5.9): "", "dollar" or "length".
+	switch c.TCPFraming {
+	case "", "dollar", "length":
+	default:
+		return fmt.Errorf("device.Config.TCPFraming %q invalid (want \"dollar\" or \"length\")", c.TCPFraming)
+	}
 	return nil
 }
 
