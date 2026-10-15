@@ -222,14 +222,7 @@ func (s *PipeService) startPipe(pipe *model.Pipe) error {
 		return errors.NewValidationError("输出端配置格式错误")
 	}
 
-	outputMediaConfig := &media.OutputConfig{
-		ID:        output.ID,
-		Type:      output.Type,
-		URL:       outputConfig.URL,
-		Addr:      outputConfig.Addr,
-		Mode:      outputConfig.Mode,
-		Transport: outputConfig.Transport,
-	}
+	outputMediaConfig := buildMediaOutputConfig(output.ID, output.Type, &outputConfig)
 
 	if _, err := s.engine.CreateOutput(outputMediaConfig); err != nil {
 		if err != media.ErrUnsupportedType {

@@ -117,15 +117,7 @@ func startOutputOnly(engine media.Engine, repo repository.OutputRepository, id s
 	if err := json.Unmarshal([]byte(output.Config), &config); err != nil {
 		return errors.NewValidationError("配置格式错误")
 	}
-	outputConfig := &media.OutputConfig{
-		ID:        output.ID,
-		Type:      output.Type,
-		URL:       config.URL,
-		Addr:      config.Addr,
-		Mode:      config.Mode,
-		Transport: config.Transport,
-	}
-	mo, err := engine.CreateOutput(outputConfig)
+	mo, err := engine.CreateOutput(buildMediaOutputConfig(output.ID, output.Type, &config))
 	if err != nil {
 		return err
 	}
@@ -133,4 +125,64 @@ func startOutputOnly(engine media.Engine, repo repository.OutputRepository, id s
 		return err
 	}
 	return repo.UpdateStatus(id, model.OutputStatusRunning)
+}
+
+// buildMediaOutputConfig 将 outputs 行（JSON 配置）映射为媒体引擎输出配置。
+// GB28181 段在此处集中映射（含布尔默认值：audio_enable/gop_replay 默认 true）。
+func buildMediaOutputConfig(id, outputType string, c *model.OutputConfig) *media.OutputConfig {
+	moc := &media.OutputConfig{
+		ID:        id,
+		Type:      outputType,
+		URL:       c.URL,
+		Addr:      c.Addr,
+		Mode:      c.Mode,
+		Transport: c.Transport,
+	}
+	if outputType != model.OutputTypeGB28181 {
+		return moc
+	}
+	audioEnable := true
+	if c.AudioEnable != nil {
+		audioEnable = *c.AudioEnable
+	}
+	gopReplay := true
+	if c.GOPReplay != nil {
+		gopReplay = *c.GOPReplay
+	}
+	rejectUnimplemented := false
+	if c.ControlRejectUnimplemented != nil {
+		rejectUnimplemented = *c.ControlRejectUnimplemented
+	}
+	teleBootRestart := false
+	if c.TeleBootRestart != nil {
+		teleBootRestart = *c.TeleBootRestart
+	}
+	moc.GB28181 = &media.GB28181Config{
+		PlatformIP:                 c.PlatformIP,
+		PlatformPort:               c.PlatformPort,
+		PlatformID:                 c.PlatformID,
+		DeviceID:                   c.DeviceID,
+		ChannelID:                  c.ChannelID,
+		SIPDomain:                  c.SIPDomain,
+		Password:                   c.Password,
+		Transport:                  c.Transport,
+		TCPRole:                    c.TCPRole,
+		RTPMTU:                     c.RTPMTU,
+		VideoCodec:                 c.VideoCodec,
+		LocalSIPPort:               c.LocalSIPPort,
+		LocalIP:                    c.LocalIP,
+		RegisterInterval:           c.RegisterInterval,
+		HeartbeatInterval:          c.HeartbeatInterval,
+		HeartbeatTimeoutCount:      c.HeartbeatTimeoutCount,
+		ProtocolVersion:            c.ProtocolVersion,
+		AudioEnable:                audioEnable,
+		DeviceName:                 c.DeviceName,
+		Manufacturer:               c.Manufacturer,
+		DeviceModel:                c.DeviceModel,
+		Firmware:                   c.Firmware,
+		GOPReplay:                  gopReplay,
+		TeleBootRestart:            teleBootRestart,
+		ControlRejectUnimplemented: rejectUnimplemented,
+	}
+	return moc
 }

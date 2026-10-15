@@ -3,6 +3,8 @@ package service
 import (
 	"encoding/json"
 	"fmt"
+	"regexp"
+	"strings"
 
 	"github.com/x-media/x-media-server/internal/media"
 	"github.com/x-media/x-media-server/internal/model"
@@ -191,6 +193,7 @@ func isValidOutputType(outputType string) bool {
 		model.OutputTypeHTTPFLV: true,
 		model.OutputTypeHLS:     true,
 		model.OutputTypeWebRTC:  true,
+		model.OutputTypeGB28181: true,
 	}
 	return validTypes[outputType]
 }
@@ -233,7 +236,75 @@ func validateOutputConfig(outputType string, configStr string) error {
 		if config.Addr == "" {
 			return errors.NewValidationError("HTTP-FLV地址不能为空")
 		}
+	case model.OutputTypeGB28181:
+		if err := validateGB28181Config(&config); err != nil {
+			return err
+		}
 	}
 
+	return nil
+}
+
+// gb28181IDPattern 国标编码：20 位数字。
+var gb28181IDPattern = regexp.MustCompile(`^\d{20}$`)
+
+// validateGB28181Config 校验 GB28181 输出配置（§7.1 校验规则）。
+func validateGB28181Config(c *model.OutputConfig) error {
+	if strings.TrimSpace(c.PlatformIP) == "" {
+		return errors.NewValidationError("平台 SIP 地址（platform_ip）不能为空")
+	}
+	if c.PlatformPort < 1 || c.PlatformPort > 65535 {
+		return errors.NewValidationError("平台 SIP 端口（platform_port）需在 1~65535")
+	}
+	if c.PlatformID != "" && !gb28181IDPattern.MatchString(c.PlatformID) {
+		return errors.NewValidationError("平台服务 ID（platform_id）需为 20 位数字")
+	}
+	if !gb28181IDPattern.MatchString(c.DeviceID) {
+		return errors.NewValidationError("设备 ID（device_id）需为 20 位数字")
+	}
+	if c.ChannelID != "" && !gb28181IDPattern.MatchString(c.ChannelID) {
+		return errors.NewValidationError("通道 ID（channel_id）需为 20 位数字")
+	}
+	if strings.TrimSpace(c.SIPDomain) == "" {
+		return errors.NewValidationError("SIP 域（sip_domain）不能为空")
+	}
+	if c.Password == "" {
+		return errors.NewValidationError("SIP 密码（password）不能为空")
+	}
+	switch c.Transport {
+	case "", "udp", "tcp", "tcp-out":
+	default:
+		return errors.NewValidationError("信令传输（transport）无效(可选: udp/tcp/tcp-out)")
+	}
+	switch c.TCPRole {
+	case "", "auto", "active", "passive":
+	default:
+		return errors.NewValidationError("TCP 角色（tcp_role）无效(可选: auto/active/passive)")
+	}
+	switch c.VideoCodec {
+	case "", "auto", "h264":
+	default:
+		return errors.NewValidationError("视频编码限制（video_codec）无效(可选: auto/h264)")
+	}
+	if c.RTPMTU != 0 && (c.RTPMTU < 400 || c.RTPMTU > 1400) {
+		return errors.NewValidationError("RTP MTU（rtp_mtu）需在 400~1400")
+	}
+	if c.LocalSIPPort != 0 && (c.LocalSIPPort < 1 || c.LocalSIPPort > 65535) {
+		return errors.NewValidationError("本地 SIP 端口（local_sip_port）需在 1~65535（0=内核分配）")
+	}
+	if c.RegisterInterval != 0 && (c.RegisterInterval < 1 || c.RegisterInterval > 86400) {
+		return errors.NewValidationError("注册周期（register_interval）需在 1~86400 秒")
+	}
+	if c.HeartbeatInterval != 0 && (c.HeartbeatInterval < 1 || c.HeartbeatInterval > 3600) {
+		return errors.NewValidationError("心跳周期（heartbeat_interval）需在 1~3600 秒")
+	}
+	if c.HeartbeatTimeoutCount != 0 && (c.HeartbeatTimeoutCount < 1 || c.HeartbeatTimeoutCount > 10) {
+		return errors.NewValidationError("心跳超时次数（heartbeat_timeout_count）需在 1~10")
+	}
+	switch c.ProtocolVersion {
+	case "", "2.0", "3.0":
+	default:
+		return errors.NewValidationError("protocol_version 无效(可选: 2.0/3.0)")
+	}
 	return nil
 }

@@ -42,6 +42,8 @@ type OutputConfig struct {
 	Addr      string
 	Mode      string // push/server
 	Transport string
+	// GB28181 GB28181 输出段（Type=gb28181 时必填）。
+	GB28181 *GB28181Config
 }
 
 // Engine 媒体引擎接口：服务层依赖的媒体能力子集。

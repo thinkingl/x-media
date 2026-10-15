@@ -10,7 +10,7 @@
 
 1. **技术选型：方案 A+**——内置（vendor）`gb28181-go` 的 `device`/`manscdp`/`metrics`/`psmux` 四个包；信令沿用官方实现，媒体层切换为 `psmux`（§6.2、§8）。不引入外部 GB28181 模块依赖。
 2. **一期媒体范围：H.264/H.265 视频 + AAC 音频**，PS 封装；AAC 直封（ADTS），无需转码（§1.2、§5.6）。
-3. **Go 1.26**（`server/go.mod` 与 Docker builder 镜像随 M1 升级，本机已就绪）。
+3. **Go 版本【M1 实施修订】**：内置（vendor）后上游模块的 `go 1.26` 约束消失（实测内置代码在 `go 1.25.0` 语言级下编译通过），且内网 Docker registry（172.16.240.100:5001）暂无 `golang:1.26` 镜像——因此 `go.mod` **维持 `go 1.25.0`**、Dockerfile 维持 `golang:1.25-bookworm`，零额外下载；开发机工具链 1.26.5 兼容不受影响。
 
 **已决（第二轮~第四轮，2026-10-15）**
 
@@ -246,7 +246,7 @@ Content-Length: 0
 ```
 
 - 平台回 SIP `200 OK`（不解析正文）；连续 `heartbeat_timeout_count`（默认 3）次失败或平台静默 → 自动重注册；
-- XML 输出声明 `GB2312`（正文 ASCII/UTF-8，兼容国标设备习惯）；**入方向自动识别 UTF-8/GBK/GB18030**，中文设备名等无乱码问题。
+- XML 输出声明 `GB2312`（正文 ASCII/UTF-8，兼容国标设备习惯）；**出站 MANSCDP 采用属性形式**（如 `<Notify CmdType="Keepalive" SN="17">`，与元素形式等价，wvp/ZLM 及主流平台均兼容；M1 实测确认）；**入方向自动识别 UTF-8/GBK/GB18030**，元素/属性形式均可解析。
 
 ### 5.3 查询类指令（平台 MESSAGE → 设备应答 MESSAGE）
 
@@ -479,7 +479,7 @@ GOP 重放（**首帧质量关键**）：缓存最近一个 GOP（自最近 IDR 
 
 代价与缓解：
 
-- **go 1.26**：内置代码按 go 1.26 工具链编译 → `server/go.mod` 升 `go 1.26`（本机 1.26.5 已就绪）；`docker/Dockerfile` builder 镜像升级 `golang:1.26-bookworm`（若内网 registry 未同步，用 `GOTOOLCHAIN=auto` 兜底）；
+- **Go 版本【M1 实施修订】**：内置后不再需要 `go 1.26`（实测 1.25 语言级编译通过）；`go.mod` 维持 `go 1.25.0`、Docker 镜像维持 `golang:1.25-bookworm`（内网 registry 无 1.26 镜像）；开发机工具链 1.26.5 兼容；
 - **fork 维护**：锁定来源版本 **v0.12.0**；改动面压到最小（PS 打包调用点、订阅分发两处）；外部引用集中在 `gb28181_sink.go` 一个文件。
 
 > 备选（未采用，供回落）：A=外部依赖官方 v0.12.0（H264 视频-only）；B=完全自研；C=sipgo+自研媒体/XML。
@@ -596,7 +596,7 @@ Web 表单（§7.2）
 
 | 文件 | 改动 | 里程碑 |
 |---|---|---|
-| `server/go.mod` | 无新增外部依赖（pion/rtp、x/text 已在树）；`go 1.26` | M1 |
+| `server/go.mod` | 无新增外部依赖（pion/rtp、x/text 已在树）；**维持 `go 1.25.0`**（M1 实施修订，见 §0-3） | M1 |
 | `server/internal/gb28181/`（新增） | 内置 `device`/`manscdp`/`metrics`/`psmux` 四包（非测试 ~9.0k 行，保留 MIT 版权头与出处）；媒体调用点切换为 psmux（音频/H265）；**兼容补丁**：RequestURI/To 支持 `platform_id`（3 处）、`tcp_role`/`rtp_mtu` 开关（§5.9） | M1/M3 |
 | `server/internal/model/output.go` | `OutputTypeGB28181 = "gb28181"`；`OutputConfig` 新增 §7.1 字段（序列化进现有 `outputs.config`，**无 schema 迁移**） | M1 |
 | `server/internal/media/engine.go` | `OutputConfig` 新增同名字段（透传） | M1 |
@@ -713,6 +713,8 @@ Web 表单（§7.2）
 
 每个里程碑遵守仓库流程：**先加红测试 → 实现 → 单测/回归绿 → 实测（ffmpeg/平台）**，变更及时提交。
 
+**进度：M1 已完成（2026-10-15）** —— 内置 `device/manscdp/metrics/psmux` 四包（含 `platform_id` 兼容补丁，见 `server/internal/gb28181/README.md`）、`Gb28181Sink` 骨架与注册/心跳/注销生命周期、配置模型/映射/校验（前后端两处透传点 + `validateGB28181Config`）、FakePlatform L2 全流程测试（401 摘要 qop=auth、请求 URI 断言、心跳、`Expires:0` 注销；含 `-race`）、全量回归绿。
+
 ---
 
 ## 13. 决议归档与实施期回访项
@@ -724,7 +726,7 @@ Web 表单（§7.2）
 | Q1 | 音频实现路径 | **A+**：内置源码 + 媒体层切换 psmux；一期即含音频（AAC 直封 PS，无需转码） |
 | Q2 | H.265 是否纳入一期 | **纳入**（与 H264 同一条媒体路径，PSM 0x24） |
 | Q3 | 依赖/内置形态 | **内置**（`server/internal/gb28181/` 四个包，保留 MIT 版权头与出处；向上游提 PR，patch series 跟随） |
-| Q4 | go 1.26 升级 | **随 M1 执行**（本机 1.26.5；镜像 `golang:1.26-bookworm`，`GOTOOLCHAIN=auto` 兜底） |
+| Q4 | go 1.26 升级 | **【M1 实施修订】不升级**：内置后上游约束消失（1.25 实测编译通过）、内网无 1.26 镜像 → 维持 `go 1.25.0` + `golang:1.25-bookworm`（§0-3） |
 | Q5 | 单通道 vs 多通道 | **v1 单通道**（虚拟 IPC；多路需求用多实例，各自注册） |
 | Q6 | 联调目标平台 | **wvp-GB28181-pro（+ZLMediaKit）为基准**；海康/大华平台如需联调另行安排 |
 | Q7 | TeleBoot 语义 | **默认拒绝**（记录日志），可配置开放为"重启 x-media 进程" |

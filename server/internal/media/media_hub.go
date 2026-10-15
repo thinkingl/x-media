@@ -115,6 +115,8 @@ func (h *MediaHub) CreateOutput(config *OutputConfig) (Sink, error) {
 		sink, err = NewHTTPFLVSink(config)
 	case "webrtc":
 		sink, err = NewWebRTCSink(config)
+	case "gb28181":
+		sink, err = NewGB28181Sink(config)
 	default:
 		return nil, ErrUnsupportedType
 	}

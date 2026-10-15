@@ -1,0 +1,1814 @@
+// Package device — implements the GB/T 28181 server entrypoint —
+// SIP UDP listener lifecycle and orchestration of signaling and
+// media streaming components.
+//
+// SIZE_OK: This file exceeds 250 LOC but is a cohesive, indivisible module.
+// All functionality is tightly coupled around the Server struct lifecycle:
+// - SIP UDP listener and message dispatch
+// - REGISTER authentication flow with digest auth
+// - Keepalive heartbeat with re-registration
+// - INVITE handling with SDP parsing, media binding, 200 OK response
+// - AUHub subscription and media goroutine (PS mux + RTP push)
+// - BYE handling with cleanup
+// - MESSAGE handling with MANSCDP dispatch
+// Splitting would create artificial boundaries that don't reflect the actual
+// logical structure of the GB28181 protocol lifecycle.
+package device
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+	"net"
+	"strconv"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/x-media/x-media-server/internal/gb28181/metrics"
+)
+
+type Server struct {
+	cfg          Config
+	deviceCfg    DeviceInfo
+	hub          FrameSource
+	sipConn      *net.UDPConn
+	mediaConn    *net.UDPConn
+	mediaTCPConn *net.TCPConn
+	// tcpListener is the TCP SIP listener (transport="tcp" only)
+	tcpListener net.Listener
+	// tcpConns tracks active TCP/TLS SIP connections keyed by remote address
+	tcpConns sync.Map
+	// streamRemote is the outbound stream connection's remote-address
+	// key (transport "tls" / "tcp-out")
+	streamRemote string
+	// infoQueries supplies the 2022 five information-query answers when
+	// installed (SetInfoQueryProvider).
+	infoQueries InfoQueryProvider
+	// mediaTCPListener is the passive TCP media listener of the current
+	// INVITE session (a=setup:active offer — the platform dials us);
+	// closed on teardown so a pending accept aborts.
+	mediaTCPListener *net.TCPListener
+	mu               sync.Mutex
+	// protoVerMu guards platformProtoVer (REGISTER X-GB-Ver, Annex I).
+	protoVerMu       sync.Mutex
+	platformProtoVer string
+	// platformDate is the platform clock from the REGISTER response's
+	// SIP Date header (§9.10.2), Unix seconds (0 = never seen).
+	platformDate int64
+	cancel       context.CancelFunc
+	mediaCancel  context.CancelFunc
+	sub          *FrameSubscription
+	// Remote address for RTP streaming
+	remoteRTPAddr *net.UDPAddr
+	// onBroadcast is the host callback for voice-broadcast notifications
+	// (§9.12.1), copied into devCtx at Start.
+	onBroadcast func(sourceID, targetID string)
+	// regRespCh routes REGISTER responses from the recv loop to an active
+	// registration attempt (prevents both readers racing on sipConn).
+	regRespCh chan SipMessage
+	// inviteRespCh routes INVITE responses (voice-broadcast handshake,
+	// issue #84) from the recv loop to the goroutine awaiting the
+	// platform's 200 OK.
+	inviteRespCh chan SipMessage
+	// reRegisterCh signals the lifecycle goroutine to re-register now
+	// (keepalive 401/403 rejection, send failures, periodic tick).
+	reRegisterCh chan struct{}
+	// regMu serializes registration attempts.
+	regMu sync.Mutex
+	// keepaliveFailures counts consecutive keepalive failures/errors.
+	keepaliveFailures atomic.Int32
+	// lastPlatformContact is the UnixNano stamp of the last received SIP
+	// response — any response proves liveness for the silence detector.
+	lastPlatformContact atomic.Int64
+	// negotiatedExpiresSecs is the platform-negotiated registration
+	// expiry from the REGISTER 200 OK (0 = not negotiated / ignored).
+	negotiatedExpiresSecs atomic.Int64
+	// testMode skips REGISTER lifecycle for testing
+	testMode bool
+	// devContext holds device identity for MANSCDP responses
+	devCtx DeviceContext
+	// recordingIndex supplies recorded segments for RecordInfo queries (nil = none)
+	recordingIndex RecordingIndex
+	// snapshotExecutor runs DeviceControl(SnapShot) exchanges (nil = the
+	// control is rejected as before). Guarded by mu.
+	snapshotExecutor SnapshotExecutor
+	// deviceUpgrader runs DeviceControl(DeviceUpgrade) exchanges (nil =
+	// the historical control reject).
+	deviceUpgrader DeviceUpgrader
+	// playbackCtl routes SIP INFO PlaybackControl commands to the active
+	// playback goroutine (nil when no playback session is active). Guarded by mu.
+	playbackCtl chan<- PlaybackControl
+	// controlCbs hosts §9.3.2 DeviceControl sub-command callbacks
+	// (issue #81); zero value = every control keeps the reject behavior.
+	// Set via SetControlHandlers before Start (read on the receive
+	// goroutine thereafter).
+	controlCbs ControlCallbacks
+	// configCbs hosts DeviceConfig sub-command callbacks (issue #80,
+	// A.2.3.2); zero value = every config command keeps the reject
+	// behavior. Set via SetConfigHandlers before Start.
+	configCbs ConfigCallbacks
+	// notifier is the SUBSCRIBE/NOTIFY bookkeeping + host-facing sender
+	// (issue #80); obtained by hosts via Notifier().
+	notifier *DeviceNotifier
+	// positionSource drives periodic MobilePosition reports (issue #80);
+	// nil = position NOTIFYs only via the notifier's direct sends.
+	positionSource PositionSource
+	// positionCancel stops the running position report loop (replaced on
+	// re-SUBSCRIBE).
+	positionCancel chan struct{}
+	// audioSource feeds the talkback upstream half (§9.2 send half,
+	// issue #83): pre-framed G.711 bytes packetized as RTP toward the
+	// platform.
+	audioSource <-chan []byte
+	// upstreamLaw is the G.711 variant negotiated for the CURRENT
+	// talkback upstream session: the host encoder polls
+	// TalkbackUpstreamCodec to match its mic encoding to the platform's
+	// offer (PCMA until a PCMU offer is accepted; re-negotiated per
+	// session). Set to AudioPCMA in New — the zero value would read as
+	// PCMU.
+	upstreamLaw atomic.Int32
+	// audioSink consumes G.711 talkback audio (§9.2 receive half, issue
+	// #80); nil = audio-only INVITEs are refused with 488. Guarded by mu;
+	// set via SetTalkbackSink before Start.
+	audioSink TalkbackSink
+	// metrics receives lifecycle/media observations (issue #40).
+	metrics metrics.Hooks
+}
+
+// New creates a new GB28181 server.
+func New(cfg Config, deviceCfg DeviceInfo, hub FrameSource) *Server {
+	s := &Server{
+		cfg:            cfg,
+		deviceCfg:      deviceCfg,
+		hub:            hub,
+		regRespCh:      make(chan SipMessage, 4),
+		inviteRespCh:   make(chan SipMessage, 4),
+		reRegisterCh:   make(chan struct{}, 1),
+		metrics:        metrics.NoopHooks{},
+		notifier:       newDeviceNotifier(),
+		positionCancel: make(chan struct{}),
+	}
+	// Upstream law defaults to PCMA — see the upstreamLaw field note.
+	s.upstreamLaw.Store(int32(AudioPCMA))
+	// NOTIFYs of TCP/TLS-dialog subscriptions ride the server's
+	// connection table (same routing as every other TCP answer).
+	s.notifier.BindTCP(func(data []byte, addr *net.TCPAddr) error { return s.sendToTCP(data, addr) })
+	return s
+}
+
+// SetMetricsHooks installs observability hooks (issue #40); they are also
+// propagated to media pushers created afterwards. Nil restores no-ops.
+func (s *Server) SetMetricsHooks(h metrics.Hooks) {
+	if h == nil {
+		h = metrics.NoopHooks{}
+	}
+	s.metrics = h
+}
+
+// SetTestMode enables test mode which skips REGISTER lifecycle.
+func (s *Server) SetTestMode() {
+	s.testMode = true
+}
+
+// SetControlHandlers installs DeviceControl sub-command callbacks
+// (GB/T 28181 §9.3.2, issue #81). Each callback is optional; a
+// sub-command without its callback is answered with the control reject.
+// Call before Start — callbacks fire on the SIP receive goroutine.
+func (s *Server) SetControlHandlers(c ControlCallbacks) {
+	s.controlCbs = c
+}
+
+// SetConfigHandlers installs DeviceConfig sub-command callbacks
+// (GB/T 28181-2022 §9.3.3 / A.2.3.2, issue #80). Each callback is
+// optional; a sub-command without its callback keeps the reject answer.
+// Call before Start — callbacks fire on the SIP receive goroutine.
+func (s *Server) SetConfigHandlers(c ConfigCallbacks) {
+	s.configCbs = c
+}
+
+// Notifier returns the host-facing NOTIFY sender (issue #80): hold it and
+// call SendAlarm / SendCatalogChange / SendMobilePosition whenever the
+// business side has something to report — no-ops until the platform
+// subscribes.
+func (s *Server) Notifier() *DeviceNotifier {
+	return s.notifier
+}
+
+// SetPositionSource installs the periodic MobilePosition source: while a
+// MobilePosition subscription is live, the server pulls the source on
+// the SUBSCRIBE's Interval (default 5s) and sends position NOTIFYs.
+// Call before Start.
+func (s *Server) SetPositionSource(src PositionSource) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.positionSource = src
+}
+
+// SetRecordingIndex injects the recording index used for RecordInfo queries.
+func (s *Server) SetRecordingIndex(idx RecordingIndex) {
+	s.recordingIndex = idx
+}
+
+// Start starts the GB28181 server SIP listener and lifecycle.
+func (s *Server) Start(ctx context.Context) error {
+	// Fail fast on a misconfigured device (issue #41).
+	if err := s.cfg.Validate(); err != nil {
+		return fmt.Errorf("gb28181 device config: %w", err)
+	}
+
+	// Initialize device context for MANSCDP responses
+	s.devCtx = DeviceContext{
+		DeviceID:      s.cfg.DeviceID,
+		ChannelID:     s.cfg.ChannelID,
+		Name:          s.deviceCfg.Name,
+		Manufacturer:  s.deviceCfg.Manufacturer,
+		Model:         s.deviceCfg.Model,
+		Firmware:      s.deviceCfg.Firmware,
+		LocalIP:       localIP(),
+		LocalPort:     s.cfg.LocalSIPPort,
+		ExtraChannels: s.cfg.ExtraChannels,
+
+		OnBroadcast: s.onBroadcast,
+	}
+
+	// Create child context with cancel for lifecycle management
+	ctx, cancel := context.WithCancel(ctx)
+	s.cancel = cancel
+
+	// TCP transport, inbound: listen for SIP connections. The platform
+	// connects to us and drives the dialog (no outbound REGISTER lifecycle).
+	if s.cfg.Transport == "tcp" {
+		return s.startTCPListener(ctx)
+	}
+
+	// Inbound SIPS listener (platform dials the device over TLS; the
+	// device's own certificate identifies it).
+	if s.cfg.Transport == "tls-listen" {
+		return s.startTLSListener(ctx)
+	}
+
+	// Stream transports (outbound): dial the platform — TLS (SIPS,
+	// GB/T 28181-2022 A-level) or plain TCP ("tcp-out") — and run the
+	// full REGISTER/keepalive lifecycle over the connection.
+	if isStreamTransport(s.cfg.Transport) {
+		if err := s.startStreamClient(ctx); err != nil {
+			return err
+		}
+		s.startLifecycles(ctx)
+		return nil
+	}
+
+	// Bind SIP UDP
+	sipAddr := &net.UDPAddr{Port: s.cfg.LocalSIPPort}
+	sipConn, err := net.ListenUDP("udp", sipAddr)
+	if err != nil {
+		return fmt.Errorf("binding SIP UDP on port %d: %w", s.cfg.LocalSIPPort, err)
+	}
+	s.mu.Lock()
+	s.sipConn = sipConn
+	s.mu.Unlock()
+	slog.Info("gb28181: SIP UDP listener started", "port", s.cfg.LocalSIPPort)
+
+	// SUBSCRIBE/NOTIFY (issue #80): give the host-facing notifier the
+	// sending context before the loop starts answering SUBSCRIBEs.
+	s.notifier.bind(sipConn, s.cfg.DeviceID, s.cfg.SIPDomain, localIP(), uint16(s.cfg.LocalSIPPort))
+
+	// Run REGISTER lifecycle (skip in test mode). A failed initial
+	// REGISTER must NOT kill the server: the platform may be
+	// unreachable at boot (or ignore refreshes, NVR-observed) while the
+	// stale registration still routes INVITEs to us. Degrade to
+	// listen-only mode — the re-registration lifecycle below keeps
+	// retrying every RegisterIntervalSecs.
+	if !s.testMode {
+		if err := s.runRegisterLifecycle(ctx); err != nil {
+			slog.Warn("gb28181: initial REGISTER failed, entering listen-only mode", "error", err)
+		}
+	}
+
+	s.startLifecycles(ctx)
+
+	// Enter SIP recv loop
+	buf := make([]byte, 4096)
+	for {
+		select {
+		case <-ctx.Done():
+			slog.Info("gb28181: SIP recv loop stopped")
+			return nil
+		default:
+			// Set read deadline for shutdown responsiveness
+			sipConn.SetReadDeadline(time.Now().Add(1 * time.Second))
+			n, addr, err := sipConn.ReadFromUDP(buf)
+			if err != nil {
+				var netErr net.Error
+				if errors.As(err, &netErr) && netErr.Timeout() {
+					continue // Timeout is expected for shutdown check
+				}
+				slog.Warn("gb28181: SIP recv error", "error", err)
+				continue
+			}
+			msg, err := Parse(buf[:n])
+			if err != nil {
+				slog.Warn("gb28181: failed to parse SIP message", "error", err)
+				continue
+			}
+
+			// Handle responses vs requests separately. Responses have
+			// StatusCode set and Method empty — the old switch never matched
+			// them (the "200" case was dead code).
+			if msg.StatusCode > 0 {
+				s.handleResponse(msg)
+				continue
+			}
+
+			// GB35114 A-level: platform→device requests are Note-verified
+			// before any method dispatch (issue #52).
+			if !s.allowIncomingNote(msg) {
+				forbidden := BuildStatusResponse(msg, 403)
+				if _, err := s.sipConn.WriteToUDP(forbidden.Serialize(), addr); err != nil {
+					slog.Warn("gb28181: failed to send 403", "method", msg.Method, "error", err)
+				}
+				continue
+			}
+
+			// Handle based on method
+			switch msg.Method {
+			case "INVITE":
+				s.handleInvite(ctx, msg, addr)
+			case "BYE":
+				s.handleBye(ctx, msg, addr)
+			case "CANCEL":
+				// A platform cancelling a pending INVITE (RFC 3261 §9.2):
+				// INVITEs are answered immediately so a CANCEL usually
+				// races the 200 — answer 200 OK rather than leaving the
+				// platform waiting on a response.
+				slog.Info("gb28181: CANCEL received — answering 200 OK", "from", addr.String())
+				ok200 := Build200OK(msg, "", "")
+				if _, err := s.sipConn.WriteToUDP(ok200.Serialize(), addr); err != nil {
+					slog.Warn("gb28181: failed to send 200 OK for CANCEL", "error", err)
+				}
+			case "MESSAGE":
+				s.handleMessage(ctx, msg, addr)
+			case "ACK":
+				// No action needed - media is now flowing
+			case "INFO":
+				s.handleInfo(ctx, msg, addr)
+			case "SUBSCRIBE":
+				s.handleSubscribe(msg, addr)
+			case "NOTIFY", "OPTIONS":
+				slog.Info("gb28181: received method, responding 200 OK", "method", msg.Method, "from", addr.String())
+				ok200 := Build200OK(msg, "", "")
+				if _, err := s.sipConn.WriteToUDP(ok200.Serialize(), addr); err != nil {
+					slog.Warn("gb28181: failed to send 200 OK", "method", msg.Method, "error", err)
+				}
+			default:
+				slog.Debug("gb28181: unhandled SIP method", "method", msg.Method)
+			}
+		}
+	}
+}
+
+// allowIncomingNote runs device-side Note verification on a
+// platform→device request (issue #52). Requests without a Note pass
+// (mixed-mode Digest platforms); a Note that fails verification follows
+// Config.IncomingNotePolicy (log-only under Warn, 403 under the default
+// Reject).
+func (s *Server) allowIncomingNote(msg SipMessage) bool {
+	if s.cfg.IncomingNotePolicy == GB35114NoteOff {
+		return true
+	}
+	verifier, ok := s.cfg.RegisterAuthenticator.(IncomingNoteVerifier)
+	if !ok || verifier == nil {
+		return true
+	}
+	note := msg.ExtensionHeader("Note")
+	if note == "" {
+		return true
+	}
+	err := verifier.VerifyIncomingNote(msg.Method, msg.From, msg.To, msg.CallID,
+		msg.ExtensionHeader("Date"), note, msg.Body)
+	if err == nil {
+		return true
+	}
+	if s.cfg.IncomingNotePolicy == GB35114NoteWarn {
+		slog.Warn("gb28181: incoming Note verification failed (warn policy, serving anyway)",
+			"method", msg.Method, "error", err)
+		return true
+	}
+	slog.Warn("gb28181: incoming Note verification failed, rejecting",
+		"method", msg.Method, "error", err)
+	return false
+}
+
+// Stop stops the server.
+func (s *Server) Stop() {
+	if s.cancel != nil {
+		s.cancel()
+	}
+	// The media fields are written under s.mu by the SIP recv goroutine's
+	// INVITE/BYE handling — read them under the same lock (an unlocked read
+	// races a concurrent handleInvite at teardown; found by the conformance
+	// loopback suite under -race).
+	s.mu.Lock()
+	mediaCancel := s.mediaCancel
+	mediaConn := s.mediaConn
+	mediaTCPConn := s.mediaTCPConn
+	s.mu.Unlock()
+	if mediaCancel != nil {
+		mediaCancel()
+	}
+	if mediaConn != nil {
+		mediaConn.Close()
+	}
+	if mediaTCPConn != nil {
+		mediaTCPConn.Close()
+	}
+	s.mu.Lock()
+	sipConn := s.sipConn
+	tcpListener := s.tcpListener
+	s.mu.Unlock()
+	if tcpListener != nil {
+		tcpListener.Close()
+	}
+	if sipConn != nil {
+		sipConn.Close()
+	}
+}
+
+// SIPPort returns the bound local SIP UDP port. Safe to call while the
+// server is starting concurrently; returns an error until the listener
+// is bound (or if the server runs in TCP mode).
+func (s *Server) SIPPort() (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.sipConn == nil {
+		return 0, fmt.Errorf("gb28181: SIP UDP listener not bound")
+	}
+	return s.sipConn.LocalAddr().(*net.UDPAddr).Port, nil
+}
+
+// SIPTCPPort returns the bound local SIP TCP port (TCP transport mode).
+// Safe to call while the server is starting concurrently; returns an
+// error until the listener is bound (or if the server runs in UDP mode).
+func (s *Server) SIPTCPPort() (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.tcpListener == nil {
+		return 0, fmt.Errorf("gb28181: SIP TCP listener not bound")
+	}
+	return s.tcpListener.Addr().(*net.TCPAddr).Port, nil
+}
+
+// sendSIP sends a SIP message to the given peer, dispatching to UDP or TCP.
+func (s *Server) sendSIP(data []byte, addr net.Addr) error {
+	if udpAddr, ok := addr.(*net.UDPAddr); ok {
+		_, err := s.sipConn.WriteToUDP(data, udpAddr)
+		return err
+	}
+	if tcpAddr, ok := addr.(*net.TCPAddr); ok {
+		return s.sendToTCP(data, tcpAddr)
+	}
+	return fmt.Errorf("unknown address type: %T", addr)
+}
+
+// parseSDP extracts the RTP media destination, SSRC, and session type
+// from the INVITE SDP body.
+// The destination IP comes from the c= line and the port from the m=video line.
+// The session type comes from the s= line (Play|Playback|Download,
+// case-insensitive, defaulting to "Play").
+// Returns (mediaAddr "ip:port", ssrc, sessionType, err).
+// sdpMediaTransport classifies the INVITE SDP offer's media transport
+// (issue #14): TCP in the m= line plus the RFC 4145 a=setup value decides
+// which side connects.
+type sdpMediaTransport int
+
+const (
+	// mediaUDP is classic RTP/AVP over UDP.
+	mediaUDP sdpMediaTransport = iota
+	// mediaTCPConnect: TCP/RTP/AVP + setup:passive/actpass — the platform
+	// listens and the device connects.
+	mediaTCPConnect
+	// mediaTCPListen: TCP/RTP/AVP + setup:active — the platform dials the
+	// device (unsupported; refused with 488).
+	mediaTCPListen
+)
+
+func parseSDP(body string) (string, uint32, string, sdpMediaTransport, error) {
+	var mediaIP string
+	var mediaPort int
+	var ssrc uint32
+	var ssrcFound bool
+	var mLineProto string
+	var setupVal string
+	sessionType := "Play"
+
+	lines := strings.Split(body, "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "a=setup:") {
+			setupVal = strings.TrimPrefix(line, "a=setup:")
+		} else if strings.HasPrefix(line, "c=") {
+			// Connection: c=IN IP4 <address>
+			parts := strings.Fields(line)
+			if len(parts) >= 3 {
+				mediaIP = parts[2]
+			}
+		} else if strings.HasPrefix(line, "m=video ") {
+			// Media: m=video <port> <proto> <pt>
+			parts := strings.Fields(line)
+			if len(parts) >= 2 {
+				port, err := strconv.Atoi(parts[1])
+				if err != nil {
+					return "", 0, "", mediaUDP, fmt.Errorf("invalid media port in m= line: %s: %w", parts[1], err)
+				}
+				mediaPort = port
+			}
+			if len(parts) >= 3 {
+				mLineProto = parts[2]
+			}
+		} else if strings.HasPrefix(line, "y=") {
+			// SSRC: y=<10-digit decimal>
+			ssrcStr := strings.TrimPrefix(line, "y=")
+			ssrcVal, err := strconv.ParseUint(ssrcStr, 10, 32)
+			if err != nil {
+				return "", 0, "", mediaUDP, fmt.Errorf("invalid SSRC value: %s: %w", ssrcStr, err)
+			}
+			ssrc = uint32(ssrcVal)
+			ssrcFound = true
+		} else if strings.HasPrefix(line, "s=") {
+			sessionType = normalizeSessionType(strings.TrimSpace(strings.TrimPrefix(line, "s=")))
+		}
+	}
+
+	if !ssrcFound {
+		return "", 0, "", mediaUDP, fmt.Errorf("SDP missing y= SSRC line")
+	}
+	if mediaIP == "" || mediaPort == 0 {
+		return "", 0, "", mediaUDP, fmt.Errorf("SDP missing c= media IP or m=video media port")
+	}
+
+	// Media transport from the offer: TCP in the m= proto plus the RFC 4145
+	// setup value. actpass lets the answerer choose — this device connects.
+	mt := mediaUDP
+	if strings.Contains(mLineProto, "TCP") {
+		switch setupVal {
+		case "active":
+			mt = mediaTCPListen
+		default: // passive, actpass, or absent
+			mt = mediaTCPConnect
+		}
+	}
+
+	return net.JoinHostPort(mediaIP, strconv.Itoa(mediaPort)), ssrc, sessionType, mt, nil
+}
+
+// normalizeSessionType maps an SDP s= value to a canonical session type.
+// Matching is case-insensitive; unknown or empty values default to "Play".
+func normalizeSessionType(v string) string {
+	switch strings.ToLower(v) {
+	case "playback":
+		return "Playback"
+	case "download":
+		return "Download"
+	default:
+		return "Play"
+	}
+}
+
+// buildDeviceSDP builds the device SDP answer for INVITE 200 OK.
+// sessionType is echoed in the s= line (Play|Playback|Download).
+// For TCP transport it emits TCP/RTP/AVP with a=connection:new per
+// GB/T 28181; the setup role mirrors the offer — "active" (the device
+// dials the platform's media port, the setup:passive/actpass offer) or
+// "passive" (the device listens, the setup:active offer — issue #14
+// follow-up).
+func buildDeviceSDP(deviceID, localIP string, mediaPort int, ssrc uint32, transport, sessionType, setupRole string) string {
+	if transport == "tcp" {
+		if setupRole == "" {
+			setupRole = "active"
+		}
+		// TCP/RTP/AVP per GB/T 28181 with $-framing
+		return fmt.Sprintf(`v=0
+o=%s 0 0 IN IP4 %s
+s=%s
+c=IN IP4 %s
+t=0 0
+m=video %d TCP/RTP/AVP 96
+a=setup:%s
+a=connection:new
+a=sendonly
+a=rtpmap:96 PS/90000
+y=%d`,
+			deviceID, localIP, sessionType, localIP, mediaPort, setupRole, ssrc)
+	}
+	// UDP RTP/AVP (default)
+	return fmt.Sprintf(`v=0
+o=%s 0 0 IN IP4 %s
+s=%s
+c=IN IP4 %s
+t=0 0
+m=video %d RTP/AVP 96
+a=sendonly
+a=rtpmap:96 PS/90000
+y=%d`,
+		deviceID, localIP, sessionType, localIP, mediaPort, ssrc)
+}
+
+// startLifecycles spawns the keepalive and re-registration goroutines
+// (skipped in test mode) — shared by the UDP and SIPS transports.
+func (s *Server) startLifecycles(ctx context.Context) {
+	if s.testMode {
+		return
+	}
+	heartbeatInterval := time.Duration(s.cfg.HeartbeatIntervalSecs) * time.Second
+	go func() {
+		ticker := time.NewTicker(heartbeatInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				// Silence detector: the historical accounting only
+				// reacted to send errors and explicit rejections — a
+				// platform that stopped answering entirely never tripped
+				// re-registration. Any response stamps
+				// lastPlatformContact; heartbeat_timeout_count unheard
+				// intervals re-register at the same threshold.
+				if nano := s.lastPlatformContact.Load(); nano > 0 {
+					if platformSilent(time.Since(time.Unix(0, nano)), heartbeatInterval, s.cfg.HeartbeatTimeoutCount) {
+						slog.Warn("gb28181: platform silent, re-registering", "silent_for", time.Since(time.Unix(0, nano)).Round(time.Second))
+						s.metrics.KeepaliveFail()
+						s.signalReRegister()
+						s.lastPlatformContact.Store(time.Now().UnixNano())
+					}
+				}
+				if err := s.sendKeepalive(ctx); err != nil {
+					failures := s.keepaliveFailures.Add(1)
+					s.metrics.KeepaliveFail()
+					slog.Warn("gb28181: keepalive send failed", "error", err, "failures", failures)
+					if failures >= int32(s.cfg.HeartbeatTimeoutCount) {
+						slog.Warn("gb28181: too many keepalive failures, re-registering")
+						s.signalReRegister()
+						s.keepaliveFailures.Store(0)
+					}
+				}
+			}
+		}
+	}()
+
+	// Re-registration lifecycle: periodic refresh before Expires and
+	// immediate retry when the platform rejects us (401/403 keepalive —
+	// e.g. after an NVR restart that forgot our registration).
+	go func() {
+		// Effective refresh cadence: half the negotiated expiry when the
+		// platform negotiated one (>= 60s), half the local config
+		// otherwise (RFC 3261 §10.2 — refresh at ~50% of the window).
+		refreshInterval := func() time.Duration {
+			base := int64(s.cfg.RegisterIntervalSecs)
+			if n := s.negotiatedExpiresSecs.Load(); n >= 60 {
+				base = n
+			}
+			if base < 2 {
+				base = 2
+			}
+			return time.Duration(base/2) * time.Second
+		}
+		currentInterval := refreshInterval()
+		ticker := time.NewTicker(currentInterval)
+		defer ticker.Stop()
+		// Log re-register failures as state transitions, not per-tick
+		// noise: the platform routinely ignores refresh REGISTERs
+		// (NVR-observed) while keepalives keep the registration alive,
+		// which used to emit one WARN per interval forever.
+		consecFails := 0
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				slog.Debug("gb28181: periodic re-registration")
+			case <-s.reRegisterCh:
+				slog.Info("gb28181: re-registration triggered (keepalive rejected or failures)")
+			}
+			// Stream transports: heal a dropped platform connection
+			// before attempting the re-REGISTER (sends would fail
+			// otherwise, forever).
+			s.ensureStreamConn(ctx)
+			if err := s.reregister(ctx); err != nil {
+				consecFails++
+				// First failure, then roughly once per half hour at the
+				// default 60s cadence.
+				if consecFails == 1 || consecFails%30 == 0 {
+					slog.Warn("gb28181: re-register failed", "error", err, "consecutive_failures", consecFails)
+				}
+				continue
+			}
+			if consecFails > 0 {
+				slog.Info("gb28181: re-registration recovered", "consecutive_failures", consecFails)
+			}
+			consecFails = 0
+			if next := refreshInterval(); next != currentInterval {
+				slog.Info("gb28181: registration refresh cadence updated", "interval", next)
+				ticker.Reset(next)
+				currentInterval = next
+			}
+		}
+	}()
+}
+
+// localIP detects a local IP address or returns 0.0.0.0 placeholder.
+func localIP() string {
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return "0.0.0.0"
+	}
+	for _, addr := range addrs {
+		if ipnet, ok := addr.(*net.IPNet); ok && !ipnet.IP.IsLoopback() {
+			if ipnet.IP.To4() != nil {
+				return ipnet.IP.String()
+			}
+		}
+	}
+	return "0.0.0.0"
+}
+
+// getLocalIP determines the local source IP that would be used to reach
+// remoteAddr, by dialing a temporary UDP connection (no packets are sent).
+// The dial honors ctx (DNS-bound hostnames resolve under it; IP addresses
+// never block — issue #58).
+func getLocalIP(ctx context.Context, remoteAddr string) (string, error) {
+	conn, err := (&net.Dialer{}).DialContext(ctx, "udp", remoteAddr)
+	if err != nil {
+		return "", err
+	}
+	defer conn.Close()
+	localAddr := conn.LocalAddr().(*net.UDPAddr)
+	return localAddr.IP.String(), nil
+}
+
+// regResponseSource supplies REGISTER-flow responses: either direct socket
+// reads (initial registration, before the recv loop exists) or the
+// regRespCh channel fed by the recv loop (all later re-registrations —
+// prevents the recv loop and the register flow from racing on sipConn).
+type regResponseSource func(timeout time.Duration) (*SipMessage, error)
+
+// socketResponseSource reads responses directly from the SIP socket
+// (only safe before the recv loop starts).
+func (s *Server) socketResponseSource() regResponseSource {
+	return func(timeout time.Duration) (*SipMessage, error) {
+		buf := make([]byte, 4096)
+		_ = s.sipConn.SetReadDeadline(time.Now().Add(timeout))
+		n, _, err := s.sipConn.ReadFromUDP(buf)
+		_ = s.sipConn.SetReadDeadline(time.Time{})
+		if err != nil {
+			return nil, err
+		}
+		resp, err := Parse(buf[:n])
+		if err != nil {
+			return nil, err
+		}
+		return &resp, nil
+	}
+}
+
+// channelResponseSource reads responses routed by the recv loop.
+func (s *Server) channelResponseSource() regResponseSource {
+	return func(timeout time.Duration) (*SipMessage, error) {
+		select {
+		case resp := <-s.regRespCh:
+			return &resp, nil
+		case <-time.After(timeout):
+			return nil, fmt.Errorf("timeout waiting for REGISTER response")
+		}
+	}
+}
+
+// reregister runs the REGISTER lifecycle with responses routed through the
+// recv loop, serialized so concurrent triggers don't interleave.
+func (s *Server) reregister(ctx context.Context) error {
+	s.regMu.Lock()
+	defer s.regMu.Unlock()
+	return s.runRegisterLifecycleWith(ctx, s.channelResponseSource())
+}
+
+// signalReRegister nudges the lifecycle goroutine (non-blocking).
+func (s *Server) signalReRegister() {
+	select {
+	case s.reRegisterCh <- struct{}{}:
+	default:
+	}
+}
+
+// platformSilent reports whether a platform unheard for `since` counts
+// as gone: at least timeoutCount heartbeat intervals without any SIP
+// response.
+func platformSilent(since, heartbeat time.Duration, timeoutCount int) bool {
+	if heartbeat <= 0 {
+		heartbeat = time.Second
+	}
+	if timeoutCount < 1 {
+		return false
+	}
+	return since >= heartbeat*time.Duration(timeoutCount)
+}
+
+// noteNegotiatedExpires records the platform-negotiated registration
+// expiry carried by a REGISTER 200 OK (RFC 3261 §10.2.4): the Expires
+// header first, the Contact header's `;expires=` parameter as fallback.
+// Values below 60s are ignored (a platform dictating seconds-scale
+// registrations would hammer the wire); the local config applies then.
+// The platform's response also proves liveness — the contact clock is
+// stamped here because the initial registration's responses bypass
+// handleResponse.
+func (s *Server) noteNegotiatedExpires(resp *SipMessage) {
+	s.lastPlatformContact.Store(time.Now().UnixNano())
+	secs := negotiatedExpiresSecs(resp.Expires, resp.Contact)
+	s.negotiatedExpiresSecs.Store(secs)
+	if secs > 0 {
+		slog.Info("gb28181: platform-negotiated registration expiry", "expires_secs", secs, "configured_secs", s.cfg.RegisterIntervalSecs)
+	}
+}
+
+// negotiatedExpiresSecs parses the negotiated expiry: the Expires header
+// value, falling back to the Contact URI's ;expires= parameter. 0 when
+// absent/unparseable/below the 60s floor.
+func negotiatedExpiresSecs(expiresHeader, contact string) int64 {
+	if v, err := strconv.ParseInt(strings.TrimSpace(expiresHeader), 10, 64); err == nil {
+		if v >= 60 {
+			return v
+		}
+		return 0
+	}
+	i := strings.Index(contact, "expires=")
+	if i < 0 {
+		return 0
+	}
+	rest := contact[i+len("expires="):]
+	end := 0
+	for end < len(rest) && rest[end] >= '0' && rest[end] <= '9' {
+		end++
+	}
+	v, err := strconv.ParseInt(rest[:end], 10, 64)
+	if err != nil || v < 60 {
+		return 0
+	}
+	return v
+}
+
+// handleResponse processes a SIP response received by the recv loop.
+func (s *Server) handleResponse(msg SipMessage) {
+	// Any response proves the platform is alive (silence detector).
+	s.lastPlatformContact.Store(time.Now().UnixNano())
+	// Route REGISTER responses to any active registration flow.
+	if strings.Contains(msg.CSeq, "REGISTER") {
+		select {
+		case s.regRespCh <- msg:
+		default:
+		}
+		return
+	}
+	// Route INVITE responses to the voice-broadcast handshake (issue #84).
+	if strings.Contains(msg.CSeq, "INVITE") {
+		select {
+		case s.inviteRespCh <- msg:
+		default:
+		}
+		return
+	}
+
+	switch msg.StatusCode {
+	case 200:
+		s.keepaliveFailures.Store(0)
+	case 401, 403, 404, 407:
+		// Platform no longer recognizes us (e.g. it restarted and lost
+		// registration state) — re-register immediately. This is the
+		// self-heal path for keepalive rejection.
+		failures := s.keepaliveFailures.Add(1)
+		slog.Warn("gb28181: request rejected by platform", "status", msg.StatusCode, "failures", failures)
+		s.signalReRegister()
+	default:
+		slog.Debug("gb28181: unhandled SIP response", "status", msg.StatusCode)
+	}
+}
+
+// runRegisterLifecycle performs the initial REGISTER authentication flow,
+// reading responses directly from the socket (the recv loop is not yet
+// running at this point).
+func (s *Server) runRegisterLifecycle(ctx context.Context) error {
+	return s.runRegisterLifecycleWith(ctx, s.socketResponseSource())
+}
+
+// sendToPlatform sends a lifecycle message (REGISTER, keepalive) to the
+// platform over the configured transport: UDP write to the platform address,
+// or a write on the SIPS connection for transport "tls". When the configured
+// RegisterAuthenticator also implements OutgoingSigner, non-REGISTER
+// requests are stamped with the signer's Date and Note headers first.
+func (s *Server) sendToPlatform(msg SipMessage, platformAddr *net.UDPAddr) error {
+	if signer, ok := s.cfg.RegisterAuthenticator.(OutgoingSigner); ok && signer != nil {
+		if date, note := signer.DecorateOutgoing(msg.Method, msg.From, msg.To, msg.CallID, msg.Body); date != "" {
+			if msg.Headers == nil {
+				msg.Headers = make(map[string]string)
+			}
+			msg.Headers["Date"] = date
+			msg.Headers["Note"] = note
+		}
+	}
+	if isStreamTransport(s.cfg.Transport) {
+		s.mu.Lock()
+		remote := s.streamRemote
+		s.mu.Unlock()
+		if conn, ok := s.tcpConns.Load(remote); ok {
+			_, err := conn.(net.Conn).Write(msg.Serialize())
+			return err
+		}
+		return fmt.Errorf("gb28181: no SIPS connection to platform")
+	}
+	_, err := s.sipConn.WriteToUDP(msg.Serialize(), platformAddr)
+	return err
+}
+
+// viaTransportLabel returns the Via header transport token for the
+// configured signaling transport.
+// platformUser is the user part of outbound request-URIs (REGISTER /
+// de-register / keepalive MESSAGE): the configured PlatformID when present,
+// the SIP domain otherwise (historical upstream behavior).
+// Local patch: x-media GB28181 sink design §5.9.
+func (s *Server) platformUser() string {
+	if s.cfg.PlatformID != "" {
+		return s.cfg.PlatformID
+	}
+	return s.cfg.SIPDomain
+}
+
+func (s *Server) viaTransportLabel() string {
+	switch s.cfg.Transport {
+	case "tls":
+		return "TLS"
+	case "tcp", "tcp-out":
+		return "TCP"
+	default:
+		return "UDP"
+	}
+}
+
+// runRegisterLifecycleWith performs the REGISTER authentication flow
+// using the given response source.
+func (s *Server) runRegisterLifecycleWith(ctx context.Context, nextResponse regResponseSource) error {
+	s.metrics.RegisterAttempt()
+	if err := s.runRegisterLifecycleInner(ctx, nextResponse); err != nil {
+		s.metrics.RegisterFail()
+		return err
+	}
+	s.metrics.RegisterOK()
+	return nil
+}
+
+func (s *Server) runRegisterLifecycleInner(ctx context.Context, nextResponse regResponseSource) error {
+	requestURI := fmt.Sprintf("sip:%s@%s", s.platformUser(), s.cfg.SIPDomain)
+	from := fmt.Sprintf("<sip:%s@%s>", s.cfg.DeviceID, s.cfg.SIPDomain)
+	to := from
+	platformAddr := &net.UDPAddr{
+		IP:   net.ParseIP(s.cfg.PlatformSIPAddress),
+		Port: s.cfg.PlatformSIPPort,
+	}
+
+	// Determine the real local IP toward the platform for Via/Contact headers
+	localIPAddr, err := getLocalIP(ctx, platformAddr.String())
+	if err != nil {
+		slog.Warn("gb28181: failed to determine local IP, falling back to interface scan", "error", err)
+		localIPAddr = localIP()
+	}
+	callID := fmt.Sprintf("%d@%s", time.Now().Unix(), localIPAddr)
+	cseq := "1 REGISTER"
+	contact := fmt.Sprintf("<sip:%s@%s:%d>", s.cfg.DeviceID, localIPAddr, s.cfg.LocalSIPPort)
+	viaTransport := s.viaTransportLabel()
+	via := fmt.Sprintf("SIP/2.0/%s %s:%d;branch=z9hG4bK%016x", viaTransport, localIPAddr, s.cfg.LocalSIPPort, time.Now().UnixNano())
+
+	// Initial REGISTER — a RegisterAuthenticator may announce capabilities
+	// (GB 35114 Capability); nil keeps the plain Digest-era behavior.
+	var initialAuth string
+	if s.cfg.RegisterAuthenticator != nil {
+		initialAuth = s.cfg.RegisterAuthenticator.InitialAuthorization()
+	}
+	slog.Info("gb28181: sending initial REGISTER")
+	regMsg := BuildRegister(requestURI, from, to, callID, cseq, contact, initialAuth)
+	regMsg.Via = via
+	if s.cfg.ProtocolVersion != "" {
+		regMsg.Headers[XGBVerHeaderName] = s.cfg.ProtocolVersion
+	}
+	if err := s.sendToPlatform(regMsg, platformAddr); err != nil {
+		return fmt.Errorf("sending REGISTER: %w", err)
+	}
+
+	// Wait for response (5s)
+	resp, err := nextResponse(5 * time.Second)
+	if err != nil {
+		return fmt.Errorf("reading REGISTER response: %w", err)
+	}
+	s.notePlatformProtocolVersion(*resp)
+	s.notePlatformDate(*resp)
+
+	// Handle 401 Unauthorized
+	if resp.StatusCode == 401 {
+		slog.Info("gb28181: received 401, authenticating")
+		var authHeader string
+		if s.cfg.RegisterAuthenticator != nil {
+			authHeader, err = s.cfg.RegisterAuthenticator.AuthorizeWithChallenge(resp.WWWAuthenticate)
+			if err != nil {
+				return fmt.Errorf("register authentication: %w", err)
+			}
+		} else {
+			auth, err := ParseChallenge(resp.WWWAuthenticate)
+			if err != nil {
+				return fmt.Errorf("parsing digest challenge: %w", err)
+			}
+			authHeader = BuildAuthorizationHeader(auth, s.cfg.DeviceID, s.cfg.Password, requestURI, "REGISTER")
+		}
+		cseq = "2 REGISTER"
+		authMsg := BuildRegister(requestURI, from, to, callID, cseq, contact, authHeader)
+		via2 := fmt.Sprintf("SIP/2.0/%s %s:%d;branch=z9hG4bK%016x", viaTransport, localIPAddr, s.cfg.LocalSIPPort, time.Now().UnixNano())
+		authMsg.Via = via2
+		if s.cfg.ProtocolVersion != "" {
+			authMsg.Headers[XGBVerHeaderName] = s.cfg.ProtocolVersion
+		}
+
+		if err := s.sendToPlatform(authMsg, platformAddr); err != nil {
+			return fmt.Errorf("sending authenticated REGISTER: %w", err)
+		}
+
+		// Wait for 200 OK
+		resp, err = nextResponse(5 * time.Second)
+		if err != nil {
+			return fmt.Errorf("reading 200 OK response: %w", err)
+		}
+		s.notePlatformProtocolVersion(*resp)
+		s.notePlatformDate(*resp)
+
+		if resp.StatusCode == 200 {
+			if s.cfg.RegisterAuthenticator != nil {
+				if err := s.cfg.RegisterAuthenticator.VerifyOK(resp.ExtensionHeader("SecurityInfo")); err != nil {
+					return fmt.Errorf("verifying REGISTER 200 OK: %w", err)
+				}
+			}
+			s.noteNegotiatedExpires(resp)
+			slog.Info("gb28181: REGISTER successful")
+			return nil
+		}
+		return fmt.Errorf("unexpected response after auth: %d", resp.StatusCode)
+	}
+
+	if resp.StatusCode == 200 {
+		s.noteNegotiatedExpires(resp)
+		slog.Info("gb28181: REGISTER successful (no auth required)")
+		return nil
+	}
+
+	return fmt.Errorf("unexpected REGISTER response: %d", resp.StatusCode)
+}
+
+// Deregister de-registers from the platform (REGISTER with Expires: 0,
+// GB/T 28181 graceful departure, issue #84): the same 401 Digest dance
+// as registration with 2s response timeouts. Call it BEFORE Stop() —
+// Stop() hard-cancels without touching the registration, so a host that
+// skips this leaves the platform to learn via keepalive timeout. A
+// returned error must not stop the subsequent Stop(): it merely means
+// the platform never confirmed the departure (the pre-existing
+// behavior). Test mode is a no-op nil.
+func (s *Server) Deregister(ctx context.Context) error {
+	if s.testMode {
+		return nil
+	}
+	s.regMu.Lock()
+	defer s.regMu.Unlock()
+	return s.runDeregisterLifecycle(ctx, s.channelResponseSource())
+}
+
+// runDeregisterLifecycle mirrors runRegisterLifecycleInner with Expires
+// 0 on both legs; a platform may accept the unauthenticated leg outright
+// (200 on leg 1 ends the dance in one round-trip).
+func (s *Server) runDeregisterLifecycle(ctx context.Context, nextResponse regResponseSource) error {
+	requestURI := fmt.Sprintf("sip:%s@%s", s.platformUser(), s.cfg.SIPDomain)
+	from := fmt.Sprintf("<sip:%s@%s>", s.cfg.DeviceID, s.cfg.SIPDomain)
+	to := from
+	platformAddr := &net.UDPAddr{
+		IP:   net.ParseIP(s.cfg.PlatformSIPAddress),
+		Port: s.cfg.PlatformSIPPort,
+	}
+	localIPAddr, err := getLocalIP(ctx, platformAddr.String())
+	if err != nil {
+		localIPAddr = localIP()
+	}
+	callID := fmt.Sprintf("%d@%s", time.Now().Unix(), localIPAddr)
+	cseq := "1 REGISTER"
+	contact := fmt.Sprintf("<sip:%s@%s:%d>", s.cfg.DeviceID, localIPAddr, s.cfg.LocalSIPPort)
+	via := fmt.Sprintf("SIP/2.0/%s %s:%d;branch=z9hG4bK%016x", s.viaTransportLabel(), localIPAddr, s.cfg.LocalSIPPort, time.Now().UnixNano())
+
+	var initialAuth string
+	if s.cfg.RegisterAuthenticator != nil {
+		initialAuth = s.cfg.RegisterAuthenticator.InitialAuthorization()
+	}
+	slog.Info("gb28181: sending de-registration (REGISTER Expires: 0)")
+	dereg := BuildRegister(requestURI, from, to, callID, cseq, contact, initialAuth)
+	dereg.Expires = "0"
+	dereg.Via = via
+	if s.cfg.ProtocolVersion != "" {
+		dereg.Headers[XGBVerHeaderName] = s.cfg.ProtocolVersion
+	}
+	if err := s.sendToPlatform(dereg, platformAddr); err != nil {
+		return fmt.Errorf("sending de-REGISTER: %w", err)
+	}
+	resp, err := nextResponse(2 * time.Second)
+	if err != nil {
+		return fmt.Errorf("reading de-REGISTER response: %w", err)
+	}
+	if resp.StatusCode == 200 {
+		slog.Info("gb28181: de-registered (Expires: 0 accepted)")
+		return nil
+	}
+	if resp.StatusCode != 401 {
+		return fmt.Errorf("unexpected de-REGISTER response: %d", resp.StatusCode)
+	}
+
+	var authHeader string
+	if s.cfg.RegisterAuthenticator != nil {
+		authHeader, err = s.cfg.RegisterAuthenticator.AuthorizeWithChallenge(resp.WWWAuthenticate)
+		if err != nil {
+			return fmt.Errorf("de-REGISTER authentication: %w", err)
+		}
+	} else {
+		auth, err := ParseChallenge(resp.WWWAuthenticate)
+		if err != nil {
+			return fmt.Errorf("parsing digest challenge: %w", err)
+		}
+		authHeader = BuildAuthorizationHeader(auth, s.cfg.DeviceID, s.cfg.Password, requestURI, "REGISTER")
+	}
+	cseq = "2 REGISTER"
+	authMsg := BuildRegister(requestURI, from, to, callID, cseq, contact, authHeader)
+	authMsg.Expires = "0"
+	authMsg.Via = fmt.Sprintf("SIP/2.0/%s %s:%d;branch=z9hG4bK%016x", s.viaTransportLabel(), localIPAddr, s.cfg.LocalSIPPort, time.Now().UnixNano())
+	if s.cfg.ProtocolVersion != "" {
+		authMsg.Headers[XGBVerHeaderName] = s.cfg.ProtocolVersion
+	}
+	if err := s.sendToPlatform(authMsg, platformAddr); err != nil {
+		return fmt.Errorf("sending authenticated de-REGISTER: %w", err)
+	}
+	resp, err = nextResponse(2 * time.Second)
+	if err != nil {
+		return fmt.Errorf("reading de-REGISTER 200 OK: %w", err)
+	}
+	if resp.StatusCode == 200 {
+		slog.Info("gb28181: de-registered (authenticated)")
+		return nil
+	}
+	return fmt.Errorf("unexpected response after auth: %d", resp.StatusCode)
+}
+
+// XGBVerHeaderName is the REGISTER protocol-version header (GB/T
+// 28181-2022 Annex I: "3.0"=2022, "2.0"=2016). Both sides announce their
+// version during registration; the higher side should then avoid messages
+// the lower one cannot parse.
+const XGBVerHeaderName = "X-GB-Ver"
+
+// notePlatformProtocolVersion records the platform's X-GB-Ver from a
+// REGISTER response (Annex I). Absent header (2016-era platforms) keeps
+// the previous value.
+func (s *Server) notePlatformProtocolVersion(resp SipMessage) {
+	ver := resp.ExtensionHeader(XGBVerHeaderName)
+	if ver == "" {
+		return
+	}
+	s.protoVerMu.Lock()
+	changed := s.platformProtoVer != ver
+	s.platformProtoVer = ver
+	s.protoVerMu.Unlock()
+	if changed {
+		slog.Info("gb28181: platform protocol version", "x_gb_ver", ver)
+	}
+}
+
+// PlatformDateUnix returns the platform clock as last carried by a
+// REGISTER response's SIP Date header (§9.10.2), Unix seconds — the
+// device-side time-sync source. 0 when no response carried a parseable
+// Date. Applying the clock stays with the host (NTP-fed deployments
+// just observe; NTP-less ones may set it).
+func (s *Server) PlatformDateUnix() int64 {
+	s.protoVerMu.Lock()
+	defer s.protoVerMu.Unlock()
+	return s.platformDate
+}
+
+// notePlatformDate records the platform clock from a REGISTER response's
+// SIP Date header (§9.10.2). Drift beyond 5s logs a warning.
+func (s *Server) notePlatformDate(resp SipMessage) {
+	raw := resp.ExtensionHeader("Date")
+	if raw == "" {
+		return
+	}
+	unix, ok := ParseSIPDate(raw)
+	if !ok {
+		slog.Warn("gb28181: unparseable SIP Date header", "value", raw)
+		return
+	}
+	drift := time.Now().Unix() - unix
+	if drift < 0 {
+		drift = -drift
+	}
+	if drift > 5 {
+		slog.Warn("gb28181: platform clock differs", "drift_secs", drift, "platform_unix", unix)
+	}
+	s.protoVerMu.Lock()
+	s.platformDate = unix
+	s.protoVerMu.Unlock()
+}
+
+// PlatformProtocolVersion returns the platform's X-GB-Ver as last seen on
+// a REGISTER response ("" when the platform never announced one).
+func (s *Server) PlatformProtocolVersion() string {
+	s.protoVerMu.Lock()
+	defer s.protoVerMu.Unlock()
+	return s.platformProtoVer
+}
+
+// sendKeepalive sends a keepalive MESSAGE to the platform.
+func (s *Server) sendKeepalive(ctx context.Context) error {
+	platformAddr := &net.UDPAddr{
+		IP:   net.ParseIP(s.cfg.PlatformSIPAddress),
+		Port: s.cfg.PlatformSIPPort,
+	}
+
+	requestURI := fmt.Sprintf("sip:%s@%s", s.platformUser(), s.cfg.SIPDomain)
+	from := fmt.Sprintf("<sip:%s@%s>", s.cfg.DeviceID, s.cfg.SIPDomain)
+	to := from
+
+	// Determine the real local IP toward the platform for Via/Contact headers
+	localIPAddr, err := getLocalIP(ctx, platformAddr.String())
+	if err != nil {
+		slog.Warn("gb28181: failed to determine local IP, falling back to interface scan", "error", err)
+		localIPAddr = localIP()
+	}
+	callID := fmt.Sprintf("keepalive-%d@%s", time.Now().Unix(), localIPAddr)
+	contact := fmt.Sprintf("<sip:%s@%s:%d>", s.cfg.DeviceID, localIPAddr, s.cfg.LocalSIPPort)
+
+	msg := BuildKeepaliveMessage(strconv.FormatInt(time.Now().Unix(), 10), s.cfg.DeviceID, "OK")
+	msg.RequestURI = requestURI
+	msg.From = from
+	if s.cfg.PlatformID != "" {
+		// 部分平台校验 keepalive 的 To 为平台服务 ID（§5.9）；
+		// 未配置时保持历史行为（To = 设备 AOR），避免回归上游已验证形态。
+		to = fmt.Sprintf("<sip:%s@%s>", s.cfg.PlatformID, s.cfg.SIPDomain)
+	}
+	msg.To = to
+	msg.CallID = callID
+	msg.Contact = contact
+	msg.CSeq = "1 MESSAGE"
+	msg.Via = fmt.Sprintf("SIP/2.0/%s %s:%d;branch=z9hG4bK%016x", s.viaTransportLabel(), localIPAddr, s.cfg.LocalSIPPort, time.Now().UnixNano())
+
+	if err := s.sendToPlatform(msg, platformAddr); err != nil {
+		return fmt.Errorf("sending keepalive MESSAGE: %w", err)
+	}
+
+	return nil
+}
+
+// teardownMediaLocked tears down any previous media session (video push,
+// playback, or talkback receive) so a new INVITE never leaks a goroutine
+// + socket per session. Caller holds s.mu.
+func (s *Server) teardownMediaLocked() {
+	if s.mediaCancel != nil {
+		s.mediaCancel()
+		s.mediaCancel = nil
+	}
+	if s.sub != nil {
+		s.hub.Unsubscribe(s.sub.ID)
+		s.sub = nil
+	}
+	if s.mediaConn != nil {
+		s.mediaConn.Close()
+		s.mediaConn = nil
+	}
+	if s.mediaTCPConn != nil {
+		s.mediaTCPConn.Close()
+		s.mediaTCPConn = nil
+	}
+	if s.mediaTCPListener != nil {
+		_ = s.mediaTCPListener.Close()
+		s.mediaTCPListener = nil
+	}
+	s.playbackCtl = nil
+}
+
+// handleInvite handles INVITE requests - parses SDP, binds media, sends 200 OK with device SDP, subscribes to AUHub.
+func (s *Server) handleInvite(ctx context.Context, msg SipMessage, fromAddr net.Addr) {
+	slog.Info("gb28181: received INVITE", "from", fromAddr.String())
+
+	// Audio-only offer (m=audio, no m=video anywhere) = talkback receive
+	// (GB/T 28181-2022 §9.2, issue #80): the platform streams G.711 to the
+	// device. Classified before the video parse, which requires m=video.
+	if offer := parseTalkbackOffer(msg.Body); offer != nil {
+		s.handleTalkbackInvite(ctx, msg, offer, fromAddr)
+		return
+	}
+
+	// Parse SDP for RTP destination and SSRC — the media address comes from the
+	// SDP c=/m= lines, NEVER from the SIP peer address (streaming to the SIP
+	// port floods the platform's signaling socket).
+	mediaAddr, ssrc, sessionType, mediaTransport, err := parseSDP(msg.Body)
+	if err != nil {
+		slog.Warn("gb28181: failed to parse INVITE SDP", "error", err)
+		return
+	}
+	rtpDest, err := net.ResolveUDPAddr("udp", mediaAddr)
+	if err != nil {
+		slog.Warn("gb28181: invalid RTP destination from INVITE SDP", "addr", mediaAddr, "error", err)
+		return
+	}
+	slog.Info("gb28181: parsed SSRC and RTP destination from INVITE", "ssrc", ssrc, "rtp_dest", rtpDest.String(), "session", sessionType)
+
+	// Playback/Download sessions stream recorded segments instead of live
+	// AUs. Reject with 488 (Not Acceptable Here) when there is no
+	// playback-capable index or no segments cover the requested range -
+	// answering 200 OK without media would leave the platform waiting.
+	var playbackSegs []SegmentMeta
+	var playbackRoot string
+	var startMs, endMs int64
+	if sessionType != "Play" {
+		startMs, endMs = parseSDPTimeRange(msg.Body)
+		if idx, ok := s.recordingIndex.(PlaybackIndex); ok {
+			playbackSegs = idx.Lookup(startMs, endMs)
+			playbackRoot = idx.Root()
+		}
+		if len(playbackSegs) == 0 {
+			slog.Warn("gb28181: playback INVITE has no covering recordings", "session", sessionType, "from", fromAddr.String())
+			to := msg.To
+			if !strings.Contains(to, "tag=") {
+				to = to + ";tag=" + dialogTag
+			}
+			reject := SipMessage{
+				StatusCode: 488,
+				Via:        msg.Via,
+				From:       msg.From,
+				To:         to,
+				CallID:     msg.CallID,
+				CSeq:       msg.CSeq,
+				Headers:    make(map[string]string),
+			}
+			if err := s.sendSIP(reject.Serialize(), fromAddr); err != nil {
+				slog.Warn("gb28181: failed to send 488", "error", err)
+			}
+			return
+		}
+	}
+
+	// Tear down any previous media session before starting a new one.
+	// Repeated INVITEs (NVR re-register auto-INVITE, NVR restart) would
+	// otherwise leak a media goroutine + socket per INVITE, each continuing
+	// to push a parallel RTP stream.
+	s.mu.Lock()
+	s.teardownMediaLocked()
+	s.mu.Unlock()
+
+	// a=setup:active offer (the platform dials the device): bind a passive
+	// media listener now — its port rides the answer, the media goroutine
+	// accepts the platform's dial before streaming (issue #14 follow-up).
+	var mediaListener *net.TCPListener
+	if mediaTransport == mediaTCPListen {
+		ln, err := (&net.ListenConfig{}).Listen(ctx, "tcp", ":0")
+		if err != nil {
+			slog.Warn("gb28181: failed to bind passive TCP media listener", "error", err)
+			return
+		}
+		mediaListener = ln.(*net.TCPListener)
+		s.mu.Lock()
+		s.mediaTCPListener = mediaListener
+		s.mu.Unlock()
+		slog.Info("gb28181: passive TCP media listener bound", "port", mediaListener.Addr().(*net.TCPAddr).Port)
+	}
+
+	// Bind local media UDP on ephemeral port
+	mediaConn, err := net.ListenUDP("udp", nil)
+	if err != nil {
+		slog.Warn("gb28181: failed to bind media UDP", "error", err)
+		return
+	}
+	localMediaPort := mediaConn.LocalAddr().(*net.UDPAddr).Port
+	slog.Info("gb28181: bound media UDP", "port", localMediaPort)
+
+	s.mu.Lock()
+	s.mediaConn = mediaConn
+	s.mu.Unlock()
+
+	// Multicast media: raise IP_MULTICAST_TTL past the LAN default when
+	// configured (the OS default of 1 stays within one subnet).
+	mediaIP, _, _ := net.SplitHostPort(mediaAddr)
+	if rtpIP := net.ParseIP(mediaIP); rtpIP != nil && rtpIP.IsMulticast() && s.cfg.MulticastTTL > 0 {
+		if err := setMulticastTTL(mediaConn, s.cfg.MulticastTTL); err != nil {
+			slog.Warn("gb28181: failed to set multicast TTL", "ttl", s.cfg.MulticastTTL, "error", err)
+		} else {
+			slog.Info("gb28181: multicast media TTL set", "ttl", s.cfg.MulticastTTL)
+		}
+	}
+
+	// Build device SDP answer — use the real source IP toward the platform,
+	// not an interface scan (wrong on multihomed hosts).
+	localIPAddr, err := getLocalIP(ctx, fromAddr.String())
+	if err != nil {
+		slog.Warn("gb28181: failed to determine local IP, falling back to interface scan", "error", err)
+		localIPAddr = localIP()
+	}
+	// The answer's m= transport mirrors the offer (RFC 3264): TCP media is
+	// offered via TCP/RTP/AVP in the SDP regardless of the SIP signaling
+	// transport (issue #14).
+	answerTransport := "udp"
+	if mediaTransport == mediaTCPConnect || mediaTransport == mediaTCPListen {
+		answerTransport = "tcp"
+	}
+	// The advertised m= port is the passive listener's when the platform
+	// dials us; the setup role mirrors the offer.
+	answerPort := localMediaPort
+	answerSetup := "active"
+	if mediaTransport == mediaTCPListen {
+		answerPort = mediaListener.Addr().(*net.TCPAddr).Port
+		answerSetup = "passive"
+	}
+	deviceSDP := buildDeviceSDP(s.cfg.DeviceID, localIPAddr, answerPort, ssrc, answerTransport, sessionType, answerSetup)
+
+	// Send 200 OK with SDP answer
+	ok200 := Build200OK(msg, "application/sdp", deviceSDP)
+	if err := s.sendSIP(ok200.Serialize(), fromAddr); err != nil {
+		slog.Warn("gb28181: failed to send 200 OK", "error", err)
+		return
+	}
+
+	// Resolve the TCP media endpoint: dial the platform's port for
+	// setup:passive/actpass offers (the device is the active side per
+	// GB/T 28181 Annex C / RFC 4145), or hand the passive listener to the
+	// media goroutine for a setup:active offer — it accepts the
+	// platform's dial before streaming.
+	var mediaTCPConn *net.TCPConn
+	var acceptTCP func(context.Context) *net.TCPConn // non-nil only for the passive answer
+	if mediaTransport == mediaTCPConnect {
+		conn, err := (&net.Dialer{}).DialContext(ctx, "tcp", mediaAddr)
+		if err != nil {
+			slog.Warn("gb28181: failed to connect to TCP media port", "addr", mediaAddr, "error", err)
+			return
+		}
+		mediaTCPConn = conn.(*net.TCPConn)
+		slog.Info("gb28181: connected to TCP media port", "addr", mediaAddr)
+		s.mu.Lock()
+		s.mediaTCPConn = mediaTCPConn
+		s.mu.Unlock()
+	} else if mediaTransport == mediaTCPListen {
+		ln := mediaListener
+		acceptTCP = func(ctx context.Context) *net.TCPConn {
+			acceptCh := make(chan *net.TCPConn, 1)
+			errCh := make(chan error, 1)
+			go func() {
+				conn, err := ln.Accept()
+				if err != nil {
+					errCh <- err
+					return
+				}
+				acceptCh <- conn.(*net.TCPConn)
+			}()
+			select {
+			case conn := <-acceptCh:
+				slog.Info("gb28181: platform connected to passive TCP media port", "local", conn.LocalAddr().String())
+				s.mu.Lock()
+				s.mediaTCPConn = conn
+				s.mu.Unlock()
+				return conn
+			case err := <-errCh:
+				slog.Info("gb28181: passive TCP media accept ended", "error", err)
+				return nil
+			case <-ctx.Done():
+				_ = ln.Close()
+				return nil
+			}
+		}
+	}
+
+	if sessionType != "Play" {
+		// Playback/Download: stream recorded segments instead of live AUs.
+		mediaCtx, mediaCancel := context.WithCancel(ctx)
+		ctlCh := make(chan PlaybackControl, 4)
+		// §9.4.2 (issue #82): capture the dialog snapshot for the
+		// completion INFO. The INFO rides the dialog's own transport —
+		// the shared UDP socket for UDP dialogs, the connection itself
+		// for TCP/TLS dialogs (issue #60 follow-up).
+		var endNotify *mediaEndNotify
+		cseqNum := strings.TrimSpace(strings.SplitN(msg.CSeq, " ", 2)[0])
+		if n, err := strconv.Atoi(cseqNum); err == nil {
+			cseqNum = strconv.Itoa(n + 1)
+		}
+		localIPAddr := localIP()
+		contact := fmt.Sprintf("<sip:%s@%s:%d>", s.cfg.DeviceID, localIPAddr, s.cfg.LocalSIPPort)
+		info := BuildMediaStatusInfo(
+			msg.RequestURI, msg.From, msg.To, msg.CallID,
+			cseqNum+" INFO", contact,
+			sessionType == "Download")
+		switch peer := fromAddr.(type) {
+		case *net.UDPAddr:
+			if (s.cfg.Transport == "" || s.cfg.Transport == "udp") && s.sipConn != nil {
+				endNotify = &mediaEndNotify{conn: s.sipConn, addr: peer, msg: info}
+			}
+		case *net.TCPAddr:
+			endNotify = &mediaEndNotify{tcpAddr: peer, msg: info}
+		}
+		s.mu.Lock()
+		s.mediaCancel = mediaCancel
+		s.remoteRTPAddr = rtpDest
+		s.playbackCtl = ctlCh
+		s.mu.Unlock()
+		slog.Info("gb28181: playback media goroutine started", "session", sessionType, "remote", rtpDest.String(), "transport", s.cfg.Transport, "segments", len(playbackSegs))
+		go func() {
+			defer mediaCancel()
+			s.runPlayback(mediaCtx, mediaConn, mediaTCPConn, acceptTCP, rtpDest, ssrc, playbackSegs, playbackRoot, startMs, endMs, sessionType, ctlCh, endNotify)
+		}()
+		return
+	}
+
+	// Subscribe to AUHub
+	sub := s.hub.Subscribe(ctx)
+	s.mu.Lock()
+	s.sub = sub
+	s.remoteRTPAddr = rtpDest
+	s.mu.Unlock()
+	slog.Info("gb28181: subscribed to AUHub", "sub_id", sub.ID)
+
+	// Create media context for goroutine
+	mediaCtx, mediaCancel := context.WithCancel(ctx)
+	s.mu.Lock()
+	s.mediaCancel = mediaCancel
+	s.mu.Unlock()
+
+	// Spawn goroutine draining AU + PS mux + RTP push
+	go func() {
+		defer mediaCancel()
+		// Passive answer: wait for the platform's dial before streaming;
+		// acceptTCP returns nil on cancellation (the goroutine exits at
+		// the ctx select below).
+		tcpConn := mediaTCPConn
+		if tcpConn == nil && mediaTransport == mediaTCPListen {
+			tcpConn = acceptTCP(mediaCtx)
+			if tcpConn == nil {
+				return
+			}
+		}
+		pusher := NewRtpPusher(mediaConn, rtpDest)
+		pusher.SetMetricsHooks(s.metrics)
+		if tcpConn != nil {
+			pusher.SetTCPConn(tcpConn)
+		}
+		slog.Info("gb28181: media goroutine started", "remote", rtpDest.String(), "transport", s.cfg.Transport)
+
+		for {
+			select {
+			case <-mediaCtx.Done():
+				slog.Info("gb28181: media goroutine stopped")
+				return
+			case au, ok := <-sub.Channel:
+				if !ok {
+					slog.Info("gb28181: AU channel closed")
+					return
+				}
+				// Convert []NALU to [][]byte for PS muxing
+				naluBytes := make([][]byte, len(au.NALUs))
+				for i, nalu := range au.NALUs {
+					naluBytes[i] = nalu.Data
+				}
+				// Mux H.264 to PS
+				psData := MuxH264ToPS(naluBytes, au.KeyFrame, au.Timestamp, au.Timestamp)
+				// Send PS data over RTP
+				if err := pusher.SendFrame(psData, au.KeyFrame, au.Timestamp, ssrc); err != nil {
+					slog.Warn("gb28181: failed to send RTP frame", "error", err)
+				}
+			}
+		}
+	}()
+}
+
+// handleBye handles BYE requests - unsubscribe from AUHub and close media socket.
+func (s *Server) handleBye(ctx context.Context, msg SipMessage, fromAddr net.Addr) {
+	slog.Info("gb28181: received BYE", "from", fromAddr.String())
+
+	s.mu.Lock()
+	s.teardownMediaLocked()
+	s.remoteRTPAddr = nil
+	s.mu.Unlock()
+
+	// Send 200 OK to BYE
+	ok200 := Build200OK(msg, "", "")
+	if err := s.sendSIP(ok200.Serialize(), fromAddr); err != nil {
+		slog.Warn("gb28181: failed to send 200 OK to BYE", "error", err)
+	}
+	slog.Info("gb28181: sent 200 OK to BYE")
+}
+
+// handleMessage handles MESSAGE requests - dispatch MANSCDP XML, send 200 OK, and any queued response.
+func (s *Server) handleMessage(ctx context.Context, msg SipMessage, fromAddr net.Addr) {
+	// ConfigDownload query (A.2.4.7 / A.2.6.9, issue #80): answer the
+	// minimal valid Response — OK plus the BasicParam block (name +
+	// registration tuning from the live config) when the request asked
+	// for it; every other config block is optional and omitted.
+	// Previously this fell through the unknown-CmdType warn + silence.
+	if q, ok := parseQueryDual(msg.Body); ok && q.CmdType == "ConfigDownload" {
+		ok200 := Build200OK(msg, "", "")
+		if err := s.sendSIP(ok200.Serialize(), fromAddr); err != nil {
+			slog.Warn("gb28181: failed to send 200 OK to MESSAGE", "error", err)
+		}
+		var basic *BasicParamCfg
+		var videoParamOpt *VideoParamOptCfg
+		for _, t := range strings.Split(q.ConfigType, "/") {
+			switch strings.TrimSpace(t) {
+			case "BasicParam":
+				exp := uint64(s.cfg.RegisterIntervalSecs)
+				interval := uint64(s.cfg.HeartbeatIntervalSecs)
+				count := uint32(s.cfg.HeartbeatTimeoutCount)
+				basic = &BasicParamCfg{
+					Name:              s.devCtx.Name,
+					Expiration:        &exp,
+					HeartbeatInterval: &interval,
+					HeartbeatCount:    &count,
+				}
+			case "VideoParamOpt":
+				if s.cfg.VideoParamOptDownloadSpeed != "" || s.cfg.VideoParamOptResolution != "" {
+					videoParamOpt = &VideoParamOptCfg{
+						DownloadSpeed: s.cfg.VideoParamOptDownloadSpeed,
+						Resolution:    s.cfg.VideoParamOptResolution,
+					}
+				}
+			}
+		}
+		s.sendResponseMessage(BuildConfigDownloadResponseMessage(q.SN, q.DeviceID, basic, videoParamOpt), fromAddr)
+		return
+	}
+
+	ok200, queuedPages, err := DispatchInboundMessage(msg, s.devCtx, s.recordingIndex)
+	if err != nil {
+		slog.Warn("gb28181: failed to dispatch MESSAGE", "error", err)
+		return
+	}
+
+	// Send 200 OK
+	if err := s.sendSIP(ok200.Serialize(), fromAddr); err != nil {
+		slog.Warn("gb28181: failed to send 200 OK to MESSAGE", "error", err)
+	}
+
+	// Voice broadcast (§9.12.1, issue #84): the OnBroadcast callback has
+	// fired inside the dispatch; the §9.12.1 follow-up (acknowledgement
+	// MESSAGE + the INVITE-back receive session) runs asynchronously —
+	// its 5s answer window must not stall signaling.
+	if b, ok := decodeBroadcast(msg.Body); ok {
+		go s.followBroadcast(ctx, b, fromAddr)
+	}
+
+	// DeviceConfig(SnapShotConfig) (GB/T 28181-2022 A.2.1.24, issue #107):
+	// the snapshot rides the device-config channel. With an executor
+	// installed the A.2.6.8 OK response is the whole synchronous answer;
+	// the exchange runs in a goroutine and completes asynchronously via
+	// the A.2.5.7 notify. Without an executor the config is rejected
+	// explicitly — parity with the Rust twin and a fast failure signal
+	// for the platform. The async A.2.5.7 notify leaves via
+	// sendToPlatform (UDP socket or the stream connection); the inbound
+	// "tcp" listener mode (no tracked platform connection) still rejects.
+	if cfg, ok := parseSnapshotConfig(msg.Body); ok {
+		if exec := s.snapshotExec(); exec != nil && asyncExchangeTransportOK(s.cfg.Transport) {
+			s.sendResponseMessage(BuildDeviceConfigResponseMessage(
+				strconv.Itoa(cfg.SN), cfg.DeviceID, true), fromAddr)
+			go s.runSnapshotExchange(ctx, cfg, exec)
+			return
+		}
+		slog.Warn("gb28181: snapshot config not executable (no executor or unsupported transport) — rejecting")
+		s.sendResponseMessage(BuildDeviceConfigResponseMessage(
+			strconv.Itoa(cfg.SN), cfg.DeviceID, false), fromAddr)
+		return
+	}
+
+	// DeviceControl(DeviceUpgrade) (GB/T 28181-2022 A.2.3.1.12, issue
+	// #108): with an upgrader installed the 200 above is the whole
+	// synchronous answer; the upgrade runs in a goroutine and completes
+	// asynchronously via the A.2.5.9 DeviceUpgradeResult notify (via
+	// sendToPlatform — any transport but the inbound "tcp" listener).
+	if dc, ok := parseUpgradeControl(msg.Body); ok {
+		if up := s.upgrader(); up != nil && asyncExchangeTransportOK(s.cfg.Transport) {
+			go s.runUpgradeExchange(ctx, dc, up)
+			return
+		}
+		slog.Warn("gb28181: device upgrade not executable (no upgrader or unsupported transport) — rejecting")
+		s.sendResponseMessage(BuildControlRejectResponseMessage(
+			"DeviceControl", strconv.Itoa(dc.SN), dc.DeviceID), fromAddr)
+		return
+	}
+
+	// DeviceControl sub-commands (§9.3.2 / issue #81): a recognized
+	// sub-command with its callback installed executes it and the 200 OK
+	// above is the whole synchronous answer. Unrecognized or
+	// callback-less commands keep the explicit control reject — parity
+	// with the Rust twin's no-handler behavior and a fast failure signal
+	// for the platform. (SnapShotConfig was intercepted above on the
+	// device-config channel; HomePosition and DeviceConfig CmdTypes route
+	// through their own reject arm.)
+	if dc, ok := parseControlSub(msg.Body); ok {
+		if cb := s.controlCbs.callbackFor(&dc); cb != nil {
+			slog.Info("gb28181: DeviceControl sub-command executed",
+				"sn", dc.SN, "deviceID", dc.DeviceID)
+			cb()
+			return
+		}
+		slog.Warn("gb28181: DeviceControl sub-command not handled — rejecting",
+			"sn", dc.SN, "deviceID", dc.DeviceID)
+		s.sendResponseMessage(BuildControlRejectResponseMessage(
+			"DeviceControl", strconv.Itoa(dc.SN), dc.DeviceID), fromAddr)
+		return
+	}
+
+	// DeviceConfig sub-commands (§9.3.3 / A.2.3.2, issue #80): unlike
+	// controls, the answer is a Response body with Result (A.2.6.8) — OK
+	// when a callback executed, the queued reject's ERROR otherwise.
+	if cfg, ok := parseDeviceConfigSub(msg.Body); ok {
+		if cb := s.configCbs.callbackFor(&cfg); cb != nil {
+			slog.Info("gb28181: DeviceConfig sub-command executed",
+				"sn", cfg.SN, "deviceID", cfg.DeviceID)
+			cb()
+			s.sendResponseMessage(BuildDeviceConfigResponseMessage(
+				strconv.Itoa(cfg.SN), cfg.DeviceID, true), fromAddr)
+			return
+		}
+		slog.Warn("gb28181: DeviceConfig sub-command not handled — rejecting",
+			"sn", cfg.SN, "deviceID", cfg.DeviceID)
+		s.sendResponseMessage(BuildDeviceConfigResponseMessage(
+			strconv.Itoa(cfg.SN), cfg.DeviceID, false), fromAddr)
+		return
+	}
+
+	// Send queued response if any
+	// Large Catalog/RecordInfo answers arrive as multiple pages (same
+	// SN, SumNum = total); pace them slightly so a UDP burst does not
+	// drop the tail pages — the platform accumulates by SN.
+	for i, page := range queuedPages {
+		if i > 0 {
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(50 * time.Millisecond):
+			}
+		}
+		s.sendResponseMessage(page, fromAddr)
+	}
+}
+
+// sendResponseMessage sends a device-originated MANSCDP response MESSAGE
+// with fresh routing headers (the builders only carry the body).
+func (s *Server) sendResponseMessage(resp SipMessage, fromAddr net.Addr) {
+	resp.RequestURI = fmt.Sprintf("sip:%s@%s", s.cfg.SIPDomain, s.cfg.SIPDomain)
+	resp.From = fmt.Sprintf("<sip:%s@%s>", s.cfg.DeviceID, s.cfg.SIPDomain)
+	resp.To = fmt.Sprintf("<sip:%s@%s>", s.cfg.SIPDomain, s.cfg.SIPDomain)
+	resp.CallID = fmt.Sprintf("%d-resp@%s", time.Now().Unix(), s.cfg.DeviceID)
+	resp.Via = fmt.Sprintf("SIP/2.0/UDP %s:%d;rport;branch=z9hG4bK%016x", localIP(), s.cfg.LocalSIPPort, time.Now().UnixNano())
+	resp.MaxForwards = "70"
+	resp.CSeq = "2 MESSAGE"
+	if err := s.sendSIP(resp.Serialize(), fromAddr); err != nil {
+		slog.Warn("gb28181: failed to send queued MESSAGE response", "error", err)
+	}
+}
+
+// handleInfo handles SIP INFO requests. PlaybackControl bodies are routed
+// to the active playback goroutine via the control channel; everything else
+// (including controls for live sessions, per binding #8) is acknowledged
+// with 200 OK and ignored.
+func (s *Server) handleInfo(ctx context.Context, msg SipMessage, fromAddr net.Addr) {
+	ctl, ok := parsePlaybackControl(msg.Body)
+	if !ok {
+		slog.Debug("gb28181: INFO without PlaybackControl body", "from", fromAddr.String())
+		ok200 := Build200OK(msg, "", "")
+		if err := s.sendSIP(ok200.Serialize(), fromAddr); err != nil {
+			slog.Warn("gb28181: failed to send 200 OK", "error", err)
+		}
+		return
+	}
+	s.mu.Lock()
+	ctlCh := s.playbackCtl
+	s.mu.Unlock()
+	if ctlCh == nil {
+		// No active playback session (live session or none): controls are
+		// no-ops per binding #8 — acknowledge and ignore.
+		slog.Info("gb28181: PlaybackControl ignored (no active playback session)", "value", ctl.Value, "from", fromAddr.String())
+		ok200 := Build200OK(msg, "", "")
+		if err := s.sendSIP(ok200.Serialize(), fromAddr); err != nil {
+			slog.Warn("gb28181: failed to send 200 OK", "error", err)
+		}
+		return
+	}
+	select {
+	case ctlCh <- ctl:
+	default:
+		slog.Warn("gb28181: PlaybackControl dropped (control channel full)", "value", ctl.Value)
+	}
+	ok200 := Build200OK(msg, "", "")
+	if err := s.sendSIP(ok200.Serialize(), fromAddr); err != nil {
+		slog.Warn("gb28181: failed to send 200 OK", "error", err)
+	}
+}
