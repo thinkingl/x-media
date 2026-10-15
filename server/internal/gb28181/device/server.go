@@ -1704,18 +1704,22 @@ func (s *Server) handleMessage(ctx context.Context, msg SipMessage, fromAddr net
 	}
 
 	// DeviceControl sub-commands (§9.3.2 / issue #81): a recognized
-	// sub-command with its callback installed executes it and the 200 OK
-	// above is the whole synchronous answer. Unrecognized or
-	// callback-less commands keep the explicit control reject — parity
-	// with the Rust twin's no-handler behavior and a fast failure signal
-	// for the platform. (SnapShotConfig was intercepted above on the
-	// device-config channel; HomePosition and DeviceConfig CmdTypes route
-	// through their own reject arm.)
+	// sub-command with its callback installed executes it. Local patch
+	// (x-media §5.4): besides the 200 OK above, also send the explicit
+	// MANSCDP Result=OK Response — symmetric with the reject arm and
+	// required by platforms that parse the answer instead of the SIP code.
+	// Unrecognized or callback-less commands keep the explicit control
+	// reject — parity with the Rust twin's no-handler behavior and a fast
+	// failure signal for the platform. (SnapShotConfig was intercepted
+	// above on the device-config channel; HomePosition and DeviceConfig
+	// CmdTypes route through their own reject arm.)
 	if dc, ok := parseControlSub(msg.Body); ok {
 		if cb := s.controlCbs.callbackFor(&dc); cb != nil {
 			slog.Info("gb28181: DeviceControl sub-command executed",
 				"sn", dc.SN, "deviceID", dc.DeviceID)
 			cb()
+			s.sendResponseMessage(BuildControlOKResponseMessage(
+				"DeviceControl", strconv.Itoa(dc.SN), dc.DeviceID), fromAddr)
 			return
 		}
 		slog.Warn("gb28181: DeviceControl sub-command not handled — rejecting",

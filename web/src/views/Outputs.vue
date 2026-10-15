@@ -13,12 +13,13 @@
           <el-tag :type="getTypeTag(row.type)">{{ row.type }}</el-tag>
         </template>
       </el-table-column>
-      <el-table-column label="流地址" min-width="200">
+      <el-table-column label="流地址" min-width="220">
         <template #default="{ row }">
           <template v-if="getStreamUrl(row)">
             <span class="stream-url">{{ getStreamUrl(row) }}</span>
             <el-button link type="primary" size="small" @click="copyUrl(getStreamUrl(row))">复制</el-button>
           </template>
+          <span v-else-if="getDeviceLabel(row)" class="stream-url">{{ getDeviceLabel(row) }}</span>
           <span v-else class="text-muted">-</span>
         </template>
       </el-table-column>
@@ -51,6 +52,7 @@
             <el-option label="RTSP" value="rtsp" />
             <el-option label="HTTP-FLV" value="http-flv" />
             <el-option label="WebRTC" value="webrtc" />
+            <el-option label="GB28181（注册到国标平台）" value="gb28181" />
           </el-select>
         </el-form-item>
         <el-form-item v-if="form.type === 'rtmp'" label="RTMP URL">
@@ -79,6 +81,109 @@
         <el-form-item v-if="form.type === 'http-flv'" label="访问路径">
           <el-input v-model="form.configAddr" placeholder="/live/:id.flv（固定，无需修改）" disabled />
         </el-form-item>
+
+        <template v-if="form.type === 'gb28181'">
+          <el-divider content-position="left">平台连接</el-divider>
+          <el-form-item label="平台地址">
+            <el-input v-model="gb.platform_ip" placeholder="平台 SIP 地址，如 192.168.88.100" />
+          </el-form-item>
+          <el-form-item label="平台端口">
+            <el-input-number v-model="gb.platform_port" :min="1" :max="65535" controls-position="right" />
+          </el-form-item>
+          <el-form-item label="平台服务 ID">
+            <el-input v-model="gb.platform_id" placeholder="20 位，如 34020000002000000001（可选，留空自动学习）" />
+          </el-form-item>
+          <el-form-item label="SIP 域">
+            <el-input v-model="gb.sip_domain" placeholder="一般 = 设备 ID 前 10 位，如 3402000000" />
+          </el-form-item>
+          <el-form-item label="SIP 密码">
+            <el-input v-model="gb.password" type="password" show-password placeholder="平台约定的注册密码" />
+          </el-form-item>
+
+          <el-divider content-position="left">设备身份</el-divider>
+          <el-form-item label="设备 ID">
+            <el-input v-model="gb.device_id" placeholder="20 位国标编码，如 34020000001320000001" />
+          </el-form-item>
+          <el-form-item label="通道 ID">
+            <el-input v-model="gb.channel_id" placeholder="留空 = 同设备 ID" />
+          </el-form-item>
+          <el-form-item label="设备名称">
+            <el-input v-model="gb.device_name" placeholder="平台目录中显示的通道名称" />
+          </el-form-item>
+          <el-form-item label="厂商 / 型号">
+            <div class="form-inline">
+              <el-input v-model="gb.manufacturer" placeholder="厂商" />
+              <el-input v-model="gb.model" placeholder="型号" />
+            </div>
+          </el-form-item>
+          <el-form-item label="固件版本">
+            <el-input v-model="gb.firmware" placeholder="1.0.0" />
+          </el-form-item>
+
+          <el-divider content-position="left">行为参数</el-divider>
+          <el-form-item label="推送音频">
+            <el-switch v-model="gb.audio_enable" />
+          </el-form-item>
+          <el-form-item label="GOP 重放">
+            <el-switch v-model="gb.gop_replay" />
+          </el-form-item>
+          <el-form-item label="允许远程重启">
+            <el-switch v-model="gb.tele_boot_restart" />
+          </el-form-item>
+          <el-form-item label="拒绝未实现指令">
+            <el-switch v-model="gb.control_reject_unimplemented" />
+          </el-form-item>
+
+          <el-collapse class="gb-advanced">
+            <el-collapse-item title="高级选项" name="gb-adv">
+              <el-form-item label="信令传输">
+                <el-select v-model="gb.transport">
+                  <el-option label="UDP（默认）" value="udp" />
+                  <el-option label="TCP（平台连设备）" value="tcp" />
+                  <el-option label="TCP 主动（设备连平台，穿 NAT）" value="tcp-out" />
+                </el-select>
+              </el-form-item>
+              <el-form-item label="TCP 媒体角色">
+                <el-select v-model="gb.tcp_role">
+                  <el-option label="自动（按邀约取反）" value="auto" />
+                  <el-option label="主动" value="active" />
+                  <el-option label="被动" value="passive" />
+                </el-select>
+              </el-form-item>
+              <el-form-item label="RTP MTU">
+                <el-input-number v-model="gb.rtp_mtu" :min="400" :max="1400" controls-position="right" />
+              </el-form-item>
+              <el-form-item label="视频编码限制">
+                <el-select v-model="gb.video_codec">
+                  <el-option label="自动（跟随源 H264/H265）" value="auto" />
+                  <el-option label="仅 H264（老平台）" value="h264" />
+                </el-select>
+              </el-form-item>
+              <el-form-item label="本地 SIP 端口">
+                <el-input-number v-model="gb.local_sip_port" :min="0" :max="65535" controls-position="right" />
+              </el-form-item>
+              <el-form-item label="本地 IP">
+                <el-input v-model="gb.local_ip" placeholder="留空 = 自动探测出口 IP" />
+              </el-form-item>
+              <el-form-item label="协议版本">
+                <el-select v-model="gb.protocol_version">
+                  <el-option label="省略（默认）" value="" />
+                  <el-option label="2.0（GB28181-2016）" value="2.0" />
+                  <el-option label="3.0（GB28181-2022）" value="3.0" />
+                </el-select>
+              </el-form-item>
+              <el-form-item label="注册周期(秒)">
+                <el-input-number v-model="gb.register_interval" :min="1" :max="86400" controls-position="right" />
+              </el-form-item>
+              <el-form-item label="心跳周期(秒)">
+                <el-input-number v-model="gb.heartbeat_interval" :min="1" :max="3600" controls-position="right" />
+              </el-form-item>
+              <el-form-item label="心跳超时次数">
+                <el-input-number v-model="gb.heartbeat_timeout_count" :min="1" :max="10" controls-position="right" />
+              </el-form-item>
+            </el-collapse-item>
+          </el-collapse>
+        </template>
       </el-form>
       <template #footer>
         <el-button @click="dialogVisible = false">取消</el-button>
@@ -119,6 +224,10 @@
             <el-descriptions-item v-if="parsedConfig.mode" label="模式">{{ parsedConfig.mode === 'push' ? '推流' : '服务' }}</el-descriptions-item>
             <el-descriptions-item v-if="parsedConfig.addr && currentOutput && currentOutput.type !== 'http-flv'" label="监听地址">{{ parsedConfig.addr }}</el-descriptions-item>
             <el-descriptions-item v-if="parsedConfig.transport" label="传输协议">{{ transportLabel(parsedConfig.transport) }}</el-descriptions-item>
+            <el-descriptions-item v-if="parsedConfig.device_id" label="设备 ID">{{ parsedConfig.device_id }}</el-descriptions-item>
+            <el-descriptions-item v-if="parsedConfig.channel_id" label="通道 ID">{{ parsedConfig.channel_id }}</el-descriptions-item>
+            <el-descriptions-item v-if="parsedConfig.platform_ip" label="注册平台">{{ parsedConfig.platform_ip }}:{{ parsedConfig.platform_port }}</el-descriptions-item>
+            <el-descriptions-item v-if="parsedConfig.device_name" label="设备名称">{{ parsedConfig.device_name }}</el-descriptions-item>
           </el-descriptions>
         </div>
 
@@ -185,6 +294,62 @@ const form = reactive({
   rtspTransport: 'auto',
 })
 
+// GB28181 全字段表单（§7.1 一一对应；高级项折叠）。
+const gbDefaults = {
+  platform_ip: '',
+  platform_port: 15060,
+  platform_id: '',
+  device_id: '',
+  channel_id: '',
+  sip_domain: '',
+  password: '',
+  transport: 'udp',
+  tcp_role: 'auto',
+  rtp_mtu: 1400,
+  video_codec: 'auto',
+  local_sip_port: 0,
+  local_ip: '',
+  protocol_version: '',
+  register_interval: 3600,
+  heartbeat_interval: 60,
+  heartbeat_timeout_count: 3,
+  audio_enable: true,
+  gop_replay: true,
+  tele_boot_restart: false,
+  control_reject_unimplemented: false,
+  device_name: '',
+  manufacturer: 'x-media',
+  model: 'gb28181-sink',
+  firmware: '1.0.0',
+}
+const gb = reactive({ ...gbDefaults })
+
+function resetGb() {
+  Object.assign(gb, gbDefaults)
+}
+
+function fillGbFromConfig(cfg: Record<string, any>) {
+  resetGb()
+  for (const key of Object.keys(gbDefaults)) {
+    const v = cfg?.[key]
+    if (v !== undefined && v !== null) {
+      (gb as Record<string, any>)[key] = v
+    }
+  }
+}
+
+function validateGbFields(): string {
+  if (!gb.platform_ip) return '请输入平台 SIP 地址'
+  if (!gb.platform_port || gb.platform_port < 1 || gb.platform_port > 65535) return '平台端口需在 1~65535'
+  if (gb.platform_id && !/^\d{20}$/.test(gb.platform_id)) return '平台服务 ID 需为 20 位数字'
+  if (!/^\d{20}$/.test(gb.device_id)) return '设备 ID 需为 20 位数字'
+  if (gb.channel_id && !/^\d{20}$/.test(gb.channel_id)) return '通道 ID 需为 20 位数字'
+  if (!gb.sip_domain) return '请输入 SIP 域'
+  if (!gb.password) return '请输入 SIP 密码'
+  if (gb.rtp_mtu && (gb.rtp_mtu < 400 || gb.rtp_mtu > 1400)) return 'RTP MTU 需在 400~1400'
+  return ''
+}
+
 const parsedConfig = computed(() => {
   if (!currentOutput.value) return {}
   try {
@@ -204,13 +369,25 @@ onMounted(() => {
 })
 
 function getTypeTag(type: string) {
-  const tags: Record<string, string> = { rtmp: 'danger', rtsp: 'warning', 'http-flv': 'success', hls: '' }
+  const tags: Record<string, string> = { rtmp: 'danger', rtsp: 'warning', 'http-flv': 'success', hls: '', gb28181: 'danger' }
   return tags[type] || 'info'
 }
 
 function transportLabel(t: string): string {
-  const labels: Record<string, string> = { auto: '自动适配', tcp: 'TCP', udp: 'UDP', 'udp-multicast': 'UDP 组播' }
+  const labels: Record<string, string> = { auto: '自动适配', tcp: 'TCP', udp: 'UDP', 'udp-multicast': 'UDP 组播', 'tcp-out': 'TCP 主动' }
   return labels[t] || t
+}
+
+// GB28181 输出无对外拉流地址：列表显示"通道@平台"标识（§7.2）。
+function getDeviceLabel(row: Output): string {
+  try {
+    const cfg = JSON.parse(row.config)
+    if (row.type === 'gb28181' && cfg.platform_ip) {
+      const ch = cfg.channel_id || cfg.device_id || ''
+      return `GB28181 · ${ch}@${cfg.platform_ip}:${cfg.platform_port}`
+    }
+  } catch {}
+  return ''
 }
 
 function getStreamUrl(row: Output): string {
@@ -271,6 +448,7 @@ function resetForm() {
   form.configAddr = ''
   form.rtspMode = 'push'
   form.rtspTransport = 'auto'
+  resetGb()
 }
 
 function showCreateDialog() {
@@ -291,6 +469,7 @@ function showEditDialog(row: Output) {
     form.configAddr = cfg.addr || ''
     form.rtspMode = cfg.mode || 'push'
     form.rtspTransport = cfg.transport || 'auto'
+    fillGbFromConfig(cfg)
   } catch {
     resetForm()
   }
@@ -336,6 +515,8 @@ function buildConfig(): string {
     return JSON.stringify({ addr: '/live/' })
   } else if (form.type === 'webrtc') {
     return JSON.stringify({})
+  } else if (form.type === 'gb28181') {
+    return JSON.stringify({ ...gb })
   }
   return '{}'
 }
@@ -347,6 +528,10 @@ async function handleSubmit() {
   if (form.type === 'rtsp' && form.rtspMode === 'server' && !form.configAddr) { ElMessage.warning('请输入监听地址'); return }
   if (form.type === 'http-flv' && !form.configAddr) {
     form.configAddr = '/live/'
+  }
+  if (form.type === 'gb28181') {
+    const err = validateGbFields()
+    if (err) { ElMessage.warning(err); return }
   }
 
   submitting.value = true
@@ -397,6 +582,8 @@ async function handleDelete(id: string) {
 .raw-config { background: #f5f7fa; padding: 12px; border-radius: 4px; font-size: 12px; overflow-x: auto; margin: 0; }
 .url-row { display: flex; align-items: center; gap: 8px; }
 .url-text { font-family: monospace; font-size: 13px; }
+.form-inline { display: flex; gap: 8px; width: 100%; }
+.gb-advanced { margin: 4px 0 12px; }
 .mono { font-family: monospace; font-size: 12px; }
 .clients-actions { margin-top: 10px; text-align: right; }
 </style>

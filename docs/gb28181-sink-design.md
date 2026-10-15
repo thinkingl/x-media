@@ -621,7 +621,8 @@ Web 表单（§7.2）
   - `gb28181 registered (expires=3600)` / `register rejected: 403` / `platform silent, re-registering`
   - `invite accepted: channel=..., ssrc=0x..., transport=udp|tcp`
   - `session closed (bye)` / `deregistered`
-- **计数（MetricsHooks → 日志/统计接口）**：注册尝试/成功/失败、心跳失败、会话开始/结束、PS 字节数；`WriteFrame` 侧丢帧计数（背压）。
+- **计数（MetricsHooks → 日志/统计接口）**：注册尝试/成功/失败、心跳失败、会话开始/结束、PS 字节数；`WriteFrame` 侧丢帧计数（背压）；
+- **库日志汇入**：内置库使用 `log/slog`，经 `cmd/main.go` 既有的 `zap.RedirectStdLog` 自动进入统一日志（控制台 + `x-media.log`），无需额外桥接（M2 实测：注册/心跳/退避等库日志均可见）。
 
 ---
 
@@ -714,6 +715,8 @@ Web 表单（§7.2）
 每个里程碑遵守仓库流程：**先加红测试 → 实现 → 单测/回归绿 → 实测（ffmpeg/平台）**，变更及时提交。
 
 **进度：M1 已完成（2026-10-15）** —— 内置 `device/manscdp/metrics/psmux` 四包（含 `platform_id` 兼容补丁，见 `server/internal/gb28181/README.md`）、`Gb28181Sink` 骨架与注册/心跳/注销生命周期、配置模型/映射/校验（前后端两处透传点 + `validateGB28181Config`）、FakePlatform L2 全流程测试（401 摘要 qop=auth、请求 URI 断言、心跳、`Expires:0` 注销；含 `-race`）、全量回归绿。
+
+**进度：M2 已完成（2026-10-15）** —— 指令应答矩阵测试全绿（Catalog / DeviceInfo / DeviceStatus / RecordInfo（空列表）/ ConfigDownload（BasicParam）/ DeviceControl（IFrame、PTZ → OK；TeleBoot 默认拒绝 → ERROR；开启 `tele_boot_restart` 后接受）/ SUBSCRIBE（200+Expires）/ OPTIONS）；兼容补丁两项（已执行控制指令补显式 `Result=OK` 应答、目录通道 Name 用设备名，见补丁表）；前端 `Outputs.vue` 全字段表单（平台连接/设备身份/行为参数/高级折叠、编辑回显、前后端双重校验、详情展示、"GB28181 · 通道@平台"列表标识）；API 端到端冒烟（创建/编辑回显/非法拒绝/启动/停止/删除）通过；内置库 slog 日志确认汇入 `x-media.log`。
 
 ---
 

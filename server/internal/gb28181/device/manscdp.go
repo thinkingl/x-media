@@ -374,9 +374,15 @@ func dispatchExtraChannels(dev DeviceContext) []ChannelItem {
 }
 
 func buildChannel(dev DeviceContext) ChannelItem {
+	// 通道 Name 取设备展示名（方案 §5.3 目录示例）；未配置时回退通道编码。
+	// Local patch (x-media GB28181 sink design §5.3).
+	name := dev.Name
+	if name == "" {
+		name = dev.ChannelID
+	}
 	return ChannelItem{
 		DeviceID:     dev.ChannelID,
-		Name:         dev.ChannelID,
+		Name:         name,
 		Status:       "ON",
 		Manufacturer: dev.Manufacturer,
 		Model:        dev.Model,
@@ -613,6 +619,22 @@ func BuildDeviceStatusResponseMessage(sn, deviceID string) SipMessage {
 // BuildControlRejectResponseMessage creates a SIP MESSAGE with control rejection response.
 func BuildControlRejectResponseMessage(cmdType, sn, deviceID string) SipMessage {
 	body := fmt.Sprintf(`<Response CmdType="%s" SN="%s"><DeviceID>%s</DeviceID><Result>ERROR</Result></Response>`, cmdType, sn, deviceID)
+	return SipMessage{
+		Method:      "MESSAGE",
+		ContentType: "Application/MANSCDP+xml",
+		Body:        body,
+		UserAgent:   UserAgent,
+		Headers:     make(map[string]string),
+	}
+}
+
+// BuildControlOKResponseMessage creates a SIP MESSAGE with the control
+// acceptance response (A.2.6.8 Result=OK). Local patch (x-media GB28181
+// sink design §5.4): upstream emits only the SIP 200 OK for executed
+// sub-commands; sending the explicit Response as well keeps platforms
+// that parse the MANSCDP answer (mirrors the reject arm's ERROR shape).
+func BuildControlOKResponseMessage(cmdType, sn, deviceID string) SipMessage {
+	body := fmt.Sprintf(`<Response CmdType="%s" SN="%s"><DeviceID>%s</DeviceID><Result>OK</Result></Response>`, cmdType, sn, deviceID)
 	return SipMessage{
 		Method:      "MESSAGE",
 		ContentType: "Application/MANSCDP+xml",

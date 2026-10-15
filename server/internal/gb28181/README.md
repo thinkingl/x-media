@@ -17,6 +17,8 @@
 | 文件 | 补丁 | 对应方案 |
 |---|---|---|
 | `device/seam.go`、`device/validate.go`、`device/server.go` | 新增 `Config.PlatformID`：出站请求 URI（REGISTER/注销/心跳）与心跳 To 头使用 `sip:<platform_id>@<domain>`；未配置时保持上游行为 | §5.9 平台兼容性 |
+| `device/server.go`、`device/manscdp.go` | 已执行的控制指令补充显式 `Result=OK` 应答（上游仅回 SIP 200；拒绝路径保留 ERROR 应答） | §5.4 指令应答 |
+| `device/manscdp.go` | 目录通道 `Name` 使用设备展示名（未配置时回退通道编码），与方案 §5.3 目录示例一致 | §5.3 目录应答 |
 | 后续（M3/M4） | 媒体层切换 psmux（音频/H265）；`tcp_role`/`rtp_mtu` 开关 | §5.4/§5.9 |
 
 维护约定：
