@@ -74,6 +74,17 @@ func (c Config) Validate() error {
 	if transport == "tls" && c.TLSCAFile == "" && !c.TLSInsecureSkipVerify {
 		return fmt.Errorf("device.Config.TLSCAFile is required for Transport tls (or set TLSInsecureSkipVerify explicitly)")
 	}
+	// Live media codec selection (local patch, x-media §5.7).
+	switch c.VideoCodec {
+	case "", "h264", "h265":
+	default:
+		return fmt.Errorf("device.Config.VideoCodec %q must be h264 or h265", c.VideoCodec)
+	}
+	switch c.AudioCodec {
+	case "", "aac", "g711a", "g711u":
+	default:
+		return fmt.Errorf("device.Config.AudioCodec %q must be aac, g711a or g711u", c.AudioCodec)
+	}
 	return nil
 }
 

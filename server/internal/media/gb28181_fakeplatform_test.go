@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/pion/rtp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -39,6 +40,10 @@ type fakeSIPPlatform struct {
 	deregisters  int
 	authFailures int
 	cseq         int
+
+	// M3 媒体面：点播 RTP 接收
+	rtpConn    *net.UDPConn
+	rtpPackets []rtp.Packet // 按接收顺序（回环不重排）
 }
 
 type fakeSIPEvent struct {
@@ -54,7 +59,7 @@ func newFakeSIPPlatform(t *testing.T, platformID, realm, deviceID, password stri
 	p := &fakeSIPPlatform{
 		t: t, conn: conn, realm: realm, nonce: "a1b2c3d4e5f6a7b8",
 		deviceID: deviceID, password: password, platformID: platformID,
-		events:    make(chan fakeSIPEvent, 64),
+		events:    make(chan fakeSIPEvent, 512),
 		responses: make(map[string]device.SipMessage),
 	}
 	go p.serve()
@@ -164,8 +169,18 @@ func extractSIPCmdType(body string) string {
 	return ""
 }
 
-// sendRequest 以平台身份向设备发送 SIP 请求（MESSAGE/SUBSCRIBE/OPTIONS 等）。
+// sendRequest 以平台身份向设备发送 SIP 请求（MANSCDP MESSAGE/SUBSCRIBE/OPTIONS 等）。
 func (p *fakeSIPPlatform) sendRequest(t *testing.T, method, extraHeaders, body string) {
+	t.Helper()
+	contentType := "Application/MANSCDP+xml"
+	if body == "" {
+		contentType = ""
+	}
+	p.sendRequestCT(t, method, extraHeaders, contentType, body)
+}
+
+// sendRequestCT 同上，指定 Content-Type（如 INVITE 的 application/sdp）。
+func (p *fakeSIPPlatform) sendRequestCT(t *testing.T, method, extraHeaders, contentType, body string) {
 	t.Helper()
 	p.mu.Lock()
 	addr := p.deviceAddr
@@ -187,8 +202,8 @@ func (p *fakeSIPPlatform) sendRequest(t *testing.T, method, extraHeaders, body s
 	fmt.Fprintf(&b, "CSeq: %d %s\r\n", n, method)
 	fmt.Fprintf(&b, "Contact: <sip:%s@127.0.0.1:%d>\r\n", p.platformID, localPort)
 	b.WriteString(extraHeaders)
-	if body != "" {
-		b.WriteString("Content-Type: Application/MANSCDP+xml\r\n")
+	if contentType != "" {
+		fmt.Fprintf(&b, "Content-Type: %s\r\n", contentType)
 	}
 	fmt.Fprintf(&b, "Content-Length: %d\r\n\r\n", len(body))
 	b.WriteString(body)
@@ -222,20 +237,118 @@ func (p *fakeSIPPlatform) waitCmdResponse(t *testing.T, cmd string, timeout time
 	}
 }
 
-// waitMethodResponse 等待设备对指定方法的 SIP 应答（如 SUBSCRIBE/OPTIONS 的 200）。
+// waitMethodResponse 等待设备对指定方法的最终 SIP 应答（跳过 1xx 临时响应，
+// 如 INVITE 的 100 Trying）。
 func (p *fakeSIPPlatform) waitMethodResponse(t *testing.T, method string, timeout time.Duration) device.SipMessage {
 	t.Helper()
 	deadline := time.After(timeout)
 	for {
 		select {
 		case ev := <-p.events:
-			if ev.kind == "device-response" && strings.Contains(ev.msg.CSeq, method) {
+			if ev.kind == "device-response" && strings.Contains(ev.msg.CSeq, method) && ev.msg.StatusCode >= 200 {
 				return ev.msg
 			}
 		case <-deadline:
 			t.Fatalf("timeout waiting device SIP response to %q", method)
 		}
 	}
+}
+
+// invite 发起点播（UDP；recvonly；y=ssrc）：分配 RTP 接收口 → INVITE →
+// 校验 200 answer SDP → 回 ACK 并开始收包。返回媒体端口。
+func (p *fakeSIPPlatform) invite(t *testing.T, ssrc uint32) int {
+	t.Helper()
+	conn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1")})
+	require.NoError(t, err)
+	// 高码率突发（1080p IDR 一次 100+ 包）需要更大的接收缓冲，
+	// 200KB ≤ rmem_max(212992) 上限，避免回环丢包。
+	_ = conn.SetReadBuffer(200 * 1024)
+	p.mu.Lock()
+	p.rtpConn = conn
+	p.rtpPackets = nil
+	p.mu.Unlock()
+	go p.readRTP(conn)
+	t.Cleanup(func() { _ = conn.Close() })
+
+	mediaPort := conn.LocalAddr().(*net.UDPAddr).Port
+	sdpBody := fmt.Sprintf("v=0\r\no=%s 0 0 IN IP4 127.0.0.1\r\ns=Play\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\n"+
+		"m=video %d RTP/AVP 96\r\na=recvonly\r\na=rtpmap:96 PS/90000\r\ny=%d\r\n",
+		p.platformID, mediaPort, ssrc)
+	p.sendRequestCT(t, "INVITE", "", "application/sdp", sdpBody)
+
+	resp := p.waitMethodResponse(t, "INVITE", 5*time.Second)
+	require.Equal(t, 200, resp.StatusCode)
+	assert.Contains(t, resp.Body, "a=sendonly", "answer SDP 必须为 sendonly")
+	assert.Contains(t, resp.Body, "a=rtpmap:96 PS/90000")
+	assert.Contains(t, resp.Body, fmt.Sprintf("y=%d", ssrc), "answer 应回显平台 SSRC")
+	// 平台 ACK（设备侧无操作；媒体在 200 OK 后即开始）
+	p.sendRequest(t, "ACK", "", "")
+	return mediaPort
+}
+
+// bye 结束会话（断言设备回 200）。
+func (p *fakeSIPPlatform) bye(t *testing.T) {
+	t.Helper()
+	p.sendRequest(t, "BYE", "", "")
+	resp := p.waitMethodResponse(t, "BYE", 5*time.Second)
+	require.Equal(t, 200, resp.StatusCode)
+}
+
+func (p *fakeSIPPlatform) readRTP(conn *net.UDPConn) {
+	for {
+		buf := make([]byte, 4096)
+		n, _, err := conn.ReadFromUDP(buf)
+		if err != nil {
+			return
+		}
+		var pkt rtp.Packet
+		if err := pkt.Unmarshal(buf[:n]); err != nil {
+			continue
+		}
+		// pion Unmarshal 的 Payload 引用入参 buffer：必须拷贝，否则后续读
+		// 会覆盖已存包的内容（测试自身的数据竞争）。
+		pkt.Payload = append([]byte(nil), pkt.Payload...)
+		p.mu.Lock()
+		p.rtpPackets = append(p.rtpPackets, pkt)
+		p.mu.Unlock()
+	}
+}
+
+// waitRTP 等待至少 n 个 RTP 包，返回快照。
+func (p *fakeSIPPlatform) waitRTP(t *testing.T, n int, timeout time.Duration) []rtp.Packet {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		p.mu.Lock()
+		if len(p.rtpPackets) >= n {
+			out := append([]rtp.Packet(nil), p.rtpPackets...)
+			p.mu.Unlock()
+			return out
+		}
+		p.mu.Unlock()
+		if time.Now().After(deadline) {
+			p.mu.Lock()
+			got := len(p.rtpPackets)
+			p.mu.Unlock()
+			t.Fatalf("timeout waiting %d RTP packets (got %d)", n, got)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func (p *fakeSIPPlatform) rtpCount() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return len(p.rtpPackets)
+}
+
+// assemblePS 按接收顺序拼接 RTP 负载（回环不重排）。
+func assemblePS(pkts []rtp.Packet) []byte {
+	var out []byte
+	for i := range pkts {
+		out = append(out, pkts[i].Payload...)
+	}
+	return out
 }
 
 var fakeSIPAuthKV = regexp.MustCompile(`(\w+)="?([^",]+)"?`)

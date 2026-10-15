@@ -718,6 +718,13 @@ Web 表单（§7.2）
 
 **进度：M2 已完成（2026-10-15）** —— 指令应答矩阵测试全绿（Catalog / DeviceInfo / DeviceStatus / RecordInfo（空列表）/ ConfigDownload（BasicParam）/ DeviceControl（IFrame、PTZ → OK；TeleBoot 默认拒绝 → ERROR；开启 `tele_boot_restart` 后接受）/ SUBSCRIBE（200+Expires）/ OPTIONS）；兼容补丁两项（已执行控制指令补显式 `Result=OK` 应答、目录通道 Name 用设备名，见补丁表）；前端 `Outputs.vue` 全字段表单（平台连接/设备身份/行为参数/高级折叠、编辑回显、前后端双重校验、详情展示、"GB28181 · 通道@平台"列表标识）；API 端到端冒烟（创建/编辑回显/非法拒绝/启动/停止/删除）通过；内置库 slog 日志确认汇入 `x-media.log`。
 
+**进度：M3 已完成（2026-10-15）** —— 媒体路径全链路：
+- 内置库直播路径切换 `psmux`（H264/H265 + AAC/G711、PSM/CRC、超长 AU 切分），`AccessUnit` 扩展音频随行；`Server.SetMediaCodecs` 支持管道协商晚于 Start；
+- `Gb28181Sink` 帧转换（Annex-B→NALU、关键帧参数集补齐、AAC+ADTS 直封、PTS→会话基准映射）+ `gb28181FrameHub` GOP 缓存重放（4MB 上限、超限等下一关键帧）；
+- L2 测试：INVITE→200 answer（sendonly/PS/90000/y=）→ PS/RTP 结构断言（pack/PSM/PES/参数集/IDR/ADTS、PT=96、SSRC、≤1400、marker 突发界定）、GOP 重放即时出图、H265 路径（PSM 0x24/IDR）、BYE 停流；`-race` 通过；
+- L3 测试：MP4 文件（1080p H264+AAC）→ DefaultPipe → Gb28181Sink → FakePlatform 收流 → 重组 PS → ffprobe 识别视频+音频、ffmpeg 解码通过。
+- 已知边界（M4 处理）：TCP 媒体（`$`-帧）与 `tcp_role`/`rtp_mtu` 开关接线；客户端列表（平台会话）展示。
+
 ---
 
 ## 13. 决议归档与实施期回访项

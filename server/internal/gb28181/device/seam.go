@@ -79,6 +79,14 @@ type Config struct {
 	// across MESSAGEs automatically.
 	ExtraChannels []ChannelItem `yaml:"extra_channels,omitempty"`
 
+	// VideoCodec selects the live PS video codec: "h264" (default) or
+	// "h265". Local patch (x-media GB28181 sink design §5.7): the live
+	// muxer is psmux (H.264/H.265), replacing the H264-only path.
+	VideoCodec string `yaml:"video_codec,omitempty"`
+	// AudioCodec declares the live audio track: "" (none), "aac"
+	// (ADTS-framed frames), "g711a" or "g711u". Local patch (§5.7).
+	AudioCodec string `yaml:"audio_codec,omitempty"`
+
 	Transport string `yaml:"transport"` // SIP transport: udp (default), tcp (inbound listener), tcp-out (device dials the platform, full lifecycle), tls (SIPS outbound, GB/T 28181-2022 A-level), or tls-listen (inbound SIPS: the platform dials the device; requires the TLS pair)
 
 	// IncomingNotePolicy sets the failure behavior of device-side Note
@@ -141,11 +149,23 @@ type NALU struct {
 	IsPPS bool   // True if type == 8
 }
 
-// AccessUnit is a complete H.264 access unit (one encoder frame).
+// AccessUnit is a complete H.264/H.265 access unit (one encoder frame).
+// Local patch (x-media GB28181 sink design §5.7): Audio carries the audio
+// frames that fall into this AU's window; the live muxer appends them to
+// the same PS burst so the burst-final RTP marker still delimits the AU.
 type AccessUnit struct {
 	NALUs     []NALU
 	Timestamp time.Time
 	KeyFrame  bool // True if contains IDR
+	Audio     []AudioFrame
+}
+
+// AudioFrame is one audio frame riding with a video AU. Data is the codec
+// frame as-is: AAC must already carry its 7-byte ADTS header, G.711 raw
+// bytes. Local patch (§5.7).
+type AudioFrame struct {
+	Data      []byte
+	Timestamp time.Time
 }
 
 // FrameSubscription is a live-frame subscription handed out by

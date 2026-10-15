@@ -168,6 +168,7 @@ type GB28181Sink struct {
 
 	server *device.Server
 	hub    *gb28181FrameHub
+	pipe   *gb28181FramePipe
 
 	cancel  context.CancelFunc
 	done    chan struct{}
@@ -199,6 +200,7 @@ func NewGB28181Sink(config *OutputConfig) (*GB28181Sink, error) {
 		cfg:    cfg,
 		status: StreamStatusStopped,
 		hub:    newGB28181FrameHub(),
+		pipe:   newGB28181FramePipe(),
 	}, nil
 }
 
@@ -291,35 +293,35 @@ func (s *GB28181Sink) Stop() error {
 	return nil
 }
 
-// Configure 管道协商：校验媒体能力（仅 H.264/H.265 视频；video_codec=h264 拒绝 H265 源）。
+// Configure 管道协商：校验媒体能力（仅 H.264/H.265 视频；video_codec=h264 拒绝 H265 源），
+// 填充帧转换参数并把协商到的编码同步给内置设备端（媒体会话按 INVITE 时点取用）。
 func (s *GB28181Sink) Configure(streams []StreamInfo) error {
-	var hasVideo bool
-	for _, st := range streams {
-		if st.Kind != "video" {
-			continue
-		}
-		switch st.CodecID {
-		case CodecH264:
-			hasVideo = true
-		case CodecH265:
-			if s.cfg.VideoCodec == "h264" {
-				return errors.New("gb28181: 源为 H.265，但输出配置 video_codec=h264（不做转码，无法输出）；请改用 H.264 源或移除该限制")
-			}
-			hasVideo = true
-		}
-	}
-	if !hasVideo {
-		return errors.New("gb28181: 未找到 H.264/H.265 视频轨道（GB28181 输出仅支持这两种视频编码）")
+	if err := s.pipe.configure(streams, s.cfg.VideoCodec, s.cfg.AudioEnable); err != nil {
+		return err
 	}
 	s.mu.Lock()
 	s.streams = append([]StreamInfo(nil), streams...)
+	server := s.server
 	s.mu.Unlock()
+
+	if server != nil {
+		video, audio := s.pipe.videoCodecName()
+		server.SetMediaCodecs(video, audio)
+	}
 	return nil
 }
 
-// WriteFrame 数据面入口。M1 骨架：帧计数占位；M3 接入
-// Annex-B→NALU / AAC→ADTS 转换 + GOP 重放 + hub 分发（方案 §5.7）。
+// WriteFrame 数据面：视频帧 → AccessUnit（NALU+音频窗口）→ hub 扇出；
+// 音频帧先入队，随下一个视频帧并入同一 PS 突发（§5.7）。
 func (s *GB28181Sink) WriteFrame(f *Frame) error {
+	switch f.Header.FrameType {
+	case FrameTypeVideo:
+		if au := s.pipe.videoAU(f); au != nil {
+			s.hub.broadcast(*au)
+		}
+	case FrameTypeAudio:
+		s.pipe.audioFrame(f)
+	}
 	return nil
 }
 

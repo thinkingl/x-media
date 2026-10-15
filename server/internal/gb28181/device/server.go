@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/x-media/x-media-server/internal/gb28181/metrics"
+	"github.com/x-media/x-media-server/internal/gb28181/psmux"
 )
 
 type Server struct {
@@ -187,6 +188,17 @@ func (s *Server) SetControlHandlers(c ControlCallbacks) {
 // Call before Start — callbacks fire on the SIP receive goroutine.
 func (s *Server) SetConfigHandlers(c ConfigCallbacks) {
 	s.configCbs = c
+}
+
+// SetMediaCodecs updates the live media codec selection after construction.
+// x-media pipe negotiation happens after Start(), so the host pushes the
+// negotiated codecs here; media sessions read them at INVITE time.
+// Local patch: x-media GB28181 sink design §5.7.
+func (s *Server) SetMediaCodecs(video, audio string) {
+	s.mu.Lock()
+	s.cfg.VideoCodec = video
+	s.cfg.AudioCodec = audio
+	s.mu.Unlock()
 }
 
 // Notifier returns the host-facing NOTIFY sender (issue #80): hold it and
@@ -1562,7 +1574,19 @@ func (s *Server) handleInvite(ctx context.Context, msg SipMessage, fromAddr net.
 		if tcpConn != nil {
 			pusher.SetTCPConn(tcpConn)
 		}
-		slog.Info("gb28181: media goroutine started", "remote", rtpDest.String(), "transport", s.cfg.Transport)
+		// Live PS muxer (local patch, x-media §5.7): psmux replaces the
+		// H264-only MuxH264ToPS and adds H.265 + AAC/G.711 audio in the
+		// same PS burst. Read the codec selection under s.mu (the host
+		// may push it via SetMediaCodecs after Start). psmux.Muxer is
+		// not concurrency-safe — this goroutine is its only user.
+		s.mu.Lock()
+		videoCodec, audioCodec := s.cfg.VideoCodec, s.cfg.AudioCodec
+		s.mu.Unlock()
+		mux := psmux.New()
+		mux.SetVideoCodec(videoCodec)
+		mux.SetAudioCodec(audioCodec)
+		slog.Info("gb28181: media goroutine started", "remote", rtpDest.String(),
+			"transport", s.cfg.Transport, "video", videoCodec, "audio", audioCodec)
 
 		for {
 			select {
@@ -1574,13 +1598,17 @@ func (s *Server) handleInvite(ctx context.Context, msg SipMessage, fromAddr net.
 					slog.Info("gb28181: AU channel closed")
 					return
 				}
-				// Convert []NALU to [][]byte for PS muxing
-				naluBytes := make([][]byte, len(au.NALUs))
-				for i, nalu := range au.NALUs {
-					naluBytes[i] = nalu.Data
+				// Annex-B reassembly from NALUs (mirrors MuxH264ToPS:
+				// 4-byte start code first, 3-byte for the rest).
+				annexB := annexBFromNALUs(au.NALUs)
+				pts90k := int64(timeTo90kHz(au.Timestamp))
+				psData := mux.WriteAU(annexB, pts90k, au.KeyFrame)
+				// Audio rides inside the video AU's burst (§5.7): a
+				// standalone audio send would carry its own RTP marker
+				// and truncate the video frame at the receiver.
+				for _, a := range au.Audio {
+					psData = mux.AppendAudioPES(psData, a.Data, int64(timeTo90kHz(a.Timestamp)))
 				}
-				// Mux H.264 to PS
-				psData := MuxH264ToPS(naluBytes, au.KeyFrame, au.Timestamp, au.Timestamp)
 				// Send PS data over RTP
 				if err := pusher.SendFrame(psData, au.KeyFrame, au.Timestamp, ssrc); err != nil {
 					slog.Warn("gb28181: failed to send RTP frame", "error", err)

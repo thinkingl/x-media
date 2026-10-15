@@ -19,7 +19,9 @@
 | `device/seam.go`、`device/validate.go`、`device/server.go` | 新增 `Config.PlatformID`：出站请求 URI（REGISTER/注销/心跳）与心跳 To 头使用 `sip:<platform_id>@<domain>`；未配置时保持上游行为 | §5.9 平台兼容性 |
 | `device/server.go`、`device/manscdp.go` | 已执行的控制指令补充显式 `Result=OK` 应答（上游仅回 SIP 200；拒绝路径保留 ERROR 应答） | §5.4 指令应答 |
 | `device/manscdp.go` | 目录通道 `Name` 使用设备展示名（未配置时回退通道编码），与方案 §5.3 目录示例一致 | §5.3 目录应答 |
-| 后续（M3/M4） | 媒体层切换 psmux（音频/H265）；`tcp_role`/`rtp_mtu` 开关 | §5.4/§5.9 |
+| `device/seam.go` | `AccessUnit` 扩展 `Audio []AudioFrame`（音频随行同一 PS 突发）；`Config.VideoCodec`/`AudioCodec`（h264/h265、aac/g711a/g711u） | §5.7 帧适配 |
+| `device/server.go`、`device/ps.go` | 直播媒体路径切换为 `psmux`（替换 H264-only 的 `MuxH264ToPS`）：H264/H265 + AAC/G711；新增 `Server.SetMediaCodecs`（管道协商晚于 Start）；`annexBFromNALUs` 重组助手 | §5.6/§5.7 媒体封装 |
+| 未修改（保留上游） | 回放路径 `playback.go`（仍用 `MuxH264ToPS`，M5 范围）；`platform`/`security35114` 未内置 | — |
 
 维护约定：
 

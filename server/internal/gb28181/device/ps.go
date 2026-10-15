@@ -275,6 +275,27 @@ func MuxH264ToPS(nalus [][]byte, isKeyFrame bool, pts, dts time.Time) []byte {
 	return ps
 }
 
+// annexBFromNALUs reassembles NALU payloads into an Annex-B byte stream:
+// 4-byte start code for the first NALU, 3-byte for the rest — the same
+// framing MuxH264ToPS uses. Local patch (x-media GB28181 sink design §5.7):
+// psmux takes Annex-B bytes, the AU hub carries NALUs.
+func annexBFromNALUs(nalus []NALU) []byte {
+	size := 0
+	for _, n := range nalus {
+		size += len(n.Data) + 4
+	}
+	out := make([]byte, 0, size)
+	for i, n := range nalus {
+		if i == 0 {
+			out = append(out, 0x00, 0x00, 0x00, 0x01)
+		} else {
+			out = append(out, 0x00, 0x00, 0x01)
+		}
+		out = append(out, n.Data...)
+	}
+	return out
+}
+
 // timeTo90kHz converts a time.Time to 90kHz timestamp ticks.
 // Uses Unix epoch as reference: ticks = unix_nanos * 9 / 100_000
 func timeTo90kHz(t time.Time) uint64 {
