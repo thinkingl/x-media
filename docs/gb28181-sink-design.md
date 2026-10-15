@@ -1,6 +1,6 @@
 # GB28181 Sink（虚拟摄像头）设计方案
 
-> 状态：**待下一轮评审**（第一、二轮意见已合入）｜ 版本：v0.3 ｜ 日期：2026-10-15 ｜ 相关代码：`server/internal/media/`、`server/internal/service/`、`server/internal/model/`、`web/src/views/Outputs.vue`
+> 状态：**待下一轮评审**（第一、二、三轮意见已合入）｜ 版本：v0.4 ｜ 日期：2026-10-15 ｜ 相关代码：`server/internal/media/`、`server/internal/service/`、`server/internal/model/`、`web/src/views/Outputs.vue`
 
 ---
 
@@ -15,6 +15,10 @@
 **第二轮评审意见（已采纳，2026-10-15）**
 
 4. **§7 配置项全部可通过 Web 修改**：全字段表单（创建/编辑/详情），无"手改 JSON/数据库"形态；编辑流程与现有输出端一致（停止态编辑、启动生效）——见 §7.2。
+
+**第三轮评审意见（已采纳，2026-10-15）**
+
+5. **配置持久化到数据库现有 `outputs.config` 字段**：§7.1 全部配置项经既有 `outputs` 表 `config`（TEXT，JSON 文本）保存，**不新增表/字段、不使用任何 JSON 配置文件**（存储链路见 §7.1）。
 
 **待下一轮评审（§13，Q4~Q9）**
 
@@ -441,9 +445,21 @@ GOP 重放（**首帧质量关键**）：缓存最近一个 GOP（自最近 IDR 
 
 ## 7. 配置设计
 
-### 7.1 输出端配置（JSON，存 `outputs.config`）
+### 7.1 输出端配置（保存于数据库现有 `outputs` 表 `config` 字段）
 
-> §7.1 全部字段均通过 Web 表单维护（创建/编辑/详情，见 §7.2），无需手改数据库或 JSON。
+**存储链路（无 JSON 配置文件、无 schema 变更）**
+
+```
+Web 表单（§7.2）
+  └─► POST/PUT /api/v1/outputs   { name, type:"gb28181", config:"{...}" }
+       └─► outputs 表 config 字段（TEXT，JSON 文本；与 rtmp/rtsp/http-flv 完全一致）
+            └─► 启动时服务层读取并反序列化（output_service / status_util / pipe_service）
+                 └─► media.OutputConfig（字段透传）→ Gb28181Sink
+```
+
+- 不新增表、不新增字段、不需要数据库迁移——新增配置项仅作为 `config` JSON 的新键存在；
+- 不使用任何外部 JSON/YAML 配置文件；输出端配置的唯一权威来源是数据库；
+- 下方字段全集即 `config` 列的文本内容（示例）：
 
 ```json
 {
@@ -497,7 +513,7 @@ GOP 重放（**首帧质量关键**）：缓存最近一个 GOP（自最近 IDR 
 
 ### 7.2 前端（`web/src/views/Outputs.vue`）
 
-**硬性要求：§7.1 的全部配置项均可通过 Web 创建 / 修改 / 查看，无隐藏硬编码项、无需手改 JSON 或数据库。**
+**硬性要求：§7.1 的全部配置项均可通过 Web 创建 / 修改 / 查看，保存到数据库现有 `outputs.config` 字段（见 §7.1 存储链路）；无隐藏硬编码项、无需手改原始 JSON 文本。**
 
 **表单字段（与 §7.1 一一对应，高级项折叠展示）**
 
@@ -529,7 +545,7 @@ GOP 重放（**首帧质量关键**）：缓存最近一个 GOP（自最近 IDR 
 |---|---|---|
 | `server/go.mod` | 无新增外部依赖（pion/rtp、x/text 已在树）；`go 1.26` | M1 |
 | `server/internal/gb28181/`（新增） | 内置 `device`/`manscdp`/`metrics`/`psmux` 四包（非测试 ~9.0k 行，保留 MIT 版权头与出处）；媒体调用点切换为 psmux（音频/H265） | M1/M3 |
-| `server/internal/model/output.go` | `OutputTypeGB28181 = "gb28181"`；`OutputConfig` 新增 §7.1 字段 | M1 |
+| `server/internal/model/output.go` | `OutputTypeGB28181 = "gb28181"`；`OutputConfig` 新增 §7.1 字段（序列化进现有 `outputs.config`，**无 schema 迁移**） | M1 |
 | `server/internal/media/engine.go` | `OutputConfig` 新增同名字段（透传） | M1 |
 | `server/internal/media/gb28181_sink.go`（新增） | `Gb28181Sink`：Sink 接口 + FrameHub（视频/音频/ADTS/GOP 重放）+ ClientInfoProvider + MetricsHooks | M1-M3 |
 | `server/internal/media/media_hub.go` | `CreateOutput` 增加 `case "gb28181"` | M1 |
@@ -539,6 +555,8 @@ GOP 重放（**首帧质量关键**）：缓存最近一个 GOP（自最近 IDR 
 | `web/src/views/Outputs.vue` | 全字段表单（创建/编辑/详情，停止态编辑；§7.2） | M2 |
 | `docker/Dockerfile` | builder 镜像 `golang:1.26-bookworm`（或 GOTOOLCHAIN 兜底） | M1 |
 | `docs/design.md` | §12.8 适配器清单补 GB28181（完成后） | M4 |
+
+> **存储说明：GB28181 配置全部序列化进现有 `outputs` 表 `config` 字段（TEXT）——无新增表/字段/迁移，无 JSON 配置文件**（§7.1 存储链路）。
 
 ---
 
@@ -608,7 +626,7 @@ GOP 重放（**首帧质量关键**）：缓存最近一个 GOP（自最近 IDR 
 
 ### 11.3 L3 集成（MediaHub 全链路）
 
-`MP4Source → DefaultPipe → Gb28181Sink → FakePlatform`：验证帧完整到达（NALU 计数/关键帧序列）、源切换（重 Configure）、管道 Stop 级联、"无视频源/H265 源"的错误路径。
+`MP4Source → DefaultPipe → Gb28181Sink → FakePlatform`：验证帧完整到达（NALU 计数/关键帧序列、音频 PES、H265 路径）、源切换（重 Configure）、管道 Stop 级联、不支持编码源的错误路径；**配置持久化全链路**——创建/编辑（`outputs.config` 落库）→ 停止/启动读取 → 反序列化字段与表单回显一致。
 
 ### 11.4 L4 实测（真实平台，手动/CI 可选）
 
