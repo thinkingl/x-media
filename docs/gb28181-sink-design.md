@@ -1,16 +1,20 @@
 # GB28181 Sink（虚拟摄像头）设计方案
 
-> 状态：**待下一轮评审**（第一轮决议已合入）｜ 版本：v0.2 ｜ 日期：2026-10-15 ｜ 相关代码：`server/internal/media/`、`server/internal/service/`、`server/internal/model/`、`web/src/views/Outputs.vue`
+> 状态：**待下一轮评审**（第一、二轮意见已合入）｜ 版本：v0.3 ｜ 日期：2026-10-15 ｜ 相关代码：`server/internal/media/`、`server/internal/service/`、`server/internal/model/`、`web/src/views/Outputs.vue`
 
 ---
 
 ## 0. 评审记录与待决事项
 
-**已决（2026-10-15 第一轮评审）**
+**已决（第一轮评审，2026-10-15）**
 
 1. **技术选型：方案 A+**——内置（vendor）`gb28181-go` 的 `device`/`manscdp`/`metrics`/`psmux` 四个包；信令沿用官方实现，媒体层切换为 `psmux`（§6.2、§8）。不引入外部 GB28181 模块依赖。
 2. **一期媒体范围：H.264/H.265 视频 + AAC 音频**，PS 封装；AAC 直封（ADTS），无需转码（§1.2、§5.6）。
 3. **Go 1.26**（`server/go.mod` 与 Docker builder 镜像随 M1 升级，本机已就绪）。
+
+**第二轮评审意见（已采纳，2026-10-15）**
+
+4. **§7 配置项全部可通过 Web 修改**：全字段表单（创建/编辑/详情），无"手改 JSON/数据库"形态；编辑流程与现有输出端一致（停止态编辑、启动生效）——见 §7.2。
 
 **待下一轮评审（§13，Q4~Q9）**
 
@@ -439,6 +443,8 @@ GOP 重放（**首帧质量关键**）：缓存最近一个 GOP（自最近 IDR 
 
 ### 7.1 输出端配置（JSON，存 `outputs.config`）
 
+> §7.1 全部字段均通过 Web 表单维护（创建/编辑/详情，见 §7.2），无需手改数据库或 JSON。
+
 ```json
 {
   "platform_ip": "192.168.88.100",
@@ -491,9 +497,29 @@ GOP 重放（**首帧质量关键**）：缓存最近一个 GOP（自最近 IDR 
 
 ### 7.2 前端（`web/src/views/Outputs.vue`）
 
-- 类型下拉新增 `GB28181`；表单字段：平台地址/端口、设备 ID、通道 ID、SIP 域、密码、信令传输、心跳/注册周期、（折叠）高级项；
+**硬性要求：§7.1 的全部配置项均可通过 Web 创建 / 修改 / 查看，无隐藏硬编码项、无需手改 JSON 或数据库。**
+
+**表单字段（与 §7.1 一一对应，高级项折叠展示）**
+
+| 分组 | 字段 | 控件 / 校验 |
+|---|---|---|
+| 基础 | 名称 | 文本（必填） |
+| 平台连接 | `platform_ip` / `platform_port` | 文本 + 数字（1~65535，必填） |
+| 平台连接 | `sip_domain` / `password` | 文本（必填；密码为 password 输入框，带可见性切换） |
+| 设备身份 | `device_id` / `channel_id` | 文本（20 位数字校验；`channel_id` 留空 = 同 `device_id`） |
+| 设备身份 | `device_name` / `manufacturer` / `model` / `firmware` | 文本（目录/设备信息展示用） |
+| 行为参数 | `audio_enable` / `gop_replay` / `control_reject_unimplemented` | 开关 |
+| 高级 | `transport` / `local_sip_port` / `local_ip` / `protocol_version` | 下拉 / 数字 / 文本 |
+| 高级 | `register_interval` / `heartbeat_interval` / `heartbeat_timeout_count` | 数字（范围校验） |
+
+**编辑语义（v1）**：与现有输出端一致——运行中"编辑"按钮置灰；修改流程为 **停止 → 编辑 → 启动**（启动时按新配置重新注册）。启动失败（平台拒绝/编码不支持等）在列表与提示中展示原因。
+> 后续增强（M5 可选）：无中断热更新——保存时自动停止→重建 sink→重注册，前端一键生效。
+
+**其它**
 - 列表"流地址"列：显示 `GB28181 · <channel_id>@<platform_ip>`（无对外拉流 URL）；
-- 详情页：配置展示 + "平台会话"客户端列表（复用现有客户端表格：地址=平台媒体地址、传输=udp/tcp、UA=`gb28181:<ssrc>`）+ 运行状态。
+- 详情页：分组结构化展示配置 + 原始 JSON + "平台会话"客户端列表（地址=平台媒体地址、传输=udp/tcp、UA=`gb28181:<ssrc>`）+ 运行状态；
+- 校验：前端即时校验（20 位数字 / 端口 / 必填），后端 `validateOutputConfig` 兜底，错误消息透出到表单；
+- 创建向导的 `type` 选择新增 `GB28181`；表单与后端字段同名透传（`buildConfig` 直出 §7.1 JSON）。
 
 ---
 
@@ -510,7 +536,7 @@ GOP 重放（**首帧质量关键**）：缓存最近一个 GOP（自最近 IDR 
 | `server/internal/service/output_service.go` | `isValidOutputType` + `validateOutputConfig` 支持 gb28181 | M1 |
 | `server/internal/service/status_util.go`、`pipe_service.go` | 两处 `media.OutputConfig` 映射补字段 | M1 |
 | `server/internal/media/gb28181_sink_test.go`、`gb28181_fakeplatform_test.go`（新增） | L1/L2/L3 测试（§11） | M1-M4 |
-| `web/src/views/Outputs.vue` | 表单/展示（§7.2） | M2 |
+| `web/src/views/Outputs.vue` | 全字段表单（创建/编辑/详情，停止态编辑；§7.2） | M2 |
 | `docker/Dockerfile` | builder 镜像 `golang:1.26-bookworm`（或 GOTOOLCHAIN 兜底） | M1 |
 | `docs/design.md` | §12.8 适配器清单补 GB28181（完成后） | M4 |
 
@@ -593,6 +619,7 @@ GOP 重放（**首帧质量关键**）：缓存最近一个 GOP（自最近 IDR 
 - [ ] H.265 源预览出图（与 H264 同一路径）
 - [ ] PTZ 下发有应答；遥测/状态正常
 - [ ] 平台重启 → 设备自动重注册；设备停止 → 平台转离线
+- [ ] 前端：创建/编辑（停止态）/启停 GB28181 输出端，§7.1 全字段可改、回显与校验正确，详情页展示平台会话
 - [ ] 传输矩阵：UDP、TCP 被动、TCP 主动 三种模式均出图
 
 ---
@@ -602,7 +629,7 @@ GOP 重放（**首帧质量关键**）：缓存最近一个 GOP（自最近 IDR 
 | 阶段 | 内容 | 验收标准 |
 |---|---|---|
 | **M1 内置+骨架+注册** | 内置 gb28181 四包（device/manscdp/metrics/psmux，含版权头与出处）、go 1.26 升级、配置模型/透传/校验、`Gb28181Sink` 骨架、注册/心跳/注销、FakePlatform 基础 | 单测绿；FakePlatform 上完成注册→心跳→注销全流程 |
-| **M2 指令应答+接线** | 目录/信息/状态/配置/录像查询/控制/订阅/OPTIONS 应答；服务层与前端表单 | 前端可创建/启动/停止；指令矩阵测试全绿 |
+| **M2 指令应答+接线** | 目录/信息/状态/配置/录像查询/控制/订阅/OPTIONS 应答；服务层与前端全字段表单（§7.2） | 前端可创建/编辑（停止态）/启动/停止，全字段可改、校验正确；指令矩阵测试全绿 |
 | **M3 媒体推流** | 媒体层切换到 psmux；INVITE→GOP 重放→PS（H264/H265 视频+AAC 音频）→RTP（UDP）；会话管理/背压/统计 | FakePlatform 收流可解码出图（含音频/H265）；ffmpeg 校验通过 |
 | **M4 健壮性+联调** | TCP 媒体（$-帧）、多会话、异常矩阵（§10）、优雅停止、日志/客户端展示；wvp 实机联调 | L4 清单通过；全量回归绿 |
 | **M5（可选）** | 录像回放/下载、目录订阅 NOTIFY、SIPS/TLS、GB35114 国密 | 按决议单独立项 |
