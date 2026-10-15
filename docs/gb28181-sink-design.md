@@ -1,16 +1,20 @@
 # GB28181 Sink（虚拟摄像头）设计方案
 
-> 状态：**待评审** ｜ 版本：v0.1 ｜ 日期：2026-10-15 ｜ 相关代码：`server/internal/media/`、`server/internal/service/`、`server/internal/model/`、`web/src/views/Outputs.vue`
+> 状态：**待下一轮评审**（第一轮决议已合入）｜ 版本：v0.2 ｜ 日期：2026-10-15 ｜ 相关代码：`server/internal/media/`、`server/internal/service/`、`server/internal/model/`、`web/src/views/Outputs.vue`
 
 ---
 
-## 0. 评审重点（TL;DR）
+## 0. 评审记录与待决事项
 
-1. **技术选型（§6）**：推荐"方案 A：引入 `github.com/mickeyzzc/gb28181-go`（MIT，依赖极轻，生产验证）"包裹在本地适配层内；其中 **信令层用官方 `device` 包、媒体层用同库 `psmux`**（支持 H264/H265 + AAC/G711）——需要内置 fork 做最小改造（见 §6.2/§13-Q1）。
-2. **一期范围（§1.2/§1.3）**：单通道虚拟 IPC；**视频 H.264 + 音频 AAC**（AAC 直封 PS，**无需转码**，平台原生支持）。H.265 亦已就绪（PSM 0x24），是否纳入一期见 Q2。
-3. **附带成本**：`go 1.26` 升级（本机已就绪）+ Docker builder 镜像升级（§6.2、§8）。
-4. **联调目标平台**：建议 wvp-GB28181-pro（+ZLMediaKit）作为基准（§11.4、Q6）。
-5. 其余决策点集中在 **§13 开放问题表**，请逐项给出结论后即可按 §12 里程碑开工。
+**已决（2026-10-15 第一轮评审）**
+
+1. **技术选型：方案 A+**——内置（vendor）`gb28181-go` 的 `device`/`manscdp`/`metrics`/`psmux` 四个包；信令沿用官方实现，媒体层切换为 `psmux`（§6.2、§8）。不引入外部 GB28181 模块依赖。
+2. **一期媒体范围：H.264/H.265 视频 + AAC 音频**，PS 封装；AAC 直封（ADTS），无需转码（§1.2、§5.6）。
+3. **Go 1.26**（`server/go.mod` 与 Docker builder 镜像随 M1 升级，本机已就绪）。
+
+**待下一轮评审（§13，Q4~Q9）**
+
+- Q4 Go/镜像确认、Q5 单通道范围、Q6 联调平台优先级、Q7 TeleBoot 语义、Q8 平台 URI 兼容、Q9 TLS/安全边界。
 
 
 ---
@@ -34,7 +38,7 @@ MP4 文件 / RTSP 源 ──► x-media 管道 ──► [GB28181 Sink] ──SI
 |---|---|---|
 | 设备形态 | 单设备单通道（虚拟 IPC） | DeviceID 20 位；ChannelID 默认 = DeviceID |
 | SIP 信令 | REGISTER（摘要认证）、MESSAGE（心跳/目录/信息/状态/配置/控制/录像查询）、SUBSCRIBE（应答）、INVITE/BYE/CANCEL/ACK、OPTIONS、INFO | UDP 为主，TCP（含 tcp-out）可配 |
-| 媒体 | **H.264/H.265 视频 + AAC 音频**（AAC 直封 PS，**无需转码**），PS 封装 → RTP，UDP 与 TCP（主动/被动） | H265 纳入范围见 Q2；跟随平台 INVITE SDP 的传输方式 |
+| 媒体 | **H.264/H.265 视频 + AAC 音频**（AAC 直封 PS，**无需转码**；H265 PSM 0x24），PS 封装 → RTP，UDP 与 TCP（主动/被动） | 跟随平台 INVITE SDP 的传输方式 |
 | 指令响应 | 目录、设备信息、设备状态、配置下载、设备控制（PTZ/录制/布防/校时等按策略应答）、录像查询（空）、订阅、心跳 | 见 §5.4 应答矩阵 |
 | 平台版本 | GB/T 28181-2016 线格式（附带 2022 兼容开关：`X-GB-Ver` 头、校时） | 目标平台：wvp-GB28181-pro 优先，兼容海康/大华/宇视平台 |
 | 输出端语义 | 注册到平台 + 被动受邀推流（push sink，无对外拉流地址） | 与 RTMP/RTSP push 语义相近 |
@@ -42,7 +46,6 @@ MP4 文件 / RTSP 源 ──► x-media 管道 ──► [GB28181 Sink] ──SI
 ### 1.3 v1 非目标（列入后续里程碑，见 §12）
 
 - 音频转码：**不需要**——国标平台原生支持主流编码，AAC 可直接封装进 PS 播放（§5.6），既无需转 G.711，也无需 ffmpeg
-- H.265 源编码：平台与 PS 封装（PSM 0x24）均支持，待 Q2 决定是否纳入一期
 - 录像回放/下载（Playback/Download）、语音对讲/广播、报警上报、级联、国密 GB35114、TLS/SIPS
 - 多通道设备（一台设备挂多路流）——v1 单通道，多实例可各自注册为独立设备
 
@@ -127,12 +130,12 @@ service.OutputService ──► MediaHub.CreateOutput ──► NewGB28181Sink(c
 │  ├─ MetricsHooks 适配：注册成功/失败、心跳失败、会话建立/结束、PS 字节数 → 日志/统计             │
 │  └─ ClientInfoProvider：平台会话列表（SSRC/地址/传输/开始时间）                                  │
 │                                                                                              │
-│  device.Server（信令层：依赖或内置 github.com/mickeyzzc/gb28181-go/device，见 §6.2）            │
+│  device.Server（信令层：内置 github.com/mickeyzzc/gb28181-go/device，见 §6.2/§8）              │
 │  ├─ SIP 收发（UDP/TCP/tcp-out）＋ REGISTER 摘要认证（MD5，qop=auth 兼容）                       │
 │  ├─ MANSCDP XML（心跳/目录/信息/状态/配置/控制/录像查询/订阅应答）                                │
 │  └─ 心跳静默检测与自动重注册 / BYE/ACK/CANCEL 事务                                              │
 │                                                                                              │
-│  媒体层（A+：同库 psmux；A：device 内置 H264-only 路径）                                        │
+│  媒体层（内置 psmux：H264/H265 + AAC/G711、PSM/CRC）                                             │
 │  ├─ PS 打包：pack/system header + PSM + PES（H264/H265 + AAC/G711）                             │
 │  └─ RTP 发送：≤1400B 分包、marker 帧末、UDP / TCP（$-帧）；SSRC 取 INVITE y=                     │
 └──────────────────────────────────────────────────────────────────────────────────────────────┘
@@ -156,7 +159,7 @@ service.OutputService ──► MediaHub.CreateOutput ──► NewGB28181Sink(c
 
 说明：
 - 注册发生在 `Sink.Start()`（此时可能还没接管道）——与媒体解耦：**先上线，后受邀**。
-- `pipe.Start` 时调用 `Configure(streams)`；若源编码超出范围（如纯音频源、或 Q2 未纳入时的 H.265 源）则返回错误（管道启动失败，前端可见明确原因）；H.264 + AAC 源正常接受（音频与视频一并推流，直封 PS 无需转码）。
+- `pipe.Start` 时调用 `Configure(streams)`；若源编码超出范围（仅支持 H.264/H.265 视频；纯音频源拒绝）则返回错误（管道启动失败，前端可见明确原因）；H.264/H.265 + AAC 源正常接受（音频与视频一并推流，直封 PS 无需转码）。
 - 平台会话（INVITE）可以发生在任意时刻，可能同时多于 1 个（例如实况 + 另一路转发）；策略见 §5.7。
 
 ### 4.3 并发模型
@@ -378,7 +381,7 @@ x-media 标准帧 → 媒体层 `device.AccessUnit` / psmux 输入的映射：
 | `Kind=video` + H.264/H.265，Payload=Annex-B | `splitAnnexB` → NALU 列表；`KeyFrame` 取自 `FlagKeyframe`；IDR 前保证带 SPS/PPS/VPS（来自 `StreamInfo.CodecConfig`） |
 | `Kind=audio` + AAC，Payload=raw AAC 帧（AU） | **加 7 字节 ADTS 头**（参数由 ASC 解析：profile/采样率索引/声道数；长度=帧长+7）→ psmux 音频帧；无需转码 |
 | `PTS`（int64，ClockRate=90000/采样率） | PES PTS 换算 **90kHz**（音频 1024 样本 @44.1k ≈ 2089 tick/帧）；会话基准单调 |
-| 其他编码 | `Configure` 阶段拒绝（明确错误），见 §13-Q2 |
+| 其他编码（MPEG-4/SVAC 等） | `Configure` 阶段拒绝（明确错误） |
 
 **音频入 PS 的硬性规则**（psmux 作者在真实平台踩坑后的结论，直接引用）：
 
@@ -397,11 +400,11 @@ GOP 重放（**首帧质量关键**）：缓存最近一个 GOP（自最近 IDR 
 
 ---
 
-## 6. 技术选型（评审决策点）
+## 6. 技术选型（已定：A+）
 
 ### 6.1 候选方案
 
-| 维度 | **A：引入 `gb28181-go`（推荐，含 A+ 变体）** | B：完全自研 | C：sipgo + 自研媒体/XML |
+| 维度 | **A+：内置 `gb28181-go`（已选定）** | B：完全自研 | C：sipgo + 自研媒体/XML |
 |---|---|---|---|
 | SIP 信令 | 现成：摘要认证(qop)、UDP/TCP/tcp-out/TLS、事务/重传、静默检测重注册 | 自研 ~1000+ 行，平台差异坑多 | sipgo 事务层，GB 语义仍需自研 |
 | MANSCDP XML | 现成：全命令面、分页、GBK 自动识别 | 自研 ~400 行 | 自研 ~400 行 |
@@ -409,26 +412,26 @@ GOP 重放（**首帧质量关键**）：缓存最近一个 GOP（自最近 IDR 
 | 控制指令面 | 现成（PTZ 位串解码、配置、快照、对讲等回调） | 全自研 | 全自研 |
 | H.265 | `device` 包未支持；换用 `psmux` 媒体层即具备（PSM 0x24） | ✓ | ✓ |
 | 音频 | `device` 包未支持；换用 `psmux` 媒体层即具备（AAC 直封，ADTS；PSM 0x0F） | ✓ | ✓ |
-| 依赖 | MIT，仅 pion/rtp + x/text（本仓库已有），**无 CGO** | 0 | sipgo + 其依赖链 |
-| Go 版本 | 模块要求 go 1.26（本机已 1.26.5；Docker 镜像需升级） | 无要求 | 视库 |
+| 依赖 | 内置 MIT 代码；外部依赖仅 pion/rtp + x/text（本仓库已有），**无 CGO** | 0 | sipgo + 其依赖链 |
+| Go 版本 | 源码按 go 1.26 工具链编译（本机已 1.26.5；Docker 镜像需升级） | 无要求 | 视库 |
 | 联调风险 | 低（生产验证 + 自带上万行测试与 loopback conformance） | 高（每家平台 quirks） | 中 |
-| 可控性 | 中（v0.x API 未冻结 → 用适配层隔离并锁版本） | 高 | 高 |
+| 可控性 | 高（源码内置，媒体路径按需自行扩展） | 高 | 高 |
 
-### 6.2 推荐
+### 6.2 选型结论（已定：方案 A+，2026-10-15 第一轮评审）
 
-**推荐：方案 A+**（官方库信令层 + 同库 `psmux` 媒体层）：
+**结论：方案 A+**——内置官方库代码（`server/internal/gb28181/`），信令层沿用 `device` 包，媒体层改用同库 `psmux` 包：
 
 1. **信令层用官方 `device` 包**："响应平台下发的各种指令"面很宽，其实现在真实平台验证过（摘要 qop、TCP 信令、事务重传、静默检测重注册、GBK 兼容），自研等价实现的工作量与联调风险不成比例；依赖极轻（closure 仅 pion/rtp、x/text，均已在树内）、MIT、无 CGO。
-2. **媒体层用同库 `psmux` 包**：`device` 包内置媒体路径为 H264 视频 only（`server.go:1567` 直调 `MuxH264ToPS`，无扩展缝）；而 `psmux` 已支持 **H264/H265 + AAC/G711**（PSM/CRC32、超长 AU 切分、"音频必须并入视频 AU 突发"等实测经验均已成文）——替换媒体路径即可一期同时支持音频与 H265。
-3. **落地形态（见 §13-Q1）**：
-   - **A+（推荐）**：把 `device` + `manscdp` + `metrics` + `psmux` 四个包内置进仓库（`server/internal/gb28181/`，非测试合计 ~9.0k 行，保留 MIT 版权头与出处；`platform`/`security35114` 仅原库测试使用，无需内置），媒体调用点切换为 psmux；同时向上游提 PR，后续可用 patch series 跟随 upstream。
-   - **A（保守备选）**：直接依赖官方 `v0.12.0`（H264 视频-only），音频/H265 等上游合入后再启用——不维护 fork，但一期功能缩水。
-4. 适配层边界（`Sink` 接口）足够薄：无论 A/A+，业务语义只在 `gb28181_sink.go` 落地，未来切换方案 B 亦平滑。
+2. **媒体层用同库 `psmux` 包**：`device` 包内置媒体路径为 H264 视频 only（`server.go:1567` 直调 `MuxH264ToPS`，无扩展缝）；而 `psmux` 已支持 **H264/H265 + AAC/G711**（PSM/CRC32、超长 AU 切分、"音频必须并入视频 AU 突发"等实测经验均已成文）——替换媒体路径即支持音频与 H265。
+3. **内置形态**：把 `device` + `manscdp` + `metrics` + `psmux` 四个包复制进 `server/internal/gb28181/`（非测试合计 ~9.0k 行，保留 MIT 版权头与出处；`platform`/`security35114` 仅原库测试使用，不内置），媒体调用点切换为 psmux；同时向上游提 PR，后续可用 patch series 跟随 upstream。
+4. 适配层边界（`Sink` 接口）足够薄：业务语义只在 `gb28181_sink.go` 落地，未来如需整体替换（方案 B 自研）亦平滑。
 
 代价与缓解：
 
-- 模块要求 **go 1.26** → `server/go.mod` 升 `go 1.26`（本机 1.26.5 已就绪）；`docker/Dockerfile` builder 镜像升级 `golang:1.26-bookworm`（若内网 registry 未同步，用 `GOTOOLCHAIN=auto` 兜底）；
-- v0.x API 未冻结 / fork 维护 → **锁定来源版本 v0.12.0**；改动面压到最小（PS 打包调用点、订阅分发两处）；外部引用集中在 `gb28181_sink.go` 一个文件。
+- **go 1.26**：内置代码按 go 1.26 工具链编译 → `server/go.mod` 升 `go 1.26`（本机 1.26.5 已就绪）；`docker/Dockerfile` builder 镜像升级 `golang:1.26-bookworm`（若内网 registry 未同步，用 `GOTOOLCHAIN=auto` 兜底）；
+- **fork 维护**：锁定来源版本 **v0.12.0**；改动面压到最小（PS 打包调用点、订阅分发两处）；外部引用集中在 `gb28181_sink.go` 一个文件。
+
+> 备选（未采用，供回落）：A=外部依赖官方 v0.12.0（H264 视频-only）；B=完全自研；C=sipgo+自研媒体/XML。
 
 ---
 
@@ -498,8 +501,8 @@ GOP 重放（**首帧质量关键**）：缓存最近一个 GOP（自最近 IDR 
 
 | 文件 | 改动 | 里程碑 |
 |---|---|---|
-| `server/go.mod` / `go.sum` | A：新增依赖 `gb28181-go v0.12.0`；A+：无新依赖（pion/rtp、x/text 已在树）；`go 1.26` | M1 |
-| `server/internal/gb28181/`（新增，仅 A+） | 内置 `device`/`manscdp`/`metrics`/`psmux` 四包（非测试 ~9.0k 行，保留 MIT 版权头与出处）；媒体调用点切换为 psmux（音频/H265） | M1/M3 |
+| `server/go.mod` | 无新增外部依赖（pion/rtp、x/text 已在树）；`go 1.26` | M1 |
+| `server/internal/gb28181/`（新增） | 内置 `device`/`manscdp`/`metrics`/`psmux` 四包（非测试 ~9.0k 行，保留 MIT 版权头与出处）；媒体调用点切换为 psmux（音频/H265） | M1/M3 |
 | `server/internal/model/output.go` | `OutputTypeGB28181 = "gb28181"`；`OutputConfig` 新增 §7.1 字段 | M1 |
 | `server/internal/media/engine.go` | `OutputConfig` 新增同名字段（透传） | M1 |
 | `server/internal/media/gb28181_sink.go`（新增） | `Gb28181Sink`：Sink 接口 + FrameHub（视频/音频/ADTS/GOP 重放）+ ClientInfoProvider + MetricsHooks | M1-M3 |
@@ -533,7 +536,7 @@ GOP 重放（**首帧质量关键**）：缓存最近一个 GOP（自最近 IDR 
 | 密码错误（403） | error + 明确日志（不做无休止快速重试） |
 | 平台静默（停止应答心跳） | 库内静默检测 → 自动重注册 |
 | INVITE 到达但尚未接管道（无帧） | 200 OK 后等待帧（首帧随源启动到达）；记录 warn；平台侧一般有 10s 点播超时保护 |
-| 源为 H.265（若 Q2 未纳入）/ 纯音频源 | `Configure` 返回错误 → 管道启动失败 → 前端报明确原因 |
+| 源为不支持的编码（非 H.264/H.265）或纯音频源 | `Configure` 返回错误 → 管道启动失败 → 前端报明确原因 |
 | PTS 回绕 / 跳变 | 会话内以 90kHz 单调映射（沿用 `clock.go` 思路）；跳变 > 阈值时重置会话基准并记日志 |
 | 无关键帧缓存（刚启动即被点播） | 收到下一个 IDR 后出图；`gop_replay` 降低该窗口 |
 | 并发多个平台会话 | 独立 SSRC/端口/序号；BYE 只关本会话 |
@@ -572,6 +575,7 @@ GOP 重放（**首帧质量关键**）：缓存最近一个 GOP（自最近 IDR 
 | 音频打包（PS 内部） | PSM stream_type 正确（视频 0x1B/0x24、音频 0x0F）、PES 0xC0、AAC 帧带 7 字节 ADTS；音频 PES 与视频 AU 同 burst（marker 仅突发末包） |
 | 音频时钟 | PES/PS 内音频 PTS 90kHz 单调、与视频 PTS 对齐（±一帧内） |
 | INVITE(TCP 被动/主动) | 两种连接方向均收流成功（`$`-帧格式） |
+| H.265 源 | PSM stream_type=0x24、video PES 0xE0；与 H264 同一路径，平台/ffmpeg 可解 |
 | 重复 INVITE / BYE 幂等 | 无重复会话、无泄漏 |
 | Stop | 平台收到 `Expires:0` 注销；订阅清理 |
 | 媒体校验（需 ffmpeg） | 重组 PS 存盘 → `ffmpeg -i out.ps -f null -` 视频+音频均解码通过；音频 volumedetect 非静音（静音≈-91dB，参照既有方法） |
@@ -585,7 +589,8 @@ GOP 重放（**首帧质量关键**）：缓存最近一个 GOP（自最近 IDR 
 部署 wvp-GB28181-pro（+ZLMediaKit，docker），验收清单：
 - [ ] 设备出现在平台且在线；心跳持续 10 分钟无掉线
 - [ ] 目录/设备信息/状态查询正确
-- [ ] 预览出图（首帧 < 2s），播放 5 分钟无花屏；平台转 RTMP/HLS 可播
+- [ ] 预览出图（首帧 < 2s），播放 5 分钟无花屏、音频非静音；平台转 RTMP/HLS 可播
+- [ ] H.265 源预览出图（与 H264 同一路径）
 - [ ] PTZ 下发有应答；遥测/状态正常
 - [ ] 平台重启 → 设备自动重注册；设备停止 → 平台转离线
 - [ ] 传输矩阵：UDP、TCP 被动、TCP 主动 三种模式均出图
@@ -596,9 +601,9 @@ GOP 重放（**首帧质量关键**）：缓存最近一个 GOP（自最近 IDR 
 
 | 阶段 | 内容 | 验收标准 |
 |---|---|---|
-| **M1 骨架+注册** | 依赖/内置选型落地、配置模型/透传/校验、`Gb28181Sink` 骨架、注册/心跳/注销、FakePlatform 基础 | 单测绿；FakePlatform 上完成注册→心跳→注销全流程 |
+| **M1 内置+骨架+注册** | 内置 gb28181 四包（device/manscdp/metrics/psmux，含版权头与出处）、go 1.26 升级、配置模型/透传/校验、`Gb28181Sink` 骨架、注册/心跳/注销、FakePlatform 基础 | 单测绿；FakePlatform 上完成注册→心跳→注销全流程 |
 | **M2 指令应答+接线** | 目录/信息/状态/配置/录像查询/控制/订阅/OPTIONS 应答；服务层与前端表单 | 前端可创建/启动/停止；指令矩阵测试全绿 |
-| **M3 媒体推流** | INVITE→GOP 重放→PS（视频+音频）→RTP（UDP）；会话管理/背压/统计 | FakePlatform 收流可解码出图（含音频）；ffmpeg 校验通过 |
+| **M3 媒体推流** | 媒体层切换到 psmux；INVITE→GOP 重放→PS（H264/H265 视频+AAC 音频）→RTP（UDP）；会话管理/背压/统计 | FakePlatform 收流可解码出图（含音频/H265）；ffmpeg 校验通过 |
 | **M4 健壮性+联调** | TCP 媒体（$-帧）、多会话、异常矩阵（§10）、优雅停止、日志/客户端展示；wvp 实机联调 | L4 清单通过；全量回归绿 |
 | **M5（可选）** | 录像回放/下载、目录订阅 NOTIFY、SIPS/TLS、GB35114 国密 | 按决议单独立项 |
 
@@ -606,19 +611,26 @@ GOP 重放（**首帧质量关键**）：缓存最近一个 GOP（自最近 IDR 
 
 ---
 
-## 13. 风险与开放问题（请评审确认）
+## 13. 已决事项与开放问题
+
+### 13.1 已决（第一轮评审，2026-10-15）
+
+| # | 事项 | 结论 |
+|---|---|---|
+| Q1 | 音频实现路径 | **A+**：内置源码 + 媒体层切换 psmux；一期即含音频（AAC 直封 PS，无需转码） |
+| Q2 | H.265 是否纳入一期 | **纳入**（与 H264 同一条媒体路径，PSM 0x24） |
+| Q3 | 依赖/内置形态 | **内置**（`server/internal/gb28181/` 四个包，保留 MIT 版权头与出处；向上游提 PR，patch series 跟随） |
+
+### 13.2 开放问题（待下一轮评审）
 
 | # | 问题 | 选项/建议 |
 |---|---|---|
-| Q1 | **音频实现路径**（平台支持已确认：AAC 直封 PS、**无需转码**）。推荐库的 `device` 媒体路径仅 H264 视频且无扩展缝（`server.go:1567` 直调 `MuxH264ToPS`）；同库 `psmux` 已支持 AAC/G711 + H264/H265 | a) **A+：内置（vendor）后把媒体调用点切换为 psmux**（推荐，一期即含音频） b) A：官方依赖原样（视频-only），音频等上游合入/二期 c) B：完全自研 |
-| Q2 | **H.265 是否纳入一期？** 平台侧与 PS 封装（PSM 0x24）均无碍（`psmux` 已支持），仅取决于媒体层路径 | 建议随 Q1-a 一起纳入（边际工作量很小，H264/H265 同一条路径）；否则二期 |
-| Q3 | **依赖/内置形态**（MIT、依赖极轻） | a) A+：内置 `server/internal/gb28181/`（保留版权头，随上游 rebase/PR） b) A：外部依赖锁 v0.12.0 |
 | Q4 | **go 1.26 升级**（go.mod + Dockerfile builder 镜像） | 建议随 M1 执行；dev 机已是 1.26.5 |
 | Q5 | **单通道 vs 多通道**（一台设备挂多路流） | v1 单通道（虚拟 IPC）；多通道后续（每路一个 Output 实例即可近似满足） |
 | Q6 | **联调目标平台** | 建议 wvp-GB28181-pro（开源、可控、ZLM 生态）；如需海康/大华平台请指定，联调时间另估 |
 | Q7 | **TeleBoot（远程重启）语义** | 建议默认拒绝（记录），可配置开放为"重启 x-media 进程" |
-| Q8 | **平台校验 MESSAGE 目标 URI 的 SIP ID**（库未暴露 platform_id 配置） | 库已在真实平台验证；若目标平台不兼容，M4 内适配（库可控点：RequestURI 构造） |
-| Q9 | **安全性**：密码明文存库（同现有 RTSP 密码先例）；无 TLS | v1 维持现状；如需 SIPS 列 M5 |
+| Q8 | **平台校验 MESSAGE 目标 URI 的 SIP ID**（内置代码未暴露 platform_id 配置） | 内置后我们完全可控（RequestURI 构造点）；若目标平台不兼容，M4 内适配 |
+| Q9 | **安全性**：密码明文存库（同现有 RTSP 密码先例）；无 TLS | v1 维持现状；如需 SIPS 列后续里程碑 |
 
 ---
 
