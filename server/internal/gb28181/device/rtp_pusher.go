@@ -25,6 +25,10 @@ type RtpPusher struct {
 	seqNum     uint16
 	mu         sync.Mutex
 
+	// mtu is the RTP payload cap in bytes (default rtpMtu; SetMTU adjusts).
+	// Local patch (x-media §5.9).
+	mtu int
+
 	// metrics receives PSBytesOut for every frame handed to the wire
 	// (issue #40); nil = no-op.
 	metrics metrics.Hooks
@@ -37,6 +41,7 @@ func NewRtpPusher(conn *net.UDPConn, remoteAddr *net.UDPAddr) *RtpPusher {
 		conn:       conn,
 		remoteAddr: remoteAddr,
 		seqNum:     uint16(time.Now().UnixNano() & 0xFFFF), // Random init
+		mtu:        rtpMtu,
 	}
 }
 
@@ -45,6 +50,17 @@ func NewRtpPusher(conn *net.UDPConn, remoteAddr *net.UDPAddr) *RtpPusher {
 // SetMetricsHooks installs observability hooks (issue #40); nil-safe.
 func (rp *RtpPusher) SetMetricsHooks(h metrics.Hooks) {
 	rp.metrics = h
+}
+
+// SetMTU overrides the RTP payload cap in bytes (local patch, x-media
+// §5.9: old platforms / tunnels need smaller fragments). Values outside
+// 400-1400 keep the default 1400. Call before the first SendFrame.
+func (rp *RtpPusher) SetMTU(mtu int) {
+	rp.mu.Lock()
+	defer rp.mu.Unlock()
+	if mtu >= 400 && mtu <= 1400 {
+		rp.mtu = mtu
+	}
 }
 
 func (rp *RtpPusher) SetTCPConn(conn *net.TCPConn) {
@@ -119,12 +135,16 @@ func (rp *RtpPusher) SendFrame(psData []byte, isKeyFrame bool, pts time.Time, ss
 	// Convert PTS to 90kHz RTP timestamp (32-bit per RFC 3550; wraps naturally)
 	timestamp := uint32(timeTo90kHz(pts))
 
-	// Fragment PS data across multiple RTP packets
+	// Fragment PS data across multiple RTP packets (payload cap: rp.mtu).
+	mtu := rp.mtu
+	if mtu <= 0 {
+		mtu = rtpMtu
+	}
 	offset := 0
-	totalFragments := (len(psData) + rtpMtu - 1) / rtpMtu
+	totalFragments := (len(psData) + mtu - 1) / mtu
 
 	for fragmentIndex := 0; offset < len(psData); fragmentIndex++ {
-		end := offset + rtpMtu
+		end := offset + mtu
 		if end > len(psData) {
 			end = len(psData)
 		}

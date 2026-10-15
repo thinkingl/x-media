@@ -86,6 +86,14 @@ type Config struct {
 	// AudioCodec declares the live audio track: "" (none), "aac"
 	// (ADTS-framed frames), "g711a" or "g711u". Local patch (§5.7).
 	AudioCodec string `yaml:"audio_codec,omitempty"`
+	// RTPMTU caps the RTP payload size in bytes (0 = 1400). Local patch
+	// (§5.9: old platforms / tunnels need smaller fragments).
+	RTPMTU int `yaml:"rtp_mtu,omitempty"`
+	// TCPRole forces this device's TCP media role regardless of the
+	// offer's RFC 4145 setup value: "" / "auto" (mirror the offer),
+	// "active" (device dials the platform), "passive" (device listens).
+	// Local patch (§5.9: vendor implementations that invert setup).
+	TCPRole string `yaml:"tcp_role,omitempty"`
 
 	Transport string `yaml:"transport"` // SIP transport: udp (default), tcp (inbound listener), tcp-out (device dials the platform, full lifecycle), tls (SIPS outbound, GB/T 28181-2022 A-level), or tls-listen (inbound SIPS: the platform dials the device; requires the TLS pair)
 

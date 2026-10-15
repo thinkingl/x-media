@@ -64,6 +64,11 @@ type Server struct {
 	sub          *FrameSubscription
 	// Remote address for RTP streaming
 	remoteRTPAddr *net.UDPAddr
+	// Current media session metadata (local patch, x-media §9): the
+	// host-facing clients view reads these via LiveSession().
+	sessionSSRC      uint32
+	sessionTransport string
+	sessionSince     time.Time
 	// onBroadcast is the host callback for voice-broadcast notifications
 	// (§9.12.1), copied into devCtx at Start.
 	onBroadcast func(sourceID, targetID string)
@@ -199,6 +204,42 @@ func (s *Server) SetMediaCodecs(video, audio string) {
 	s.cfg.VideoCodec = video
 	s.cfg.AudioCodec = audio
 	s.mu.Unlock()
+}
+
+// SetMediaMTU updates the RTP payload cap (0 keeps the default 1400).
+// Local patch: x-media GB28181 sink design §5.9.
+func (s *Server) SetMediaMTU(mtu int) {
+	s.mu.Lock()
+	s.cfg.RTPMTU = mtu
+	s.mu.Unlock()
+}
+
+// LiveSessionInfo describes the current INVITE media session (local patch,
+// x-media design §9: output clients view).
+type LiveSessionInfo struct {
+	// RemoteAddr is the platform's RTP destination (from the INVITE SDP).
+	RemoteAddr string
+	// Transport is the negotiated media transport: "udp" or "tcp".
+	Transport string
+	// SSRC is the platform-provided SSRC (INVITE y=; 0 when absent).
+	SSRC uint32
+	// Since is when the session was established.
+	Since time.Time
+}
+
+// LiveSession returns the current media session; ok=false when idle.
+func (s *Server) LiveSession() (LiveSessionInfo, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.remoteRTPAddr == nil {
+		return LiveSessionInfo{}, false
+	}
+	return LiveSessionInfo{
+		RemoteAddr: s.remoteRTPAddr.String(),
+		Transport:  s.sessionTransport,
+		SSRC:       s.sessionSSRC,
+		Since:      s.sessionSince,
+	}, true
 }
 
 // Notifier returns the host-facing NOTIFY sender (issue #80): hold it and
@@ -1309,6 +1350,11 @@ func (s *Server) teardownMediaLocked() {
 		_ = s.mediaTCPListener.Close()
 		s.mediaTCPListener = nil
 	}
+	// Session metadata cleared with the media resources (local patch, §9).
+	s.remoteRTPAddr = nil
+	s.sessionSSRC = 0
+	s.sessionTransport = ""
+	s.sessionSince = time.Time{}
 	s.playbackCtl = nil
 }
 
@@ -1332,6 +1378,21 @@ func (s *Server) handleInvite(ctx context.Context, msg SipMessage, fromAddr net.
 		slog.Warn("gb28181: failed to parse INVITE SDP", "error", err)
 		return
 	}
+
+	// Forced TCP media role (local patch, x-media §5.9): some vendor
+	// implementations invert the RFC 4145 setup semantics; when TCPRole is
+	// active/passive this side's role is forced regardless of the offer
+	// (only meaningful for TCP offers — UDP offers stay untouched).
+	if (mediaTransport == mediaTCPConnect || mediaTransport == mediaTCPListen) &&
+		s.cfg.TCPRole != "" && s.cfg.TCPRole != "auto" {
+		if s.cfg.TCPRole == "passive" {
+			mediaTransport = mediaTCPListen
+		} else {
+			mediaTransport = mediaTCPConnect
+		}
+		slog.Info("gb28181: TCP media role forced by config", "tcp_role", s.cfg.TCPRole)
+	}
+
 	rtpDest, err := net.ResolveUDPAddr("udp", mediaAddr)
 	if err != nil {
 		slog.Warn("gb28181: invalid RTP destination from INVITE SDP", "addr", mediaAddr, "error", err)
@@ -1532,6 +1593,13 @@ func (s *Server) handleInvite(ctx context.Context, msg SipMessage, fromAddr net.
 		s.mu.Lock()
 		s.mediaCancel = mediaCancel
 		s.remoteRTPAddr = rtpDest
+		s.sessionSSRC = ssrc
+		s.sessionSince = time.Now()
+		if mediaTransport == mediaUDP {
+			s.sessionTransport = "udp"
+		} else {
+			s.sessionTransport = "tcp"
+		}
 		s.playbackCtl = ctlCh
 		s.mu.Unlock()
 		slog.Info("gb28181: playback media goroutine started", "session", sessionType, "remote", rtpDest.String(), "transport", s.cfg.Transport, "segments", len(playbackSegs))
@@ -1547,6 +1615,13 @@ func (s *Server) handleInvite(ctx context.Context, msg SipMessage, fromAddr net.
 	s.mu.Lock()
 	s.sub = sub
 	s.remoteRTPAddr = rtpDest
+	s.sessionSSRC = ssrc
+	s.sessionSince = time.Now()
+	if mediaTransport == mediaUDP {
+		s.sessionTransport = "udp"
+	} else {
+		s.sessionTransport = "tcp"
+	}
 	s.mu.Unlock()
 	slog.Info("gb28181: subscribed to AUHub", "sub_id", sub.ID)
 
@@ -1559,6 +1634,12 @@ func (s *Server) handleInvite(ctx context.Context, msg SipMessage, fromAddr net.
 	// Spawn goroutine draining AU + PS mux + RTP push
 	go func() {
 		defer mediaCancel()
+		// Read the media options under s.mu (the host may push codecs/MTU
+		// via SetMediaCodecs/SetMediaMTU after Start — local patch, §5.7/§5.9).
+		s.mu.Lock()
+		videoCodec, audioCodec, mtu := s.cfg.VideoCodec, s.cfg.AudioCodec, s.cfg.RTPMTU
+		s.mu.Unlock()
+
 		// Passive answer: wait for the platform's dial before streaming;
 		// acceptTCP returns nil on cancellation (the goroutine exits at
 		// the ctx select below).
@@ -1571,22 +1652,19 @@ func (s *Server) handleInvite(ctx context.Context, msg SipMessage, fromAddr net.
 		}
 		pusher := NewRtpPusher(mediaConn, rtpDest)
 		pusher.SetMetricsHooks(s.metrics)
+		pusher.SetMTU(mtu)
 		if tcpConn != nil {
 			pusher.SetTCPConn(tcpConn)
 		}
 		// Live PS muxer (local patch, x-media §5.7): psmux replaces the
 		// H264-only MuxH264ToPS and adds H.265 + AAC/G.711 audio in the
-		// same PS burst. Read the codec selection under s.mu (the host
-		// may push it via SetMediaCodecs after Start). psmux.Muxer is
-		// not concurrency-safe — this goroutine is its only user.
-		s.mu.Lock()
-		videoCodec, audioCodec := s.cfg.VideoCodec, s.cfg.AudioCodec
-		s.mu.Unlock()
+		// same PS burst. psmux.Muxer is not concurrency-safe — this
+		// goroutine is its only user.
 		mux := psmux.New()
 		mux.SetVideoCodec(videoCodec)
 		mux.SetAudioCodec(audioCodec)
 		slog.Info("gb28181: media goroutine started", "remote", rtpDest.String(),
-			"transport", s.cfg.Transport, "video", videoCodec, "audio", audioCodec)
+			"transport", s.cfg.Transport, "video", videoCodec, "audio", audioCodec, "mtu", mtu)
 
 		for {
 			select {

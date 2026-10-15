@@ -148,25 +148,32 @@ func psStreamTypes(ps []byte) []byte {
 
 // ---------- 测试 ----------
 
-// startGB28181StreamSink 启动注册到 FakePlatform 的 sink（媒体面测试用）。
-func startGB28181StreamSink(t *testing.T) (*GB28181Sink, *fakeSIPPlatform) {
+// startGB28181StreamSink 启动注册到 FakePlatform 的 sink（媒体面测试用）；
+// extra 可覆盖默认配置（如 TCPRole/RTPMTU/心跳周期）。
+func startGB28181StreamSink(t *testing.T, extra ...func(*GB28181Config)) (*GB28181Sink, *fakeSIPPlatform) {
 	t.Helper()
 	platform := newFakeSIPPlatform(t, gbTestPlatformID, gbTestRealm, gbTestDeviceID, gbTestPassword)
 	ip, port := platform.addr()
+	cfg := &GB28181Config{
+		PlatformIP:        ip,
+		PlatformPort:      port,
+		PlatformID:        gbTestPlatformID,
+		DeviceID:          gbTestDeviceID,
+		ChannelID:         gbTestChannelID,
+		SIPDomain:         gbTestRealm,
+		Password:          gbTestPassword,
+		HeartbeatInterval: 60,
+		AudioEnable:       true,
+	}
+	for _, f := range extra {
+		if f != nil {
+			f(cfg)
+		}
+	}
 	sink, err := NewGB28181Sink(&OutputConfig{
-		ID:   "gb28181_stream_test",
-		Type: "gb28181",
-		GB28181: &GB28181Config{
-			PlatformIP:        ip,
-			PlatformPort:      port,
-			PlatformID:        gbTestPlatformID,
-			DeviceID:          gbTestDeviceID,
-			ChannelID:         gbTestChannelID,
-			SIPDomain:         gbTestRealm,
-			Password:          gbTestPassword,
-			HeartbeatInterval: 60,
-			AudioEnable:       true,
-		},
+		ID:      "gb28181_stream_test",
+		Type:    "gb28181",
+		GB28181: cfg,
 	})
 	require.NoError(t, err)
 	require.NoError(t, sink.Start(context.Background()))

@@ -155,6 +155,8 @@ func (c *GB28181Config) toDeviceConfig() device.Config {
 		HeartbeatIntervalSecs: c.HeartbeatInterval,
 		HeartbeatTimeoutCount: c.HeartbeatTimeoutCount,
 		Transport:             c.Transport,
+		TCPRole:               c.TCPRole,
+		RTPMTU:                c.RTPMTU,
 	}
 }
 
@@ -226,6 +228,7 @@ func (s *GB28181Sink) Start(ctx context.Context) error {
 	server.SetMetricsHooks(&gb28181Hooks{sink: s})
 	server.SetControlHandlers(s.controlCallbacks())
 	server.SetConfigHandlers(s.configCallbacks())
+	server.SetMediaMTU(s.cfg.RTPMTU)
 
 	ctx, cancel := context.WithCancel(ctx)
 	s.server = server
@@ -307,6 +310,7 @@ func (s *GB28181Sink) Configure(streams []StreamInfo) error {
 	if server != nil {
 		video, audio := s.pipe.videoCodecName()
 		server.SetMediaCodecs(video, audio)
+		server.SetMediaMTU(s.cfg.RTPMTU)
 	}
 	return nil
 }
@@ -327,6 +331,37 @@ func (s *GB28181Sink) WriteFrame(f *Frame) error {
 
 // Notify 处理 source 异步事件（当前无额外处理）。
 func (s *GB28181Sink) Notify(sig *Signal) error { return nil }
+
+// Compile-time check：实现 ClientInfoProvider（输出端详情"当前客户端"）。
+var _ ClientInfoProvider = (*GB28181Sink)(nil)
+
+// Clients 返回当前平台点播会话（0 或 1 个；内置设备端为单会话模型，§9）。
+func (s *GB28181Sink) Clients() []ClientInfo {
+	s.mu.Lock()
+	server := s.server
+	s.mu.Unlock()
+	if server == nil {
+		return nil
+	}
+	info, ok := server.LiveSession()
+	if !ok {
+		return nil
+	}
+	transport := info.Transport
+	if transport == "" {
+		transport = s.cfg.Transport
+	}
+	ua := "GB28181 平台"
+	if info.SSRC != 0 {
+		ua = fmt.Sprintf("GB28181 平台（ssrc=%d）", info.SSRC)
+	}
+	return []ClientInfo{{
+		Address:     info.RemoteAddr,
+		UserAgent:   ua,
+		Transport:   transport,
+		ConnectedAt: info.Since,
+	}}
+}
 
 func (s *GB28181Sink) deviceInfo() device.DeviceInfo {
 	return device.DeviceInfo{

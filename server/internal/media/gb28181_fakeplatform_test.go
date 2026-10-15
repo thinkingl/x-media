@@ -3,10 +3,13 @@ package media
 import (
 	"context"
 	"fmt"
+	"io"
 	"net"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -44,6 +47,9 @@ type fakeSIPPlatform struct {
 	// M3 媒体面：点播 RTP 接收
 	rtpConn    *net.UDPConn
 	rtpPackets []rtp.Packet // 按接收顺序（回环不重排）
+
+	// M4：心跳静默模拟（忽略 MESSAGE 应答，验证静默→重注册）
+	silent atomic.Bool
 }
 
 type fakeSIPEvent struct {
@@ -134,6 +140,10 @@ func (p *fakeSIPPlatform) handleRegister(msg device.SipMessage, addr *net.UDPAdd
 }
 
 func (p *fakeSIPPlatform) handleMessage(msg device.SipMessage, addr *net.UDPAddr) {
+	if p.silent.Load() {
+		// 静默模拟：不回复 MESSAGE（心跳无应答）——验证设备端静默检测→重注册。
+		return
+	}
 	p.reply(addr, msg, 200, "")
 	switch {
 	case strings.Contains(msg.Body, "Keepalive"):
@@ -340,6 +350,104 @@ func (p *fakeSIPPlatform) rtpCount() int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return len(p.rtpPackets)
+}
+
+func (p *fakeSIPPlatform) regCount() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.registered
+}
+
+func (p *fakeSIPPlatform) setSilent(v bool) { p.silent.Store(v) }
+
+// readRTPFramed 读取 TCP 媒体流（GB/T 28181 附录 C.2 $-帧：
+// 0x24 | channel(1B) | 长度(2B 大端) | RTP 包），解析为 RTP 包收集。
+func (p *fakeSIPPlatform) readRTPFramed(conn net.Conn) {
+	header := make([]byte, 4)
+	for {
+		if _, err := io.ReadFull(conn, header); err != nil {
+			return
+		}
+		if header[0] != 0x24 {
+			return // 非 $-帧，协议错误，停止读取
+		}
+		n := int(header[2])<<8 | int(header[3])
+		buf := make([]byte, n)
+		if _, err := io.ReadFull(conn, buf); err != nil {
+			return
+		}
+		var pkt rtp.Packet
+		if err := pkt.Unmarshal(buf); err != nil {
+			continue
+		}
+		pkt.Payload = append([]byte(nil), pkt.Payload...)
+		p.mu.Lock()
+		p.rtpPackets = append(p.rtpPackets, pkt)
+		p.mu.Unlock()
+	}
+}
+
+// inviteTCPPlatformListens 发起 TCP 媒体点播且**平台侧监听**（offer setup:passive
+// 语义上表示平台被动收流；expectAnswer 为期望的设备侧 answer setup 值）。
+// 用于正常被动协商（设备答 active 主动连）与 tcp_role 强制场景。
+func (p *fakeSIPPlatform) inviteTCPPlatformListens(t *testing.T, ssrc uint32, offerSetup, expectAnswer string) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = ln.Close() })
+
+	p.mu.Lock()
+	p.rtpPackets = nil
+	p.mu.Unlock()
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		p.readRTPFramed(conn)
+	}()
+
+	port := ln.Addr().(*net.TCPAddr).Port
+	body := fmt.Sprintf("v=0\r\no=%s 0 0 IN IP4 127.0.0.1\r\ns=Play\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\n"+
+		"m=video %d TCP/RTP/AVP 96\r\na=recvonly\r\na=setup:%s\r\na=connection:new\r\na=rtpmap:96 PS/90000\r\ny=%d\r\n",
+		p.platformID, port, offerSetup, ssrc)
+	p.sendRequestCT(t, "INVITE", "", "application/sdp", body)
+
+	resp := p.waitMethodResponse(t, "INVITE", 5*time.Second)
+	require.Equal(t, 200, resp.StatusCode)
+	assert.Contains(t, resp.Body, "TCP/RTP/AVP", "answer 必须回 TCP/RTP/AVP")
+	assert.Contains(t, resp.Body, "a=setup:"+expectAnswer, "answer setup 角色")
+	assert.Contains(t, resp.Body, fmt.Sprintf("y=%d", ssrc))
+	p.sendRequest(t, "ACK", "", "")
+}
+
+// inviteTCPDeviceListens 发起 TCP 媒体点播且**平台主动拨号设备**（offer setup:active）：
+// 从 200 answer 解析设备监听端口并拨号收流。
+func (p *fakeSIPPlatform) inviteTCPDeviceListens(t *testing.T, ssrc uint32) {
+	t.Helper()
+	p.mu.Lock()
+	p.rtpPackets = nil
+	p.mu.Unlock()
+
+	// m= 端口在 active offer 下由设备忽略（设备自有被动端口，answer 中携带）
+	body := fmt.Sprintf("v=0\r\no=%s 0 0 IN IP4 127.0.0.1\r\ns=Play\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\n"+
+		"m=video 40000 TCP/RTP/AVP 96\r\na=recvonly\r\na=setup:active\r\na=connection:new\r\na=rtpmap:96 PS/90000\r\ny=%d\r\n",
+		p.platformID, ssrc)
+	p.sendRequestCT(t, "INVITE", "", "application/sdp", body)
+
+	resp := p.waitMethodResponse(t, "INVITE", 5*time.Second)
+	require.Equal(t, 200, resp.StatusCode)
+	assert.Contains(t, resp.Body, "a=setup:passive", "平台拨号场景设备应被动监听")
+	m := regexp.MustCompile(`m=video (\d+) TCP/RTP/AVP`).FindStringSubmatch(resp.Body)
+	require.Len(t, m, 2, "answer 应携带设备监听端口")
+	port, err := strconv.Atoi(m[1])
+	require.NoError(t, err)
+
+	conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 3*time.Second)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = conn.Close() })
+	go p.readRTPFramed(conn)
+	p.sendRequest(t, "ACK", "", "")
 }
 
 // assemblePS 按接收顺序拼接 RTP 负载（回环不重排）。

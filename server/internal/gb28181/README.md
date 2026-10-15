@@ -21,6 +21,8 @@
 | `device/manscdp.go` | 目录通道 `Name` 使用设备展示名（未配置时回退通道编码），与方案 §5.3 目录示例一致 | §5.3 目录应答 |
 | `device/seam.go` | `AccessUnit` 扩展 `Audio []AudioFrame`（音频随行同一 PS 突发）；`Config.VideoCodec`/`AudioCodec`（h264/h265、aac/g711a/g711u） | §5.7 帧适配 |
 | `device/server.go`、`device/ps.go` | 直播媒体路径切换为 `psmux`（替换 H264-only 的 `MuxH264ToPS`）：H264/H265 + AAC/G711；新增 `Server.SetMediaCodecs`（管道协商晚于 Start）；`annexBFromNALUs` 重组助手 | §5.6/§5.7 媒体封装 |
+| `device/server.go`、`device/rtp_pusher.go` | `Config.TCPRole` 强制 TCP 媒体角色（异常平台 setup 语义相反）；`Config.RTPMTU` + `RtpPusher.SetMTU` + `Server.SetMediaMTU` | §5.9 平台兼容性 |
+| `device/server.go`、`device/seam.go`、`device/validate.go` | 媒体会话元数据 `LiveSession()`（远端/传输/SSRC/开始时间），供输出端"当前客户端"展示；`TCPRole`/`RTPMTU` 校验 | §9 可观测性 |
 | 未修改（保留上游） | 回放路径 `playback.go`（仍用 `MuxH264ToPS`，M5 范围）；`platform`/`security35114` 未内置 | — |
 
 维护约定：

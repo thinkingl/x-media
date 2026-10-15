@@ -723,7 +723,13 @@ Web 表单（§7.2）
 - `Gb28181Sink` 帧转换（Annex-B→NALU、关键帧参数集补齐、AAC+ADTS 直封、PTS→会话基准映射）+ `gb28181FrameHub` GOP 缓存重放（4MB 上限、超限等下一关键帧）；
 - L2 测试：INVITE→200 answer（sendonly/PS/90000/y=）→ PS/RTP 结构断言（pack/PSM/PES/参数集/IDR/ADTS、PT=96、SSRC、≤1400、marker 突发界定）、GOP 重放即时出图、H265 路径（PSM 0x24/IDR）、BYE 停流；`-race` 通过；
 - L3 测试：MP4 文件（1080p H264+AAC）→ DefaultPipe → Gb28181Sink → FakePlatform 收流 → 重组 PS → ffprobe 识别视频+音频、ffmpeg 解码通过。
-- 已知边界（M4 处理）：TCP 媒体（`$`-帧）与 `tcp_role`/`rtp_mtu` 开关接线；客户端列表（平台会话）展示。
+
+**进度：M4 已完成（2026-10-15）** —— 健壮性、兼容开关与实机联调：
+- **TCP 媒体（$-帧）双向**：平台监听/设备主动连（offer passive → answer active）、平台拨号/设备被动监听（offer active → answer passive + 设备端口）；`tcp_role` 强制覆盖异常平台 setup 语义；`rtp_mtu`（默认 1400，可调 1200）生效；
+- **平台会话客户端展示**（`ClientInfoProvider`）：点播中出现 1 条会话（远端地址/传输/SSRC/开始时间），BYE 后清空；
+- **心跳静默 → 自动重注册**（静默 2 周期触发，实测）；
+- **实机联调（双实现互操作）**：以 gb28181-go 平台端（MiBeeNvr 生产实现）为真实平台，本机全链路实测：digest 注册 → 目录（1 通道）→ 设备信息/状态 → INVITE 点播 → PS over RTP → **视频 311 AU（3 IDR）、音频 382 帧（codec=aac，平台从 ADTS 独立还源 ASC=`1288` 与源 32kHz 单声道一致）、5108 包 0 丢包** → BYE 正常；工具与用法：`server/test/interop/gb28181-platform/`（README 含断言口径）；
+- **wvp 实机清单（§11.4）保留为用户环境项**：内网镜像代理中 wvp 预构建镜像止于 2021 年（`648540858/wvp_pro:latest`，与新 ZLMediaKit 存在版本漂移），本机以"双实现互操作 + ffmpeg 解码"替代实测；wvp+ZLM 部署验收清单见 §11.4，联调工具可直接复用于用户环境。
 
 ---
 

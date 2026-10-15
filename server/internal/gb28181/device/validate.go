@@ -85,6 +85,15 @@ func (c Config) Validate() error {
 	default:
 		return fmt.Errorf("device.Config.AudioCodec %q must be aac, g711a or g711u", c.AudioCodec)
 	}
+	// RTP MTU / TCP role overrides (local patch, x-media §5.9).
+	if c.RTPMTU != 0 && (c.RTPMTU < 400 || c.RTPMTU > 1400) {
+		return fmt.Errorf("device.Config.RTPMTU %d out of range 400-1400", c.RTPMTU)
+	}
+	switch c.TCPRole {
+	case "", "auto", "active", "passive":
+	default:
+		return fmt.Errorf("device.Config.TCPRole %q must be auto, active or passive", c.TCPRole)
+	}
 	return nil
 }
 
