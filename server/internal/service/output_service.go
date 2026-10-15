@@ -292,6 +292,9 @@ func validateGB28181Config(c *model.OutputConfig) error {
 	if c.LocalSIPPort != 0 && (c.LocalSIPPort < 1 || c.LocalSIPPort > 65535) {
 		return errors.NewValidationError("本地 SIP 端口（local_sip_port）需在 1~65535（0=内核分配）")
 	}
+	if c.MediaTCPPort != 0 && (c.MediaTCPPort < 1 || c.MediaTCPPort > 65535) {
+		return errors.NewValidationError("媒体 TCP 端口（media_tcp_port）需在 1~65535（0=自动）")
+	}
 	if c.RegisterInterval != 0 && (c.RegisterInterval < 1 || c.RegisterInterval > 86400) {
 		return errors.NewValidationError("注册周期（register_interval）需在 1~86400 秒")
 	}

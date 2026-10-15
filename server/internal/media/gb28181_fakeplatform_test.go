@@ -55,6 +55,11 @@ type fakeSIPPlatform struct {
 	// 设备应学习并在后续 Contact 中使用。
 	natExternalIP   string
 	natExternalPort int
+
+	// M4：TCP 媒体侧最近一次被接受的连接来源（KDM 匹配契约断言用）。
+	tcpAcceptedRemote string
+	// M4：最近一次 INVITE 的应答 SDP（KDM 匹配契约断言用）。
+	lastInviteAnswer string
 }
 
 type fakeSIPEvent struct {
@@ -428,7 +433,8 @@ func (p *fakeSIPPlatform) readRTPFramed(conn net.Conn) {
 // inviteTCPPlatformListens 发起 TCP 媒体点播且**平台侧监听**（offer setup:passive
 // 语义上表示平台被动收流；expectAnswer 为期望的设备侧 answer setup 值）。
 // 用于正常被动协商（设备答 active 主动连）与 tcp_role 强制场景。
-func (p *fakeSIPPlatform) inviteTCPPlatformListens(t *testing.T, ssrc uint32, offerSetup, expectAnswer string) {
+// 返回应答 SDP 中公告的媒体端口（用于断言"连接源端口==公告端口"的匹配契约）。
+func (p *fakeSIPPlatform) inviteTCPPlatformListens(t *testing.T, ssrc uint32, offerSetup, expectAnswer string) int {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
@@ -436,12 +442,16 @@ func (p *fakeSIPPlatform) inviteTCPPlatformListens(t *testing.T, ssrc uint32, of
 
 	p.mu.Lock()
 	p.rtpPackets = nil
+	p.tcpAcceptedRemote = ""
 	p.mu.Unlock()
 	go func() {
 		conn, err := ln.Accept()
 		if err != nil {
 			return
 		}
+		p.mu.Lock()
+		p.tcpAcceptedRemote = conn.RemoteAddr().String()
+		p.mu.Unlock()
 		p.readRTPFramed(conn)
 	}()
 
@@ -456,7 +466,30 @@ func (p *fakeSIPPlatform) inviteTCPPlatformListens(t *testing.T, ssrc uint32, of
 	assert.Contains(t, resp.Body, "TCP/RTP/AVP", "answer 必须回 TCP/RTP/AVP")
 	assert.Contains(t, resp.Body, "a=setup:"+expectAnswer, "answer setup 角色")
 	assert.Contains(t, resp.Body, fmt.Sprintf("y=%d", ssrc))
+	p.mu.Lock()
+	p.lastInviteAnswer = resp.Body
+	p.mu.Unlock()
 	p.sendRequest(t, "ACK", "", "")
+
+	m := regexp.MustCompile(`m=video (\d+) TCP/RTP/AVP`).FindStringSubmatch(resp.Body)
+	require.Len(t, m, 2, "answer 应携带媒体端口")
+	advPort, err := strconv.Atoi(m[1])
+	require.NoError(t, err)
+	return advPort
+}
+
+// tcpAcceptedRemoteAddr 返回 TCP 媒体侧最近接受的连接来源（空串=尚未接受）。
+func (p *fakeSIPPlatform) tcpAcceptedRemoteAddr() string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.tcpAcceptedRemote
+}
+
+// inviteAnswer 返回最近一次 INVITE 的应答 SDP（KDM 匹配契约断言用）。
+func (p *fakeSIPPlatform) inviteAnswer() string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.lastInviteAnswer
 }
 
 // inviteTCPDeviceListens 发起 TCP 媒体点播且**平台主动拨号设备**（offer setup:active）：

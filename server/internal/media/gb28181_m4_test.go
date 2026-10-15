@@ -7,6 +7,8 @@ package media
 import (
 	"bytes"
 	"context"
+	"net"
+	"strconv"
 	"testing"
 	"time"
 
@@ -39,13 +41,14 @@ func startGB28181SyntheticWriter(sink *GB28181Sink) func() {
 }
 
 // TestGB28181Sink_TCPPlatformListens 平台监听、设备主动连（offer setup:passive →
-// answer setup:active），媒体走 $-帧 TCP 流。
+// answer setup:active），媒体走 $-帧 TCP 流。同时断言 KDM 类平台的匹配契约：
+// 媒体连接源端口必须等于应答 SDP 公告的 m= 端口（§5.9 实测）。
 func TestGB28181Sink_TCPPlatformListens(t *testing.T) {
 	sink, platform := startGB28181StreamSink(t)
 	require.NoError(t, sink.Configure(gbStreamsH264AAC()))
 
 	const ssrc = uint32(0x22334455)
-	platform.inviteTCPPlatformListens(t, ssrc, "passive", "active")
+	advPort := platform.inviteTCPPlatformListens(t, ssrc, "passive", "active")
 	stop := startGB28181SyntheticWriter(sink)
 	defer stop()
 
@@ -54,6 +57,42 @@ func TestGB28181Sink_TCPPlatformListens(t *testing.T) {
 	ps := assemblePS(pkts)
 	assert.True(t, bytes.Contains(ps, []byte{0x00, 0x00, 0x01, 0xBA}), "PS pack header（TCP 路径）")
 	assert.True(t, bytes.Contains(ps, []byte{0x00, 0x00, 0x01, 0x65}), "IDR（TCP 路径）")
+
+	// KDM 匹配契约：连接源端口 == 应答 SDP 公告端口（bind-before-connect）。
+	require.Eventually(t, func() bool { return platform.tcpAcceptedRemoteAddr() != "" },
+		3*time.Second, 20*time.Millisecond)
+	_, remotePort, err := net.SplitHostPort(platform.tcpAcceptedRemoteAddr())
+	require.NoError(t, err)
+	assert.Equal(t, strconv.Itoa(advPort), remotePort,
+		"TCP 媒体连接必须从应答 SDP 公告端口发出（KDM 按 c=/m= 匹配发送端，§5.9）")
+}
+
+// TestGB28181Sink_TCPAnswerAdvertisesNATExternalIP NAT 场景（学到外部地址后）：
+// 应答 SDP 的 c= 必须用外部地址，且连接必须从公告端口发出（KDM 匹配契约）。
+func TestGB28181Sink_TCPAnswerAdvertisesNATExternalIP(t *testing.T) {
+	platform := newFakeSIPPlatform(t, gbTestPlatformID, gbTestRealm, gbTestDeviceID, gbTestPassword)
+	platform.setNAT("203.0.113.9", 45678)
+	sink := startGB28181SinkOnPlatform(t, platform)
+	require.NoError(t, sink.Configure(gbStreamsH264AAC()))
+
+	const ssrc = uint32(0x66778899)
+	advPort := platform.inviteTCPPlatformListens(t, ssrc, "passive", "active")
+
+	answer := platform.inviteAnswer()
+	assert.Contains(t, answer, "c=IN IP4 203.0.113.9",
+		"NAT 场景应答 SDP 应使用学到的外部 IP（KDM 按 c=/m= 登记预期发送端，§5.9）")
+
+	stop := startGB28181SyntheticWriter(sink)
+	defer stop()
+	pkts := platform.waitRTP(t, 20, 5*time.Second)
+	assertRTPBasics(t, pkts, ssrc)
+
+	require.Eventually(t, func() bool { return platform.tcpAcceptedRemoteAddr() != "" },
+		3*time.Second, 20*time.Millisecond)
+	_, remotePort, err := net.SplitHostPort(platform.tcpAcceptedRemoteAddr())
+	require.NoError(t, err)
+	assert.Equal(t, strconv.Itoa(advPort), remotePort,
+		"NAT 场景连接源端口仍必须等于应答 SDP 公告端口")
 }
 
 // TestGB28181Sink_TCPDeviceListens 平台主动拨号设备（offer setup:active →

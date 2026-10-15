@@ -1057,6 +1057,14 @@ func (s *Server) noteExternalAddress(via string) {
 	}
 }
 
+// externalIPValue returns the learned NAT-external IP ("" when unknown).
+// Local patch: x-media GB28181 sink design §5.9 (NAT).
+func (s *Server) externalIPValue() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.externalIP
+}
+
 // contactAddress resolves the host:port for Contact headers:
 // explicit Config.LocalIP override first, then the learned external address
 // (NAT traversal), else the route-probed local address.
@@ -1594,15 +1602,37 @@ func (s *Server) handleInvite(ctx context.Context, msg SipMessage, fromAddr net.
 	if mediaTransport == mediaTCPConnect || mediaTransport == mediaTCPListen {
 		answerTransport = "tcp"
 	}
+	// KDM-class platforms match the incoming media connection against the
+	// answer SDP's c=/m= ip:port pair (the connection MUST originate from
+	// the advertised port; NAT-preserving paths keep it stable). So choose
+	// the outgoing local port up front for the dial case, and advertise the
+	// learned NAT-external IP when available. Local patch: x-media §5.9.
+	mediaTCPPort := 0
+	if mediaTransport == mediaTCPConnect {
+		mediaTCPPort = s.cfg.MediaTCPPort
+		if mediaTCPPort == 0 {
+			if ln, lerr := net.Listen("tcp", ":0"); lerr == nil {
+				mediaTCPPort = ln.Addr().(*net.TCPAddr).Port
+				_ = ln.Close()
+			}
+		}
+	}
+	answerIP := localIPAddr
+	if ext := s.externalIPValue(); ext != "" {
+		answerIP = ext
+	}
 	// The advertised m= port is the passive listener's when the platform
-	// dials us; the setup role mirrors the offer.
+	// dials us, the reserved local port when we dial, the local UDP port
+	// otherwise; the setup role mirrors the offer.
 	answerPort := localMediaPort
 	answerSetup := "active"
 	if mediaTransport == mediaTCPListen {
 		answerPort = mediaListener.Addr().(*net.TCPAddr).Port
 		answerSetup = "passive"
+	} else if mediaTransport == mediaTCPConnect && mediaTCPPort > 0 {
+		answerPort = mediaTCPPort
 	}
-	deviceSDP := buildDeviceSDP(s.cfg.DeviceID, localIPAddr, answerPort, ssrc, answerTransport, sessionType, answerSetup)
+	deviceSDP := buildDeviceSDP(s.cfg.DeviceID, answerIP, answerPort, ssrc, answerTransport, sessionType, answerSetup)
 
 	// Send 200 OK with SDP answer
 	ok200 := Build200OK(msg, "application/sdp", deviceSDP)
@@ -1619,13 +1649,22 @@ func (s *Server) handleInvite(ctx context.Context, msg SipMessage, fromAddr net.
 	var mediaTCPConn *net.TCPConn
 	var acceptTCP func(context.Context) *net.TCPConn // non-nil only for the passive answer
 	if mediaTransport == mediaTCPConnect {
-		conn, err := (&net.Dialer{}).DialContext(ctx, "tcp", mediaAddr)
+		// Give the platform a beat to process the SDP answer and register
+		// the expected sender ip:port (the accepted connection is matched
+		// against the answer SDP). Then dial from the advertised port.
+		time.Sleep(100 * time.Millisecond)
+		dialer := &net.Dialer{}
+		if mediaTCPPort > 0 {
+			dialer.LocalAddr = &net.TCPAddr{IP: net.ParseIP(localIPAddr), Port: mediaTCPPort}
+		}
+		conn, err := dialer.DialContext(ctx, "tcp", mediaAddr)
 		if err != nil {
 			slog.Warn("gb28181: failed to connect to TCP media port", "addr", mediaAddr, "error", err)
 			return
 		}
 		mediaTCPConn = conn.(*net.TCPConn)
-		slog.Info("gb28181: connected to TCP media port", "addr", mediaAddr)
+		slog.Info("gb28181: connected to TCP media port", "addr", mediaAddr,
+			"local", mediaTCPConn.LocalAddr().String())
 		s.mu.Lock()
 		s.mediaTCPConn = mediaTCPConn
 		s.mu.Unlock()

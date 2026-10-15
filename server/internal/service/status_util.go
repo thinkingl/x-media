@@ -171,6 +171,7 @@ func buildMediaOutputConfig(id, outputType string, c *model.OutputConfig) *media
 		VideoCodec:                 c.VideoCodec,
 		LocalSIPPort:               c.LocalSIPPort,
 		LocalIP:                    c.LocalIP,
+		MediaTCPPort:               c.MediaTCPPort,
 		RegisterInterval:           c.RegisterInterval,
 		HeartbeatInterval:          c.HeartbeatInterval,
 		HeartbeatTimeoutCount:      c.HeartbeatTimeoutCount,

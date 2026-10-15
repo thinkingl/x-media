@@ -165,6 +165,10 @@
               <el-form-item label="本地 IP">
                 <el-input v-model="gb.local_ip" placeholder="留空 = 自动探测出口 IP" />
               </el-form-item>
+              <el-form-item label="媒体 TCP 端口">
+                <el-input-number v-model="gb.media_tcp_port" :min="0" :max="65535" controls-position="right" />
+                <span class="form-hint">0 = 自动；KDM 类平台按应答 SDP 端口匹配媒体连接</span>
+              </el-form-item>
               <el-form-item label="协议版本">
                 <el-select v-model="gb.protocol_version">
                   <el-option label="省略（默认）" value="" />
@@ -309,6 +313,7 @@ const gbDefaults = {
   video_codec: 'auto',
   local_sip_port: 0,
   local_ip: '',
+  media_tcp_port: 0,
   protocol_version: '',
   register_interval: 3600,
   heartbeat_interval: 60,
@@ -573,6 +578,7 @@ async function handleDelete(id: string) {
 
 <style scoped>
 .outputs-view { max-width: 1200px; margin: 0 auto; }
+.form-hint { margin-left: 10px; color: #909399; font-size: 12px; }
 .page-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
 .page-header h2 { color: #303133; }
 .stream-url { font-family: monospace; font-size: 12px; color: #606266; margin-right: 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 200px; display: inline-block; vertical-align: middle; }

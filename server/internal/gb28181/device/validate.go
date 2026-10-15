@@ -99,6 +99,9 @@ func (c Config) Validate() error {
 	if c.LocalIP != "" && net.ParseIP(c.LocalIP) == nil {
 		return fmt.Errorf("device.Config.LocalIP %q is not a valid IP address", c.LocalIP)
 	}
+	if c.MediaTCPPort < 0 || c.MediaTCPPort > 65535 {
+		return fmt.Errorf("device.Config.MediaTCPPort %d out of range 0-65535", c.MediaTCPPort)
+	}
 	return nil
 }
 

@@ -37,7 +37,10 @@ type GB28181Config struct {
 	VideoCodec string // auto（默认，跟随源）/h264（遇 H265 源拒绝启动）
 
 	LocalSIPPort int    // 本地 SIP 端口（0=内核分配）
-	LocalIP      string // 预留：本地 IP（空=自动探测，库内按出口路由探测）
+	LocalIP      string // 本地 IP 覆盖（空=自动探测；NAT 下用学习到的外部地址，§5.9）
+	// MediaTCPPort 出站 TCP 媒体的本地端口（0=自动选空闲端口）。KDM 类平台按
+	// 应答 SDP 的 c=/m= 匹配媒体连接来源，出站端口必须等于公告端口（§5.9）。
+	MediaTCPPort int
 
 	RegisterInterval      int    // 注册有效期（秒，默认 3600；按平台响应协商）
 	HeartbeatInterval     int    // 心跳周期（秒，默认 60）
@@ -115,6 +118,9 @@ func (c *GB28181Config) applyDefaultsAndValidate() error {
 	} else if c.RTPMTU < 400 || c.RTPMTU > 1400 {
 		return fmt.Errorf("gb28181: RTP MTU（rtp_mtu）%d 超出范围 400~1400", c.RTPMTU)
 	}
+	if c.MediaTCPPort != 0 && (c.MediaTCPPort < 1 || c.MediaTCPPort > 65535) {
+		return fmt.Errorf("gb28181: 媒体 TCP 端口（media_tcp_port）%d 超出范围 1~65535（0=自动）", c.MediaTCPPort)
+	}
 	if c.RegisterInterval == 0 {
 		c.RegisterInterval = 3600
 	} else if c.RegisterInterval < 1 || c.RegisterInterval > 86400 {
@@ -158,6 +164,7 @@ func (c *GB28181Config) toDeviceConfig() device.Config {
 		TCPRole:               c.TCPRole,
 		RTPMTU:                c.RTPMTU,
 		LocalIP:               c.LocalIP,
+		MediaTCPPort:          c.MediaTCPPort,
 	}
 }
 

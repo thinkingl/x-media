@@ -447,7 +447,7 @@ GOP 重放（**首帧质量关键**）：缓存最近一个 GOP（自最近 IDR 
 | audio-only INVITE（对讲） | v1 回 488（无对讲能力）；其余 m= 行忽略，仅取视频行 |
 | XML 编码 | 入方向 UTF-8/GBK/GB18030 自动识别；输出 GB2312 声明 + ASCII/UTF-8 正文 |
 
-**兼容开关汇总**：`platform_id`、`transport`、`tcp_role`、`rtp_mtu`、`video_codec`、`audio_enable`、`protocol_version`、`multicast_ttl`、`control_reject_unimplemented`（均在 §7.1，Web 可配）。
+**兼容开关汇总**：`platform_id`、`transport`、`tcp_role`、`rtp_mtu`、`video_codec`、`audio_enable`、`protocol_version`、`multicast_ttl`、`control_reject_unimplemented`、`local_ip`、`media_tcp_port`（均在 §7.1，Web 可配）。
 
 **④ NAT 部署（M4 实机验证：科达 KDM 平台，设备 192.168.88.x → NAT → 172.16.240.76:33001/UDP，映射为 172.16.194.145）**
 
@@ -456,7 +456,7 @@ GOP 重放（**首帧质量关键**）：缓存最近一个 GOP（自最近 IDR 
 | 信令出站 | 设备→平台 UDP 直发；平台响应回显 `Via: …;received=<外部IP>;rport=<外部端口>`（RFC 3581）→ **设备学习外部地址并在后续 Contact 使用**（首个 REGISTER 用本地地址、认证腿起用外部地址），`local_ip` 可显式覆盖 |
 | 平台→设备请求 | 平台按**缓存来源地址**下发（实测科达日志 `directly send to UA[172.16.194.145:…]`）；设备心跳（默认 60s）维持 NAT 会话，心跳间隔需小于 UDP 会话老化时间 |
 | `LocalSIPPort=0` | 绑定后把内核分配的**真实端口**写入 Via/Contact（避免 `:0`） |
-| 媒体 | UDP：设备为发送端，出站即可达平台媒体地址（可用）；TCP 被动（设备拨平台）可用；TCP 主动（平台拨设备，需端口映射）NAT 下不可用 |
+| 媒体 | UDP：设备为发送端，出站即可达平台媒体地址；**TCP（科达默认邀约为 `TCP/RTP/AVP` + `setup:passive`，设备主动连）**：应答 SDP `c=` 用**学习到的外部 IP**、`m=` 用出站 socket 的**本地绑定端口**，且连接必须**从公告端口拨出**——KDM 按应答 SDP `c=/m=` 登记"预期发送端"，连接到达时按**源 ip:port** 匹配（实测标杆 IPC `32000000001320000103` 从公告端口 56004 拨出 → `AcceptSenderTcpCon` 立即接受；随机源端口的连接只会进 `waitCon` 等待队列直至超时"无码流"；`media_tcp_port` 可固定端口，0=自动）；TCP 主动（平台拨设备，需端口映射）NAT 下不可用 |
 | 平台严格校验 | 科达要求 **RequestURI = 平台 UAS GBID**（`platform_id` 必须填平台 SIP 服务 ID，缺省/错误直接 403，且**无 401 挑战**）；摘要用户名 = 设备国标编号 |
 | 其他实测补丁 | 出站 MANSCDP 元素形式（见 §5.2）；404 响应**不**触发重注册（避免 482 Loop Detected 级联）；REGISTER Call-ID 用纳秒（同秒重注册不再被判环） |
 
@@ -530,6 +530,7 @@ Web 表单（§7.2）
   "video_codec": "auto",
   "local_sip_port": 0,
   "local_ip": "",
+  "media_tcp_port": 0,
   "register_interval": 3600,
   "heartbeat_interval": 60,
   "heartbeat_timeout_count": 3,
@@ -558,6 +559,7 @@ Web 表单（§7.2）
 | `video_codec` | `auto` | `auto`=跟随源（H264/H265 直通）；`h264`=仅允许 H264 源（遇 H265 启动报错，提示无法转码） |
 | `local_sip_port` | 0 | 本地 SIP 端口；0 = 内核分配 |
 | `local_ip` | "" | 空 = 自动探测出口 IP；跨网段时显式指定 |
+| `media_tcp_port` | 0 | 出站 TCP 媒体的本地端口；0 = 自动选空闲端口。KDM 类平台按应答 SDP `c=/m=` 匹配连接来源，连接必须从公告端口拨出（固定映射部署可显式指定，§5.9） |
 | `register_interval` | 3600 | 注册有效期（秒），按平台响应协商 |
 | `heartbeat_interval` | 60 | 心跳周期（秒） |
 | `heartbeat_timeout_count` | 3 | 连续失败/静默多少次触发重注册 |
@@ -745,7 +747,8 @@ Web 表单（§7.2）
 **进度：M4+ 实机联调（科达 KDM 平台，2026-10-15）** —— 真实生产平台 + 真实 NAT 全链路打通：
 - 设备 `32000000001120000286`（通道 `32000000001320003627`）注册到 `172.16.240.76:33001/UDP`（平台 UAS GBID `32000000002000000000`，域 `3200000000`），NAT 映射 `172.16.194.145`；
 - 实测链路：REGISTER（401→MD5 摘要→200，用户名=设备编号、密码=平台约定）→ 心跳（平台均正常入库）→ 平台 SUBSCRIBE(目录)+Catalog 查询 → 设备元素形式应答 → **平台接受通道（Status[ON]，在线）**；平台后续请求按 NAT 外部地址直发设备；
-- 由此固化的补丁见 §5.9④ 与内置库补丁表（元素形式/404 不重注册/Call-ID 纳秒/外部地址学习/LocalSIPPort 实绑定）。
+- 由此固化的补丁见 §5.9④ 与内置库补丁表（元素形式/404 不重注册/Call-ID 纳秒/外部地址学习/LocalSIPPort 实绑定）；
+- **点播媒体（TCP）发送端匹配**（2026-10-15 晚）：平台点播邀约为 TCP 媒体（设备主动连平台 34xxx 端口），平台按**应答 SDP `c=/m=` 登记的预期发送端 ip:port** 匹配到达的连接——随机源端口的连接只会进 `waitCon` 直至超时 `No stream received`。修复：出站 socket 先选本地端口并**绑定拨出**（公告端口=连接源端口，实测本 NAT 保端口）、应答 SDP `c=` 用学习到的外部 IP、200 OK 后再拨号（确保平台已登记预期发送端）；对照实测：平台自有 IPC `32000000001320000103`（172.16.194.68，设备本体 `32000000001120000203`）以同一契约从公告端口 56004 拨出被平台立即匹配（ESTAB `172.16.240.76:34670 ↔ 172.16.194.68:56004`）。
 
 ---
 

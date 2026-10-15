@@ -58,6 +58,7 @@ type OutputConfig struct {
 	VideoCodec   string `json:"video_codec,omitempty"`
 	LocalSIPPort int    `json:"local_sip_port,omitempty"`
 	LocalIP      string `json:"local_ip,omitempty"`
+	MediaTCPPort int    `json:"media_tcp_port,omitempty"`
 
 	RegisterInterval      int    `json:"register_interval,omitempty"`
 	HeartbeatInterval     int    `json:"heartbeat_interval,omitempty"`

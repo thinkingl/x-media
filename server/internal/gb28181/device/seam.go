@@ -99,6 +99,11 @@ type Config struct {
 	// address learned from response Via received/rport when available.
 	// Local patch (§5.9: NAT deployments with a fixed mapping).
 	LocalIP string `yaml:"local_ip,omitempty"`
+	// MediaTCPPort pins the local TCP port for outbound TCP media (the
+	// advertised m= port and the connection's source port must match on
+	// KDM-class platforms). 0 = pick a free port automatically.
+	// Local patch (§5.9).
+	MediaTCPPort int `yaml:"media_tcp_port,omitempty"`
 
 	Transport string `yaml:"transport"` // SIP transport: udp (default), tcp (inbound listener), tcp-out (device dials the platform, full lifecycle), tls (SIPS outbound, GB/T 28181-2022 A-level), or tls-listen (inbound SIPS: the platform dials the device; requires the TLS pair)
 
