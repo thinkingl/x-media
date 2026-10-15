@@ -1,28 +1,25 @@
 # GB28181 Sink（虚拟摄像头）设计方案
 
-> 状态：**待下一轮评审**（第一、二、三轮意见已合入）｜ 版本：v0.4 ｜ 日期：2026-10-15 ｜ 相关代码：`server/internal/media/`、`server/internal/service/`、`server/internal/model/`、`web/src/views/Outputs.vue`
+> 状态：**全部评审意见已合入（Q1~Q9 已决，可开工）** ｜ 版本：v0.5 ｜ 日期：2026-10-15 ｜ 相关代码：`server/internal/media/`、`server/internal/service/`、`server/internal/model/`、`web/src/views/Outputs.vue`
 
 ---
 
 ## 0. 评审记录与待决事项
 
-**已决（第一轮评审，2026-10-15）**
+**已决（第一轮，2026-10-15）**
 
 1. **技术选型：方案 A+**——内置（vendor）`gb28181-go` 的 `device`/`manscdp`/`metrics`/`psmux` 四个包；信令沿用官方实现，媒体层切换为 `psmux`（§6.2、§8）。不引入外部 GB28181 模块依赖。
 2. **一期媒体范围：H.264/H.265 视频 + AAC 音频**，PS 封装；AAC 直封（ADTS），无需转码（§1.2、§5.6）。
 3. **Go 1.26**（`server/go.mod` 与 Docker builder 镜像随 M1 升级，本机已就绪）。
 
-**第二轮评审意见（已采纳，2026-10-15）**
+**已决（第二轮~第四轮，2026-10-15）**
 
-4. **§7 配置项全部可通过 Web 修改**：全字段表单（创建/编辑/详情），无"手改 JSON/数据库"形态；编辑流程与现有输出端一致（停止态编辑、启动生效）——见 §7.2。
+4. **§7 配置项全部可通过 Web 修改**：全字段表单（创建/编辑/详情），停止态编辑、启动生效（§7.2）。
+5. **配置持久化到数据库现有 `outputs.config` 字段**：不新增表/字段、不使用任何 JSON 配置文件、无 schema 迁移（§7.1 存储链路）。
+6. **Q8 = 平台最大兼容性设计**：新增 §5.9 专项（请求 URI/`platform_id`、Digest、传输、SDP 角色、MTU、编码限制、推流时机、指令应答、XML 编码等全套兼容项与开关）。
+7. **Q4~Q7、Q9 按建议执行**：Q4 go 1.26 随 M1；Q5 v1 单通道；Q6 联调基准 wvp-GB28181-pro；Q7 TeleBoot 默认拒绝（可配）；Q9 v1 维持现状（明文密码同既有先例、TLS 列后续）。
 
-**第三轮评审意见（已采纳，2026-10-15）**
-
-5. **配置持久化到数据库现有 `outputs.config` 字段**：§7.1 全部配置项经既有 `outputs` 表 `config`（TEXT，JSON 文本）保存，**不新增表/字段、不使用任何 JSON 配置文件**（存储链路见 §7.1）。
-
-**待下一轮评审（§13，Q4~Q9）**
-
-- Q4 Go/镜像确认、Q5 单通道范围、Q6 联调平台优先级、Q7 TeleBoot 语义、Q8 平台 URI 兼容、Q9 TLS/安全边界。
+**待决事项：无。** 里程碑（§12）自 M1 起开工；实施期若发现新兼容性问题，按 §5.9 的开关体系增补。
 
 
 ---
@@ -345,6 +342,8 @@ f=
 | `TCP/RTP/AVP` + `a=setup:active` | `a=setup:passive` | 设备监听 `m=` 端口，等待平台连接 |
 | TCP 媒体帧格式 | — | `$` 帧：`0x24` + channel(1B) + 长度(2B 大端) + RTP 包（附录 C.2；已核对 ZLMediaKit `RtpSplitter` 按此解析） |
 
+> 少数平台私实现的 `a=setup` 语义与 RFC 4145 相反：可用 `tcp_role: active|passive` 强制本方角色（默认 auto=按 offer 取反），见 §5.9。
+
 **事务健壮性**：重复 INVITE（未收到 ACK 的平台重传）→ 幂等重发 200；BYE → 200 并停止会话；CANCEL（200 尚未发出）→ 200 + 对 INVITE 回 487；ACK 未到即重传 200（库内事务处理）。
 
 ### 5.6 媒体封装（PS → RTP）
@@ -406,6 +405,50 @@ GOP 重放（**首帧质量关键**）：缓存最近一个 GOP（自最近 IDR 
 `Sink.Stop()` 顺序：停止收帧 → 尽力 `Deregister(ctx, 2s)`（`REGISTER Expires:0`）→ 库 `Stop()`（关 SIP socket/会话）→ 清理订阅者 → `status=stopped`。
 服务层级联（`output_service.Stop`）会先 `RemoveOutput` 并断开管道，与现有输出端一致。
 
+### 5.9 平台最大兼容性设计（Q8 决议）
+
+目标：同一套实现适配不同厂商/版本平台的实现差异，差异点全部收敛为**配置开关**（§7.1）。内置代码的现有行为已按"200 OK 即推流"等主流设备习惯实现，需补丁的点已标注。
+
+**① SIP 信令层**
+
+| 兼容项 | 平台差异 | 设计 |
+|---|---|---|
+| **请求 URI / To 头** | 部分平台（海康 iVMS、大华 DSS 等）校验 `sip:<平台服务ID>@<域>`；wvp 类可用 `sip:<域>@<域>` | 新增配置 `platform_id`（平台 SIP 服务 ID，20 位）：配置后 MESSAGE/INVITE 响应的 Request-URI 与 To 均用 `sip:<platform_id>@<domain>`；**未配置时自动学习**（从平台请求的 From 头提取 serverID 并缓存），学习失败回退 `sip:<domain>@<domain>`。【内置补丁点：`server.go` 三处 RequestURI 构造（注册/注销/心跳）+ To 构造】 |
+| From / Contact / Via | 本地 IP 探测、NAT 回包路径 | 保持库行为：按"到平台的 UDP socket"探测出口 IP；`rport` + `Via received`；显式 `local_ip` 覆盖 |
+| 摘要认证 | `qop=auth` 与无 qop、nonce 轮换 | 库已兼容（qop 自适应、401 重试、realm/nonce 按质询）；403 退避重试 |
+| 信令传输 | 仅 UDP / 要求 TCP / NAT 环境 | `transport: udp｜tcp｜tcp-out`（tcp-out 由设备主动连平台，穿 NAT） |
+| 注册参数 | Expires 协商、平台强制周期 | 按平台响应协商；`register_interval` 可配 |
+| 2022 兼容 | `X-GB-Ver`、校时 | `protocol_version: ""|2.0|3.0`；2022 校时按 REGISTER 响应 Date 解析（库内） |
+| 指令大小写/未知指令 | 各平台自定义 | 未知方法/XML 一律 200 OK 或按策略应答（§5.4），不静默丢弃 |
+
+**② SDP / 媒体层**
+
+| 兼容项 | 平台差异 | 设计 |
+|---|---|---|
+| SSRC | 平台给 `y=` / 不给 | 优先 `y=`；缺失或为 0 时自生成并在 answer 回显 |
+| TCP 角色 | 少数私实现 `a=setup` 语义与 RFC 相反 | `tcp_role: auto｜active｜passive`（默认 auto=按 offer 取反；异常平台可强制） |
+| 媒体端口 | 平台按 SDP 公告端口校验源端口 | **answer 的 `m=` 端口即发送 socket 端口**（库已如此：先 bind 再公告） |
+| MTU | 老旧平台/隧道要求更小分片 | `rtp_mtu` 可配（默认 1400，可调 1200/1000） |
+| 编码 | 2016 平台多为 H264；2022 支持 H265 | 直通不转码；`video_codec: auto｜h264`——配 `h264` 时遇 H265 源启动报错（明确提示），避免老平台黑屏 |
+| 音频 | 支持 AAC / 仅 G711 | AAC 直封（ADTS）；`audio_enable` 可关；G711 源同样直封（PSM 0x90 自动） |
+| 组播 | 部分专网平台用组播收流 | `multicast_ttl`（库已支持，默认单播） |
+| **推流时机** | 有的平台不发 ACK 直接收流 | **200 OK 即开始推流**（库已如此，ACK 幂等无操作）——最大兼容 |
+| 首帧 | 平台点播有超时（约 10s） | GOP 重放：订阅即注入最近 IDR，2s 内出图 |
+
+**③ 指令与 XML 层**
+
+| 兼容项 | 设计 |
+|---|---|
+| 控制指令 | §5.4 应答矩阵；`control_reject_unimplemented=false` 默认全应答 OK（兼容只校验应答码的平台） |
+| BasicParam（平台下发注册/心跳参数） | 记录日志并应答 OK；参数变更在下次启动生效（M4 评估热应用） |
+| Catalog 大目录 | 自动分页（库内）；单通道路由则单条 |
+| RecordInfo / 回放类查询 | 无录像：`SumNum=0` 空列表（不报错，兼容只解析列表的平台） |
+| SUBSCRIBE / OPTIONS / INFO / NOTIFY | 一律 200 OK（+Expires 回显） |
+| audio-only INVITE（对讲） | v1 回 488（无对讲能力）；其余 m= 行忽略，仅取视频行 |
+| XML 编码 | 入方向 UTF-8/GBK/GB18030 自动识别；输出 GB2312 声明 + ASCII/UTF-8 正文 |
+
+**兼容开关汇总**：`platform_id`、`transport`、`tcp_role`、`rtp_mtu`、`video_codec`、`audio_enable`、`protocol_version`、`multicast_ttl`、`control_reject_unimplemented`（均在 §7.1，Web 可配）。
+
 ---
 
 ## 6. 技术选型（已定：A+）
@@ -465,11 +508,15 @@ Web 表单（§7.2）
 {
   "platform_ip": "192.168.88.100",
   "platform_port": 15060,
+  "platform_id": "34020000002000000001",
   "device_id": "34020000001320000001",
   "channel_id": "34020000001310000001",
   "sip_domain": "3402000000",
   "password": "******",
   "transport": "udp",
+  "tcp_role": "auto",
+  "rtp_mtu": 1400,
+  "video_codec": "auto",
   "local_sip_port": 0,
   "local_ip": "",
   "register_interval": 3600,
@@ -489,11 +536,15 @@ Web 表单（§7.2）
 | 字段 | 默认 | 说明 |
 |---|---|---|
 | `platform_ip` / `platform_port` | 必填 | 平台 SIP 服务地址与端口（如 wvp 的 15060/5060） |
+| `platform_id` | "" | 平台 SIP 服务 ID（20 位）；用于请求 URI/To 头；留空=自动学习（从平台请求 From 提取），失败回退域形式（§5.9） |
 | `device_id` | 必填 | 20 位国标编码（设备身份，注册用户） |
 | `channel_id` | = device_id | 通道编码（目录 Item 的 DeviceID） |
 | `sip_domain` | 必填 | SIP 域（一般 = 设备 ID 前 10 位） |
 | `password` | 必填 | 平台约定密码（摘要认证密钥） |
 | `transport` | `udp` | 信令传输：`udp` / `tcp` / `tcp-out`（设备拨平台，保证 NAT 环境可用） |
+| `tcp_role` | `auto` | TCP 媒体角色：`auto`（按 offer 取反，RFC 4145）/`active`/`passive`（异常平台强制，§5.9） |
+| `rtp_mtu` | 1400 | RTP 负载上限（老旧平台/隧道场景可调 1200/1000） |
+| `video_codec` | `auto` | `auto`=跟随源（H264/H265 直通）；`h264`=仅允许 H264 源（遇 H265 启动报错，提示无法转码） |
 | `local_sip_port` | 0 | 本地 SIP 端口；0 = 内核分配 |
 | `local_ip` | "" | 空 = 自动探测出口 IP；跨网段时显式指定 |
 | `register_interval` | 3600 | 注册有效期（秒），按平台响应协商 |
@@ -506,10 +557,10 @@ Web 表单（§7.2）
 | `control_reject_unimplemented` | false | 未实现控制指令是否一律拒绝（ERROR） |
 
 校验规则（`validateOutputConfig` 新增分支）：
-- `device_id`/`channel_id`：必须 20 位数字；
+- `device_id`/`channel_id`：必须 20 位数字；`platform_id`：可选，填写时 20 位数字；
 - `platform_ip` 非空、`platform_port` 1~65535、`sip_domain`/`password` 非空；
 - 间隔类字段范围（心跳 5~3600s、注册 60~86400s 等）；
-- `transport` 枚举校验。
+- `transport`/`tcp_role`/`video_codec` 枚举校验；`rtp_mtu` 范围 400~1400。
 
 ### 7.2 前端（`web/src/views/Outputs.vue`）
 
@@ -521,11 +572,13 @@ Web 表单（§7.2）
 |---|---|---|
 | 基础 | 名称 | 文本（必填） |
 | 平台连接 | `platform_ip` / `platform_port` | 文本 + 数字（1~65535，必填） |
+| 平台连接 | `platform_id` | 文本（可选，20 位数字；留空=自动学习） |
 | 平台连接 | `sip_domain` / `password` | 文本（必填；密码为 password 输入框，带可见性切换） |
 | 设备身份 | `device_id` / `channel_id` | 文本（20 位数字校验；`channel_id` 留空 = 同 `device_id`） |
 | 设备身份 | `device_name` / `manufacturer` / `model` / `firmware` | 文本（目录/设备信息展示用） |
 | 行为参数 | `audio_enable` / `gop_replay` / `control_reject_unimplemented` | 开关 |
-| 高级 | `transport` / `local_sip_port` / `local_ip` / `protocol_version` | 下拉 / 数字 / 文本 |
+| 高级 | `transport` / `tcp_role` / `video_codec` | 下拉 |
+| 高级 | `rtp_mtu` / `local_sip_port` / `local_ip` / `protocol_version` | 数字 / 文本 |
 | 高级 | `register_interval` / `heartbeat_interval` / `heartbeat_timeout_count` | 数字（范围校验） |
 
 **编辑语义（v1）**：与现有输出端一致——运行中"编辑"按钮置灰；修改流程为 **停止 → 编辑 → 启动**（启动时按新配置重新注册）。启动失败（平台拒绝/编码不支持等）在列表与提示中展示原因。
@@ -544,7 +597,7 @@ Web 表单（§7.2）
 | 文件 | 改动 | 里程碑 |
 |---|---|---|
 | `server/go.mod` | 无新增外部依赖（pion/rtp、x/text 已在树）；`go 1.26` | M1 |
-| `server/internal/gb28181/`（新增） | 内置 `device`/`manscdp`/`metrics`/`psmux` 四包（非测试 ~9.0k 行，保留 MIT 版权头与出处）；媒体调用点切换为 psmux（音频/H265） | M1/M3 |
+| `server/internal/gb28181/`（新增） | 内置 `device`/`manscdp`/`metrics`/`psmux` 四包（非测试 ~9.0k 行，保留 MIT 版权头与出处）；媒体调用点切换为 psmux（音频/H265）；**兼容补丁**：RequestURI/To 支持 `platform_id`（3 处）、`tcp_role`/`rtp_mtu` 开关（§5.9） | M1/M3 |
 | `server/internal/model/output.go` | `OutputTypeGB28181 = "gb28181"`；`OutputConfig` 新增 §7.1 字段（序列化进现有 `outputs.config`，**无 schema 迁移**） | M1 |
 | `server/internal/media/engine.go` | `OutputConfig` 新增同名字段（透传） | M1 |
 | `server/internal/media/gb28181_sink.go`（新增） | `Gb28181Sink`：Sink 接口 + FrameHub（视频/音频/ADTS/GOP 重放）+ ClientInfoProvider + MetricsHooks | M1-M3 |
@@ -622,6 +675,11 @@ Web 表单（§7.2）
 | H.265 源 | PSM stream_type=0x24、video PES 0xE0；与 H264 同一路径，平台/ffmpeg 可解 |
 | 重复 INVITE / BYE 幂等 | 无重复会话、无泄漏 |
 | Stop | 平台收到 `Expires:0` 注销；订阅清理 |
+| 兼容：`platform_id` | 请求行与 To 头为 `sip:<platform_id>@<domain>`；未配置时从平台请求学习，失败回退域形式 |
+| 兼容：`tcp_role` | 强制 active/passive 时不随 offer 反转，连接方向符合配置 |
+| 兼容：`rtp_mtu` | 抓包实测最大 RTP 负载 ≤ 配置值（1200 场景） |
+| 兼容：`video_codec=h264` | H265 源 → Configure 返回错误（明确提示无法转码） |
+| 兼容：无 ACK 平台 | INVITE 200 后平台不发送 ACK，仍能收到 RTP 流（推流时机验证） |
 | 媒体校验（需 ffmpeg） | 重组 PS 存盘 → `ffmpeg -i out.ps -f null -` 视频+音频均解码通过；音频 volumedetect 非静音（静音≈-91dB，参照既有方法） |
 
 ### 11.3 L3 集成（MediaHub 全链路）
@@ -639,6 +697,7 @@ Web 表单（§7.2）
 - [ ] 平台重启 → 设备自动重注册；设备停止 → 平台转离线
 - [ ] 前端：创建/编辑（停止态）/启停 GB28181 输出端，§7.1 全字段可改、回显与校验正确，详情页展示平台会话
 - [ ] 传输矩阵：UDP、TCP 被动、TCP 主动 三种模式均出图
+- [ ] 兼容开关抽测：`platform_id` 生效（抓包请求行 `sip:<platform_id>@<domain>`）、`tcp_role` 强制、`rtp_mtu=1200` 场景
 
 ---
 
@@ -656,26 +715,27 @@ Web 表单（§7.2）
 
 ---
 
-## 13. 已决事项与开放问题
+## 13. 决议归档与实施期回访项
 
-### 13.1 已决（第一轮评审，2026-10-15）
+### 13.1 已决（Q1~Q9 全部关闭，2026-10-15）
 
 | # | 事项 | 结论 |
 |---|---|---|
 | Q1 | 音频实现路径 | **A+**：内置源码 + 媒体层切换 psmux；一期即含音频（AAC 直封 PS，无需转码） |
 | Q2 | H.265 是否纳入一期 | **纳入**（与 H264 同一条媒体路径，PSM 0x24） |
 | Q3 | 依赖/内置形态 | **内置**（`server/internal/gb28181/` 四个包，保留 MIT 版权头与出处；向上游提 PR，patch series 跟随） |
+| Q4 | go 1.26 升级 | **随 M1 执行**（本机 1.26.5；镜像 `golang:1.26-bookworm`，`GOTOOLCHAIN=auto` 兜底） |
+| Q5 | 单通道 vs 多通道 | **v1 单通道**（虚拟 IPC；多路需求用多实例，各自注册） |
+| Q6 | 联调目标平台 | **wvp-GB28181-pro（+ZLMediaKit）为基准**；海康/大华平台如需联调另行安排 |
+| Q7 | TeleBoot 语义 | **默认拒绝**（记录日志），可配置开放为"重启 x-media 进程" |
+| Q8 | 平台兼容性 | **最大兼容性设计（§5.9）**：请求 URI/`platform_id`、Digest、信令/媒体传输、SDP 角色、MTU、编码限制、推流时机、指令应答、XML 编码——差异全部收敛为配置开关 |
+| Q9 | 安全边界 | **v1 维持现状**（密码明文存库，同现有 RTSP 先例）；TLS/SIPS 列后续里程碑 |
 
-### 13.2 开放问题（待下一轮评审）
+### 13.2 实施期回访项（非阻塞，开工后按实现/联调结论回看）
 
-| # | 问题 | 选项/建议 |
-|---|---|---|
-| Q4 | **go 1.26 升级**（go.mod + Dockerfile builder 镜像） | 建议随 M1 执行；dev 机已是 1.26.5 |
-| Q5 | **单通道 vs 多通道**（一台设备挂多路流） | v1 单通道（虚拟 IPC）；多通道后续（每路一个 Output 实例即可近似满足） |
-| Q6 | **联调目标平台** | 建议 wvp-GB28181-pro（开源、可控、ZLM 生态）；如需海康/大华平台请指定，联调时间另估 |
-| Q7 | **TeleBoot（远程重启）语义** | 建议默认拒绝（记录），可配置开放为"重启 x-media 进程" |
-| Q8 | **平台校验 MESSAGE 目标 URI 的 SIP ID**（内置代码未暴露 platform_id 配置） | 内置后我们完全可控（RequestURI 构造点）；若目标平台不兼容，M4 内适配 |
-| Q9 | **安全性**：密码明文存库（同现有 RTSP 密码先例）；无 TLS | v1 维持现状；如需 SIPS 列后续里程碑 |
+- `platform_id` 自动学习作为主路径还是兜底（依赖真实平台样本）；
+- BasicParam（平台下发注册/心跳参数）热应用策略——当前：记录 + 下次启动生效，M4 评估；
+- 若联调遇到平台特有怪癖：按 §5.9 开关体系增补开关，不硬编码分支。
 
 ---
 
@@ -685,7 +745,8 @@ Web 表单（§7.2）
 - 订阅：`FrameSource.Subscribe(ctx)` 在 INVITE 时调用、ctx Done（BYE）时注销；`FrameSubscription{ID, <-chan AccessUnit}`；
 - 媒体（A+ 接缝）：`device` 包内媒体调用点仅两处——`server.go:1567`（`MuxH264ToPS`→`pusher.SendFrame`）与 `playback.go:262`；替换为 `psmux.Muxer`（`WriteAU`/`WriteAudio`/`AppendAudioPES`）+ `psmux.RTPPacketizer`；`FrameSource` 需扩展音频通道（或 AccessUnit 内携带音频帧）；
 - PS 复用（psmux）：`packHeader`（SCR=PTS/300）→ IDR 帧附 `systemHeader`+`psm`（CRC32/MPEG-2）→ `videoPES`（≤60000 字节切分，续包无 PTS）→ `AppendAudioPES`（音频并入同一突发）；
-- RTP：负载 ≤1400、Marker 仅突发末包、TCP `$`-帧（`0x24|channel|len16`）、SSRC 取 INVITE `y=`、初始序号随机；
+- RTP：负载 ≤1400（`rtp_mtu` 可配）、Marker 仅突发末包、TCP `$`-帧（`0x24|channel|len16`）、SSRC 取 INVITE `y=`、初始序号随机；
+- 兼容性基线行为（已核实）：**200 OK 即开始推流（不等 ACK；ACK 幂等）**；媒体 socket **先 bind 后公告**（answer 的 `m=` 端口即发送端口）；
 - XML：输出 `GB2312` 声明 + 正文 ASCII/UTF-8；入方向自动 UTF-8/GBK/GB18030；
 - 版本要求：模块声明 `go 1.26`；`Config.Validate()` 启动即校验（拒绝坏配置）。
 
