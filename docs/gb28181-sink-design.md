@@ -6,11 +6,11 @@
 
 ## 0. 评审重点（TL;DR）
 
-1. **技术选型（§6）**：推荐"方案 A：引入 `github.com/mickeyzzc/gb28181-go/device`（MIT，依赖极轻，生产验证）"包裹在本地适配层内；备选"方案 B：完全自研"（可控性高、工期/风险大）。
-2. **一期范围（§1.2/§1.3）**：**单通道 + H.264 视频-only**，音频（Q1）与 H.265（Q2）列为待决项/后续里程碑。
+1. **技术选型（§6）**：推荐"方案 A：引入 `github.com/mickeyzzc/gb28181-go`（MIT，依赖极轻，生产验证）"包裹在本地适配层内；其中 **信令层用官方 `device` 包、媒体层用同库 `psmux`**（支持 H264/H265 + AAC/G711）——需要内置 fork 做最小改造（见 §6.2/§13-Q1）。
+2. **一期范围（§1.2/§1.3）**：单通道虚拟 IPC；**视频 H.264 + 音频 AAC**（AAC 直封 PS，**无需转码**，平台原生支持）。H.265 亦已就绪（PSM 0x24），是否纳入一期见 Q2。
 3. **附带成本**：`go 1.26` 升级（本机已就绪）+ Docker builder 镜像升级（§6.2、§8）。
 4. **联调目标平台**：建议 wvp-GB28181-pro（+ZLMediaKit）作为基准（§11.4、Q6）。
-5. 其余决策点集中在 **§13 开放问题表（Q1~Q9）**，请逐项给出结论后即可按 §12 里程碑开工。
+5. 其余决策点集中在 **§13 开放问题表**，请逐项给出结论后即可按 §12 里程碑开工。
 
 
 ---
@@ -34,15 +34,15 @@ MP4 文件 / RTSP 源 ──► x-media 管道 ──► [GB28181 Sink] ──SI
 |---|---|---|
 | 设备形态 | 单设备单通道（虚拟 IPC） | DeviceID 20 位；ChannelID 默认 = DeviceID |
 | SIP 信令 | REGISTER（摘要认证）、MESSAGE（心跳/目录/信息/状态/配置/控制/录像查询）、SUBSCRIBE（应答）、INVITE/BYE/CANCEL/ACK、OPTIONS、INFO | UDP 为主，TCP（含 tcp-out）可配 |
-| 媒体 | **H.264 视频**，PS 封装 → RTP，UDP 与 TCP（主动/被动） | 跟随平台 INVITE SDP 的传输方式 |
+| 媒体 | **H.264/H.265 视频 + AAC 音频**（AAC 直封 PS，**无需转码**），PS 封装 → RTP，UDP 与 TCP（主动/被动） | H265 纳入范围见 Q2；跟随平台 INVITE SDP 的传输方式 |
 | 指令响应 | 目录、设备信息、设备状态、配置下载、设备控制（PTZ/录制/布防/校时等按策略应答）、录像查询（空）、订阅、心跳 | 见 §5.4 应答矩阵 |
 | 平台版本 | GB/T 28181-2016 线格式（附带 2022 兼容开关：`X-GB-Ver` 头、校时） | 目标平台：wvp-GB28181-pro 优先，兼容海康/大华/宇视平台 |
 | 输出端语义 | 注册到平台 + 被动受邀推流（push sink，无对外拉流地址） | 与 RTMP/RTSP push 语义相近 |
 
 ### 1.3 v1 非目标（列入后续里程碑，见 §12）
 
-- 音频（G.711A/G.711U）——源多为 AAC，涉及转码，需评审（见 §13-Q1）
-- H.265 源编码（GB28181-2016 无 H265；2022 及部分平台支持）——见 §6、§13-Q2
+- 音频转码：**不需要**——国标平台原生支持主流编码，AAC 可直接封装进 PS 播放（§5.6），既无需转 G.711，也无需 ffmpeg
+- H.265 源编码：平台与 PS 封装（PSM 0x24）均支持，待 Q2 决定是否纳入一期
 - 录像回放/下载（Playback/Download）、语音对讲/广播、报警上报、级联、国密 GB35114、TLS/SIPS
 - 多通道设备（一台设备挂多路流）——v1 单通道，多实例可各自注册为独立设备
 
@@ -50,7 +50,7 @@ MP4 文件 / RTSP 源 ──► x-media 管道 ──► [GB28181 Sink] ──SI
 
 1. 平台（以 wvp-GB28181-pro 为基准）设备列表出现该设备，**在线**；心跳持续、断网恢复后自动重注册。
 2. 平台查询目录/设备信息/设备状态，应答内容正确。
-3. 平台点播：**2 秒内出图**（首帧为 IDR），播放连续无花屏；ffmpeg 从平台侧拉流（RTMP/RTSP/HLS 任一路）可正常解码。
+3. 平台点播：**2 秒内出图**（首帧为 IDR），音视频连续无花屏、音频非静音；ffmpeg 从平台侧拉流（RTMP/RTSP/HLS 任一路）可正常解码（含 AAC 音频）。
 4. PTZ 与控制类指令有正确 SIP 应答（无物理云台时按策略应答 OK）。
 5. 输出端"停止"后：主动注销，平台状态转离线；重启后可再次注册。
 6. 自测：新增单测 + 组件测试（内置 FakePlatform）全绿；全量 `go test ./...` 无回归。
@@ -118,23 +118,27 @@ service.OutputService ──► MediaHub.CreateOutput ──► NewGB28181Sink(c
 │                                                                                              │
 │  Gb28181Sink（实现 Sink 接口，新文件 gb28181_sink.go）                                        │
 │  ├─ 配置校验/状态机（stopped/running/error）                                                   │
-│  ├─ FrameHub：帧适配 + fan-out（x-media Frame ─► device.AccessUnit）                          │
-│  │    ├─ Annex-B 拆分（复用 splitAnnexB）→ []device.NALU（含 SPS/PPS/IDR 标注）                 │
-│  │    ├─ PTS(ClockRate) ─► time.Time（会话基准单调映射）                                        │
+│  ├─ FrameHub：帧适配 + fan-out（x-media Frame ─► 媒体层输入）                                  │
+│  │    ├─ 视频：Annex-B 拆分（复用 splitAnnexB）→ NALU（SPS/PPS/IDR 标注）                       │
+│  │    ├─ 音频：AAC 帧 + ADTS 头（参数取 CodecConfig/ASC；直封，无需转码）                        │
+│  │    ├─ PTS(ClockRate) ─► 90kHz（会话基准单调）                                                │
 │  │    ├─ 每订阅者有界 channel（容量 128，满则丢；关键帧优先）                                     │
 │  │    └─ GOP 缓存重放（新订阅者先注入最近一个 GOP，保证出图）                                     │
 │  ├─ MetricsHooks 适配：注册成功/失败、心跳失败、会话建立/结束、PS 字节数 → 日志/统计             │
 │  └─ ClientInfoProvider：平台会话列表（SSRC/地址/传输/开始时间）                                  │
 │                                                                                              │
-│  device.Server（外部库 github.com/mickeyzzc/gb28181-go/device）                                │
+│  device.Server（信令层：依赖或内置 github.com/mickeyzzc/gb28181-go/device，见 §6.2）            │
 │  ├─ SIP 收发（UDP/TCP/tcp-out）＋ REGISTER 摘要认证（MD5，qop=auth 兼容）                       │
 │  ├─ MANSCDP XML（心跳/目录/信息/状态/配置/控制/录像查询/订阅应答）                                │
-│  ├─ INVITE→PS→RTP 推流（UDP；TCP 主动/被动；组播可选）、BYE/ACK/CANCEL 事务                      │
-│  └─ 心跳静默检测与自动重注册                                                                    │
+│  └─ 心跳静默检测与自动重注册 / BYE/ACK/CANCEL 事务                                              │
+│                                                                                              │
+│  媒体层（A+：同库 psmux；A：device 内置 H264-only 路径）                                        │
+│  ├─ PS 打包：pack/system header + PSM + PES（H264/H265 + AAC/G711）                             │
+│  └─ RTP 发送：≤1400B 分包、marker 帧末、UDP / TCP（$-帧）；SSRC 取 INVITE y=                     │
 └──────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-**设计要点：外部库只出现在 `gb28181_sink.go` 一个文件内**（外加少量类型引用），上层（service/前端）与媒体管道完全不感知库的存在；后续替换/自研只需重写这一个适配层（接口边界 = `Sink` + `ClientInfoProvider`）。
+**设计要点：库引用集中在两个边界**（依赖形态=仅 `gb28181_sink.go`；内置形态=额外 `server/internal/gb28181/`），上层（service/前端）与媒体管道完全不感知库的存在；后续替换/自研只需重写适配层（接口边界 = `Sink` + `ClientInfoProvider`）。
 
 ### 4.2 生命周期状态机
 
@@ -152,7 +156,7 @@ service.OutputService ──► MediaHub.CreateOutput ──► NewGB28181Sink(c
 
 说明：
 - 注册发生在 `Sink.Start()`（此时可能还没接管道）——与媒体解耦：**先上线，后受邀**。
-- `pipe.Start` 时调用 `Configure(streams)`；若源为 H.265 视频或纯音频则返回错误（管道启动失败，前端可见明确原因）；H.264 + AAC 源正常接受（音频丢弃并计数）。
+- `pipe.Start` 时调用 `Configure(streams)`；若源编码超出范围（如纯音频源、或 Q2 未纳入时的 H.265 源）则返回错误（管道启动失败，前端可见明确原因）；H.264 + AAC 源正常接受（音频与视频一并推流，直封 PS 无需转码）。
 - 平台会话（INVITE）可以发生在任意时刻，可能同时多于 1 个（例如实况 + 另一路转发）；策略见 §5.7。
 
 ### 4.3 并发模型
@@ -328,26 +332,30 @@ f=
 | `RTP/AVP`（无 setup） | `RTP/AVP` | 设备用本地 UDP socket 直发 `c=` IP + `m=` 端口 |
 | `TCP/RTP/AVP` + `a=setup:passive` | `a=setup:active` | 平台监听，**设备主动 TCP 连接**其 `c=`/`m=` |
 | `TCP/RTP/AVP` + `a=setup:active` | `a=setup:passive` | 设备监听 `m=` 端口，等待平台连接 |
-| TCP 媒体帧格式 | — | 2 字节大端长度前缀 + RTP 包（RFC 4571） |
+| TCP 媒体帧格式 | — | `$` 帧：`0x24` + channel(1B) + 长度(2B 大端) + RTP 包（附录 C.2；已核对 ZLMediaKit `RtpSplitter` 按此解析） |
 
 **事务健壮性**：重复 INVITE（未收到 ACK 的平台重传）→ 幂等重发 200；BYE → 200 并停止会话；CANCEL（200 尚未发出）→ 200 + 对 INVITE 回 487；ACK 未到即重传 200（库内事务处理）。
 
 ### 5.6 媒体封装（PS → RTP）
 
-**PS 结构**（每帧一个 PS 包）：
+**PS 结构**（每帧一个 PS 突发）：
 
 ```
-┌────────────────────────────────────┬──────┬──────────────────────────────┐
-│ ① PS pack header  00 00 01 BA      │ 14B  │ SCR + 程序复用率（用常数即可）  │
-│ ② System header   00 00 01 BB      │ 视长  │ 流列表（视频 0xE0）；首帧＋周期 │
-│ ③ PES (视频)      00 00 01 E0      │ 变长  │ 80 80 05 + PTS[+DTS] + NALU   │
-│ ④ PES (音频，二期) 00 00 01 C0      │ 变长  │ G.711 payload                 │
-└────────────────────────────────────┴──────┴──────────────────────────────┘
+┌─────────────────────────────────────┬──────┬───────────────────────────────────────┐
+│ ① PS pack header  00 00 01 BA       │ 14B  │ SCR（PTS/300 派生）+ program_mux_rate    │
+│ ② System header   00 00 01 BB       │ 视长  │ 流列表（视频 0xE0）；IDR 帧发送           │
+│ ③ PSM             00 00 01 BC       │ 视长  │ stream_type: 视频 1B/24、音频 0F/90(aac) │
+│                                      │      │ 附 CRC32/MPEG-2；IDR 帧发送              │
+│ ④ PES (视频)      00 00 01 E0       │ 变长  │ 80 80 05 + PTS[+DTS] + Annex-B NALU      │
+│ ⑤ PES (音频)      00 00 01 C0       │ 变长  │ PTS + [ADTS 头]+AAC 帧 / G.711 裸帧       │
+└─────────────────────────────────────┴──────┴───────────────────────────────────────┘
 ```
 
-- 视频 PES 负载 = **Annex-B NALU**（含 `00 00 01` 起始码）；IDR 帧前保证带 SPS/PPS（来自 `StreamInfo.CodecConfig`，不依赖源在带内提供）；
-- PTS/DTS 以 **90kHz** 写入 PES 头；
-- 一帧（AU）= 一个 PS 包 = 一个（或一组）RTP 包。
+- 视频 PES 负载 = **Annex-B NALU**（含 `00 00 01` 起始码）；IDR 帧前保证带 SPS/PPS/VPS（来自 `StreamInfo.CodecConfig`，不依赖源在带内提供）；
+- 音频 PES 与视频 PES **同处一个 PS 突发**（规则见 §5.7）；
+- PTS/DTS 以 **90kHz** 写入 PES 头（音频同理）；
+- 一帧（AU）的 PS 突发 = 一个（或一组）RTP 包，**marker 界定突发末尾**；
+- AU 过大时 PES 按 ≤60000 字节切分（续包无 PTS），保持 `PES_packet_length` 可表示。
 
 **RTP 打包规则**（表内每条都是踩过坑的规范红线）：
 
@@ -359,18 +367,24 @@ f=
 | Sequence | 会话内逐包 +1，初始随机 |
 | **Marker** | 一帧的**最后一个** RTP 分包置 1（其余 0）——同类问题此前已在 RTSP AAC 上踩坑（live555 依赖 Marker 交付帧），国标平台虽多按 PS 起始码重组，也一律按规范设置 |
 | MTU | RTP 负载 ≤ 1400 字节（可配，默认 1400） |
-| TCP | 2 字节大端长度前缀（RFC 4571） |
+| TCP | **`$` 帧（GB/T 28181 附录 C.2，RTSP-interleaved 风格）：`0x24 \| channel(1B) \| 长度(2B 大端) \| RTP 包`**；已核对 ZLMediaKit `RtpSplitter` 对 `data[0]=='$'` 按 4 字节头解析（即 wvp/ZLM 平台的实际期望格式） |
 
 ### 5.7 帧适配与多会话 fan-out
 
-x-media 标准帧 → 库 `device.AccessUnit` 的映射：
+x-media 标准帧 → 媒体层 `device.AccessUnit` / psmux 输入的映射：
 
-| x-media Frame | device.AccessUnit |
+| x-media Frame | 媒体层输入 |
 |---|---|
-| `Kind=video` + `CodecID=H264`，Payload=Annex-B | `splitAnnexB` → `[]NALU{Type, Data, IsSPS/IsPPS/IsIDR}`；`KeyFrame` 取自 `FlagKeyframe` |
-| `PTS`（int64，ClockRate=90000 等） | `Timestamp = epoch + PTS/ClockRate`（epoch 取首帧墙钟；同会话内单调即可，库再换算 90kHz） |
-| AAC 音频帧 | v1 丢弃并计数（见 §13-Q1） |
-| H.265 视频帧 | `Configure` 阶段直接拒绝（明确错误），见 §13-Q2 |
+| `Kind=video` + H.264/H.265，Payload=Annex-B | `splitAnnexB` → NALU 列表；`KeyFrame` 取自 `FlagKeyframe`；IDR 前保证带 SPS/PPS/VPS（来自 `StreamInfo.CodecConfig`） |
+| `Kind=audio` + AAC，Payload=raw AAC 帧（AU） | **加 7 字节 ADTS 头**（参数由 ASC 解析：profile/采样率索引/声道数；长度=帧长+7）→ psmux 音频帧；无需转码 |
+| `PTS`（int64，ClockRate=90000/采样率） | PES PTS 换算 **90kHz**（音频 1024 样本 @44.1k ≈ 2089 tick/帧）；会话基准单调 |
+| 其他编码 | `Configure` 阶段拒绝（明确错误），见 §13-Q2 |
+
+**音频入 PS 的硬性规则**（psmux 作者在真实平台踩坑后的结论，直接引用）：
+
+1. PSM（`00 00 01 BC`）声明流类型：视频 H264=`0x1B`/H265=`0x24`，音频 AAC=`0x0F`/G711A=`0x90`；音频 PES 用 stream_id `0xC0`；
+2. **AAC 帧必须带 ADTS 头**（ZLMediaKit 侧 PS 复用对此有强校验：`MpegMuxer::inputFrame` 对 CodecAAC `CHECK(frame->prefixSize(), "required aac frame with adts header")`）；
+3. **音频 PES 必须并入视频 AU 的同一 PS 突发（burst）内**（`AppendAudioPES`），不能单独成包——GB28181 是单条 RTP 流，marker 界定 AU 边界；独立发送音频会携带自身 marker，接收端会把视频帧截断（实测表现为 IDR 在 ~maxPESPayload 处断裂）。
 
 GOP 重放（**首帧质量关键**）：缓存最近一个 GOP（自最近 IDR 起，容量 4MB/2s 上限）；平台 INVITE 建立订阅时，先把缓存 GOP 注入该订阅者的 channel，再续实时帧——平台**立刻收到 IDR 出图**，无需等下一个关键帧。
 
@@ -387,14 +401,14 @@ GOP 重放（**首帧质量关键**）：缓存最近一个 GOP（自最近 IDR 
 
 ### 6.1 候选方案
 
-| 维度 | **A：引入 `gb28181-go/device`（推荐）** | B：完全自研 | C：sipgo + 自研媒体/XML |
+| 维度 | **A：引入 `gb28181-go`（推荐，含 A+ 变体）** | B：完全自研 | C：sipgo + 自研媒体/XML |
 |---|---|---|---|
 | SIP 信令 | 现成：摘要认证(qop)、UDP/TCP/tcp-out/TLS、事务/重传、静默检测重注册 | 自研 ~1000+ 行，平台差异坑多 | sipgo 事务层，GB 语义仍需自研 |
 | MANSCDP XML | 现成：全命令面、分页、GBK 自动识别 | 自研 ~400 行 | 自研 ~400 行 |
-| PS/RTP | 现成（H.264，MTU/标记位/长度前缀规范） | 自研（H.264 可行；**H.265 亦可**） | 自研 |
+| PS/RTP | `device` 包现成（H.264 视频）；同库 `psmux` 包支持 **H264/H265 + AAC/G711**（PSM/CRC/超长切分/音频并入突发均有实测注释） | 自研 | 自研 |
 | 控制指令面 | 现成（PTZ 位串解码、配置、快照、对讲等回调） | 全自研 | 全自研 |
-| H.265 | ✗（设备包未支持） | ✓ | ✓ |
-| 音频 | ✗ | 可做（AAC 解码/转码问题依旧，见 §13-Q1） | 同左 |
+| H.265 | `device` 包未支持；换用 `psmux` 媒体层即具备（PSM 0x24） | ✓ | ✓ |
+| 音频 | `device` 包未支持；换用 `psmux` 媒体层即具备（AAC 直封，ADTS；PSM 0x0F） | ✓ | ✓ |
 | 依赖 | MIT，仅 pion/rtp + x/text（本仓库已有），**无 CGO** | 0 | sipgo + 其依赖链 |
 | Go 版本 | 模块要求 go 1.26（本机已 1.26.5；Docker 镜像需升级） | 无要求 | 视库 |
 | 联调风险 | 低（生产验证 + 自带上万行测试与 loopback conformance） | 高（每家平台 quirks） | 中 |
@@ -402,18 +416,19 @@ GOP 重放（**首帧质量关键**）：缓存最近一个 GOP（自最近 IDR 
 
 ### 6.2 推荐
 
-**方案 A**：以 `github.com/mickeyzzc/gb28181-go/device@v0.12.0` 为信令/封装基础，在本仓库实现适配层 `Gb28181Sink`。理由：
+**推荐：方案 A+**（官方库信令层 + 同库 `psmux` 媒体层）：
 
-1. "响应平台下发的各种指令"面很宽，自研等价实现的工作量与联调风险不成比例；
-2. 依赖极轻（closure 仅 pion/rtp、x/text，均已在树内）、MIT 许可、无 CGO，不破坏仓库"纯 Go"约束；
-3. 本仓库既有先例：复杂协议直接用成熟库（gortsplib/mp4ff），只对业务语义做适配层；
-4. 适配层边界（`Sink` 接口）足够薄，若未来需要 H.265/音频自行扩展，可在 B 方案下平滑替换。
+1. **信令层用官方 `device` 包**："响应平台下发的各种指令"面很宽，其实现在真实平台验证过（摘要 qop、TCP 信令、事务重传、静默检测重注册、GBK 兼容），自研等价实现的工作量与联调风险不成比例；依赖极轻（closure 仅 pion/rtp、x/text，均已在树内）、MIT、无 CGO。
+2. **媒体层用同库 `psmux` 包**：`device` 包内置媒体路径为 H264 视频 only（`server.go:1567` 直调 `MuxH264ToPS`，无扩展缝）；而 `psmux` 已支持 **H264/H265 + AAC/G711**（PSM/CRC32、超长 AU 切分、"音频必须并入视频 AU 突发"等实测经验均已成文）——替换媒体路径即可一期同时支持音频与 H265。
+3. **落地形态（见 §13-Q1）**：
+   - **A+（推荐）**：把 `device` + `manscdp` + `metrics` + `psmux` 四个包内置进仓库（`server/internal/gb28181/`，非测试合计 ~9.0k 行，保留 MIT 版权头与出处；`platform`/`security35114` 仅原库测试使用，无需内置），媒体调用点切换为 psmux；同时向上游提 PR，后续可用 patch series 跟随 upstream。
+   - **A（保守备选）**：直接依赖官方 `v0.12.0`（H264 视频-only），音频/H265 等上游合入后再启用——不维护 fork，但一期功能缩水。
+4. 适配层边界（`Sink` 接口）足够薄：无论 A/A+，业务语义只在 `gb28181_sink.go` 落地，未来切换方案 B 亦平滑。
 
 代价与缓解：
 
 - 模块要求 **go 1.26** → `server/go.mod` 升 `go 1.26`（本机 1.26.5 已就绪）；`docker/Dockerfile` builder 镜像升级 `golang:1.26-bookworm`（若内网 registry 未同步，用 `GOTOOLCHAIN=auto` 兜底）；
-- v0.x API 未冻结 → **锁死 v0.12.0**，所有引用集中在 `gb28181_sink.go`；
-- H.265/音频缺口 → 见 §13-Q1/Q2 决策；若要一期支持，改走方案 B（PS/RTP 自研部分可参考该库 `psmux` 与其 conformance 测试思路）。
+- v0.x API 未冻结 / fork 维护 → **锁定来源版本 v0.12.0**；改动面压到最小（PS 打包调用点、订阅分发两处）；外部引用集中在 `gb28181_sink.go` 一个文件。
 
 ---
 
@@ -436,6 +451,7 @@ GOP 重放（**首帧质量关键**）：缓存最近一个 GOP（自最近 IDR 
   "heartbeat_interval": 60,
   "heartbeat_timeout_count": 3,
   "protocol_version": "",
+  "audio_enable": true,
   "device_name": "X-Media 虚拟摄像头",
   "manufacturer": "x-media",
   "model": "gb28181-sink",
@@ -459,6 +475,7 @@ GOP 重放（**首帧质量关键**）：缓存最近一个 GOP（自最近 IDR 
 | `heartbeat_interval` | 60 | 心跳周期（秒） |
 | `heartbeat_timeout_count` | 3 | 连续失败/静默多少次触发重注册 |
 | `protocol_version` | "" | `X-GB-Ver` 头：""（省略）/`2.0`（2016）/`3.0`（2022） |
+| `audio_enable` | true | 是否随视频推送音频（AAC 直封 PS）；关闭则纯视频通道 |
 | `device_name` 等 | 见默认 | 目录/设备信息展示字段 |
 | `gop_replay` | true | 新会话先注入最近 GOP（2 秒内出图） |
 | `control_reject_unimplemented` | false | 未实现控制指令是否一律拒绝（ERROR） |
@@ -481,10 +498,11 @@ GOP 重放（**首帧质量关键**）：缓存最近一个 GOP（自最近 IDR 
 
 | 文件 | 改动 | 里程碑 |
 |---|---|---|
-| `server/go.mod` / `go.sum` | 新增 `github.com/mickeyzzc/gb28181-go v0.12.0`；`go 1.26` | M1 |
+| `server/go.mod` / `go.sum` | A：新增依赖 `gb28181-go v0.12.0`；A+：无新依赖（pion/rtp、x/text 已在树）；`go 1.26` | M1 |
+| `server/internal/gb28181/`（新增，仅 A+） | 内置 `device`/`manscdp`/`metrics`/`psmux` 四包（非测试 ~9.0k 行，保留 MIT 版权头与出处）；媒体调用点切换为 psmux（音频/H265） | M1/M3 |
 | `server/internal/model/output.go` | `OutputTypeGB28181 = "gb28181"`；`OutputConfig` 新增 §7.1 字段 | M1 |
 | `server/internal/media/engine.go` | `OutputConfig` 新增同名字段（透传） | M1 |
-| `server/internal/media/gb28181_sink.go`（新增） | `Gb28181Sink`：Sink 接口 + FrameHub + GOP 重放 + ClientInfoProvider + MetricsHooks | M1-M3 |
+| `server/internal/media/gb28181_sink.go`（新增） | `Gb28181Sink`：Sink 接口 + FrameHub（视频/音频/ADTS/GOP 重放）+ ClientInfoProvider + MetricsHooks | M1-M3 |
 | `server/internal/media/media_hub.go` | `CreateOutput` 增加 `case "gb28181"` | M1 |
 | `server/internal/service/output_service.go` | `isValidOutputType` + `validateOutputConfig` 支持 gb28181 | M1 |
 | `server/internal/service/status_util.go`、`pipe_service.go` | 两处 `media.OutputConfig` 映射补字段 | M1 |
@@ -515,7 +533,7 @@ GOP 重放（**首帧质量关键**）：缓存最近一个 GOP（自最近 IDR 
 | 密码错误（403） | error + 明确日志（不做无休止快速重试） |
 | 平台静默（停止应答心跳） | 库内静默检测 → 自动重注册 |
 | INVITE 到达但尚未接管道（无帧） | 200 OK 后等待帧（首帧随源启动到达）；记录 warn；平台侧一般有 10s 点播超时保护 |
-| 源为 H.265 / 纯音频 | `Configure` 返回错误 → 管道启动失败 → 前端报明确原因 |
+| 源为 H.265（若 Q2 未纳入）/ 纯音频源 | `Configure` 返回错误 → 管道启动失败 → 前端报明确原因 |
 | PTS 回绕 / 跳变 | 会话内以 90kHz 单调映射（沿用 `clock.go` 思路）；跳变 > 阈值时重置会话基准并记日志 |
 | 无关键帧缓存（刚启动即被点播） | 收到下一个 IDR 后出图；`gop_replay` 降低该窗口 |
 | 并发多个平台会话 | 独立 SSRC/端口/序号；BYE 只关本会话 |
@@ -534,8 +552,8 @@ GOP 重放（**首帧质量关键**）：缓存最近一个 GOP（自最近 IDR 
 | 用例 | 说明 |
 |---|---|
 | 配置校验 | device_id/channel_id 20 位、必填、默认值、枚举 |
-| Frame→AccessUnit | Annex-B 拆分、SPS/PPS/IDR 标注、KeyFrame 透传 |
-| PTS→时间映射 | 单调性、基准重置、ClockRate 换算 |
+| 帧适配 | Annex-B 拆分、SPS/PPS/IDR 标注、KeyFrame 透传；AAC 帧 ADTS 头生成（采样率索引/声道/长度字段） |
+| PTS→90kHz 映射 | 单调性、基准重置、音视频换算（90k/44.1k） |
 | GOP 重放缓冲 | 订阅注入顺序、容量淘汰、关键帧优先丢帧策略 |
 | SDP 解析/构造（适配层断言） | `y=`/`m=`/`c=`/`setup` 提取与 answer 字段 |
 | 控制指令策略 | 默认应答/拒绝策略矩阵（teleboot 默认拒绝等） |
@@ -551,10 +569,12 @@ GOP 重放（**首帧质量关键**）：缓存最近一个 GOP（自最近 IDR 
 | 目录/信息/状态/配置/录像查询 | 应答 XML 字段（SN 回显、Item 内容、SumNum 等） |
 | 控制指令矩阵 | PTZ OK、TeleBoot 默认 ERROR、IFrame 回调触发 |
 | INVITE(UDP) 收流 | 200 的 answer SDP 字段正确；收包重组 PS 可解析：首帧 IDR+SPS/PPS、PTS 递增、Marker 规则、SSRC==y= |
-| INVITE(TCP 被动/主动) | 两种连接方向均收流成功 |
+| 音频打包（PS 内部） | PSM stream_type 正确（视频 0x1B/0x24、音频 0x0F）、PES 0xC0、AAC 帧带 7 字节 ADTS；音频 PES 与视频 AU 同 burst（marker 仅突发末包） |
+| 音频时钟 | PES/PS 内音频 PTS 90kHz 单调、与视频 PTS 对齐（±一帧内） |
+| INVITE(TCP 被动/主动) | 两种连接方向均收流成功（`$`-帧格式） |
 | 重复 INVITE / BYE 幂等 | 无重复会话、无泄漏 |
 | Stop | 平台收到 `Expires:0` 注销；订阅清理 |
-| 媒体校验（可选，需 ffmpeg） | 重组 PS 存盘 → `ffmpeg -i out.ps -f null -` 解码通过（参照式 e2e 思路） |
+| 媒体校验（需 ffmpeg） | 重组 PS 存盘 → `ffmpeg -i out.ps -f null -` 视频+音频均解码通过；音频 volumedetect 非静音（静音≈-91dB，参照既有方法） |
 
 ### 11.3 L3 集成（MediaHub 全链路）
 
@@ -576,11 +596,11 @@ GOP 重放（**首帧质量关键**）：缓存最近一个 GOP（自最近 IDR 
 
 | 阶段 | 内容 | 验收标准 |
 |---|---|---|
-| **M1 骨架+注册** | 依赖引入、配置模型/透传/校验、`Gb28181Sink` 骨架、注册/心跳/注销、FakePlatform 基础 | 单测绿；FakePlatform 上完成注册→心跳→注销全流程 |
+| **M1 骨架+注册** | 依赖/内置选型落地、配置模型/透传/校验、`Gb28181Sink` 骨架、注册/心跳/注销、FakePlatform 基础 | 单测绿；FakePlatform 上完成注册→心跳→注销全流程 |
 | **M2 指令应答+接线** | 目录/信息/状态/配置/录像查询/控制/订阅/OPTIONS 应答；服务层与前端表单 | 前端可创建/启动/停止；指令矩阵测试全绿 |
-| **M3 视频推流** | INVITE→GOP 重放→PS→RTP（UDP）；会话管理/背压/统计 | FakePlatform 收流可解码出图；ffmpeg 校验通过 |
-| **M4 健壮性+联调** | TCP 媒体、多会话、异常矩阵（§10）、优雅停止、日志/客户端展示；wvp 实机联调 | L4 清单通过；全量回归绿 |
-| **M5（可选）** | 音频（G711，见 Q1 决议）、H.265、录像回放、目录订阅 NOTIFY | 按决议单独立项 |
+| **M3 媒体推流** | INVITE→GOP 重放→PS（视频+音频）→RTP（UDP）；会话管理/背压/统计 | FakePlatform 收流可解码出图（含音频）；ffmpeg 校验通过 |
+| **M4 健壮性+联调** | TCP 媒体（$-帧）、多会话、异常矩阵（§10）、优雅停止、日志/客户端展示；wvp 实机联调 | L4 清单通过；全量回归绿 |
+| **M5（可选）** | 录像回放/下载、目录订阅 NOTIFY、SIPS/TLS、GB35114 国密 | 按决议单独立项 |
 
 每个里程碑遵守仓库流程：**先加红测试 → 实现 → 单测/回归绿 → 实测（ffmpeg/平台）**，变更及时提交。
 
@@ -590,9 +610,9 @@ GOP 重放（**首帧质量关键**）：缓存最近一个 GOP（自最近 IDR 
 
 | # | 问题 | 选项/建议 |
 |---|---|---|
-| Q1 | **音频是否必须？** 源多为 AAC；国标平台常用 G.711A。纯 Go 无 AAC 解码器 | a) **v1 纯视频**（建议，平台侧可另配音频） b) 引入 ffmpeg 子进程转码（破坏"运行时零外部依赖"） c) 仅支持 G.711 源（受限） |
-| Q2 | **是否需要 H.265 源？** 方案 A 的库设备端仅 H.264 | a) v1 只支持 H264（建议） b) 若必须→改方案 B（自研媒体层，工期+风险显著增加）或后续向上游贡献 |
-| Q3 | **引入第三方依赖可否？** MIT、依赖极轻、但为 v0.x（API 未冻结） | 建议接受并锁版本 v0.12.0；隔离子一个适配文件 |
+| Q1 | **音频实现路径**（平台支持已确认：AAC 直封 PS、**无需转码**）。推荐库的 `device` 媒体路径仅 H264 视频且无扩展缝（`server.go:1567` 直调 `MuxH264ToPS`）；同库 `psmux` 已支持 AAC/G711 + H264/H265 | a) **A+：内置（vendor）后把媒体调用点切换为 psmux**（推荐，一期即含音频） b) A：官方依赖原样（视频-only），音频等上游合入/二期 c) B：完全自研 |
+| Q2 | **H.265 是否纳入一期？** 平台侧与 PS 封装（PSM 0x24）均无碍（`psmux` 已支持），仅取决于媒体层路径 | 建议随 Q1-a 一起纳入（边际工作量很小，H264/H265 同一条路径）；否则二期 |
+| Q3 | **依赖/内置形态**（MIT、依赖极轻） | a) A+：内置 `server/internal/gb28181/`（保留版权头，随上游 rebase/PR） b) A：外部依赖锁 v0.12.0 |
 | Q4 | **go 1.26 升级**（go.mod + Dockerfile builder 镜像） | 建议随 M1 执行；dev 机已是 1.26.5 |
 | Q5 | **单通道 vs 多通道**（一台设备挂多路流） | v1 单通道（虚拟 IPC）；多通道后续（每路一个 Output 实例即可近似满足） |
 | Q6 | **联调目标平台** | 建议 wvp-GB28181-pro（开源、可控、ZLM 生态）；如需海康/大华平台请指定，联调时间另估 |
@@ -604,17 +624,18 @@ GOP 重放（**首帧质量关键**）：缓存最近一个 GOP（自最近 IDR 
 
 ## 附录 A：库适配要点备忘（实现参考）
 
-- `device.New(cfg, DeviceInfo, FrameSource)` → `srv.Start(ctx)`（阻塞，放 goroutine）；`srv.SetMetricsHooks`、`srv.SetControlHandlers`、`srv.SetConfigHandlers`、`srv.Deregister(ctx)`、`srv.Stop()`；
-- `FrameSource.Subscribe(ctx)` 在 INVITE 时调用、ctx Done（BYE）时注销；`FrameSubscription{ID, <-chan AccessUnit}`；
-- `AccessUnit{NALUs []NALU{Type,Data,IsSPS,IsPPS,IsIDR}, Timestamp time.Time, KeyFrame bool}`；
-- 库内 PS：`MuxH264ToPS`（H.264）；RTP：负载 ≤1400、Marker 仅帧末、TCP 2 字节长度前缀；SSRC 取自 INVITE `y=`；
-- XML 输出声明 GB2312 + 正文 ASCII/UTF-8；入方向自动 UTF-8/GBK/GB18030；
-- 库要求 `go 1.26`；`Config.Validate()` 启动即校验（拒绝坏配置）。
+- 信令：`device.New(cfg, DeviceInfo, FrameSource)` → `srv.Start(ctx)`（阻塞，放 goroutine）；`srv.SetMetricsHooks` / `SetControlHandlers` / `SetConfigHandlers` / `Deregister(ctx)` / `Stop()`；
+- 订阅：`FrameSource.Subscribe(ctx)` 在 INVITE 时调用、ctx Done（BYE）时注销；`FrameSubscription{ID, <-chan AccessUnit}`；
+- 媒体（A+ 接缝）：`device` 包内媒体调用点仅两处——`server.go:1567`（`MuxH264ToPS`→`pusher.SendFrame`）与 `playback.go:262`；替换为 `psmux.Muxer`（`WriteAU`/`WriteAudio`/`AppendAudioPES`）+ `psmux.RTPPacketizer`；`FrameSource` 需扩展音频通道（或 AccessUnit 内携带音频帧）；
+- PS 复用（psmux）：`packHeader`（SCR=PTS/300）→ IDR 帧附 `systemHeader`+`psm`（CRC32/MPEG-2）→ `videoPES`（≤60000 字节切分，续包无 PTS）→ `AppendAudioPES`（音频并入同一突发）；
+- RTP：负载 ≤1400、Marker 仅突发末包、TCP `$`-帧（`0x24|channel|len16`）、SSRC 取 INVITE `y=`、初始序号随机；
+- XML：输出 `GB2312` 声明 + 正文 ASCII/UTF-8；入方向自动 UTF-8/GBK/GB18030；
+- 版本要求：模块声明 `go 1.26`；`Config.Validate()` 启动即校验（拒绝坏配置）。
 
 ## 附录 B：参考资料
 
-- GB/T 28181-2016 / 2022（信令、MANSCDP、媒体封装章节：附录 A/B/F）
+- GB/T 28181-2016 / 2022（信令、MANSCDP、媒体封装章节：附录 A/B/C，stream_type 表）
 - wvp-GB28181-pro（平台侧参照）：`SIPCommander.java`（INVITE offer）、`InviteRequestProcessor.createSendSdp`（设备侧 answer）、`SIPCommanderForPlatform`（级联设备角色）
-- ZLMediaKit：`src/Rtp/PSEncoder.cpp`、`src/Extension/CommonRtp.cpp`（PS→RTP 分包与 Marker 规则）
-- gb28181-go（设备侧库，含 conformance loopback 测试）：`https://github.com/mickeyzzc/gb28181-go`
+- ZLMediaKit：`src/Rtp/PSEncoder.cpp`、`src/Extension/CommonRtp.cpp`（PS→RTP 分包与 Marker 规则）；`src/Record/MPEG.cpp`（AAC 必须带 ADTS 头的强校验）；`src/Rtp/RtpSplitter.cpp`（TCP 媒体 `$`-帧解析实证）
+- gb28181-go（设备侧库，含 conformance loopback 测试）：`device`（UAC 信令/媒体）、`psmux`（PS 复用：H264/H265/AAC/G711、PSM/CRC、音频并入突发等实测注释）——`https://github.com/mickeyzzc/gb28181-go`
 - 本仓库：`docs/design.md` §12（媒体管道标准）、`docs/test-plan.md`（Mock 三角验证）、`docs/rtsp-aac-au-header.md`（Marker 位教训）
