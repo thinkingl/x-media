@@ -55,8 +55,8 @@ type QueryElem struct {
 // Response represents a MANSCDP Response message.
 type Response struct {
 	XMLName    xml.Name    `xml:"Response"`
-	CmdType    string      `xml:"CmdType,attr"`
-	SN         string      `xml:"SN,attr"`
+	CmdType    string      `xml:"CmdType"`
+	SN         string      `xml:"SN"`
 	DeviceID   string      `xml:"DeviceID"`
 	SumNum     *int        `xml:"SumNum,omitempty"`
 	DeviceList *DeviceList `xml:"DeviceList,omitempty"`
@@ -173,8 +173,8 @@ func parseNotifyDual(body string) (Notify, bool) {
 // echoes; every optional capability block is omitted.
 type gb2022QueryResponse struct {
 	XMLName  xml.Name `xml:"Response"`
-	CmdType  string   `xml:"CmdType,attr"`
-	SN       string   `xml:"SN,attr"`
+	CmdType  string   `xml:"CmdType"`
+	SN       string   `xml:"SN"`
 	DeviceID string   `xml:"DeviceID"`
 	SumNum   *int     `xml:"SumNum,omitempty"`
 	Number   *int     `xml:"Number,omitempty"`
@@ -194,8 +194,8 @@ type PresetItem struct {
 
 type presetListResponse struct {
 	XMLName    xml.Name `xml:"Response"`
-	CmdType    string   `xml:"CmdType,attr"`
-	SN         string   `xml:"SN,attr"`
+	CmdType    string   `xml:"CmdType"`
+	SN         string   `xml:"SN"`
 	DeviceID   string   `xml:"DeviceID"`
 	SumNum     int      `xml:"SumNum"`
 	PresetList struct {
@@ -457,21 +457,14 @@ func BuildKeepaliveMessage(sn, deviceID, status string) SipMessage {
 	if status == "" {
 		status = "OK"
 	}
-	notify := Notify{
-		CmdType:  "Keepalive",
-		SN:       sn,
-		DeviceID: deviceID,
-		Status:   status,
-	}
-	xmlData, err := xml.Marshal(notify)
-	if err != nil {
-		slog.Error("Failed to marshal Keepalive message", "error", err)
-		return SipMessage{}
-	}
+	// Element-form body (GB/T 28181 Annex A examples; required by KDM-class
+	// platform parsers, accepted by wvp). Local patch: x-media §5.9.
+	body := fmt.Sprintf(`<Notify><CmdType>Keepalive</CmdType><SN>%s</SN><DeviceID>%s</DeviceID><Status>%s</Status></Notify>`,
+		sn, deviceID, status)
 	return SipMessage{
 		Method:      "MESSAGE",
 		ContentType: "Application/MANSCDP+xml",
-		Body:        string(xmlData),
+		Body:        body,
 		UserAgent:   UserAgent,
 		Headers:     make(map[string]string),
 	}
@@ -530,8 +523,8 @@ type RecordItem struct {
 // RecordInfoResponse is the MANSCDP RecordInfo response body.
 type RecordInfoResponse struct {
 	XMLName    xml.Name `xml:"Response"`
-	CmdType    string   `xml:"CmdType,attr"`
-	SN         string   `xml:"SN,attr"`
+	CmdType    string   `xml:"CmdType"`
+	SN         string   `xml:"SN"`
 	DeviceID   string   `xml:"DeviceID"`
 	Name       string   `xml:"Name"`
 	SumNum     *int     `xml:"SumNum"`
@@ -606,7 +599,7 @@ func BuildDeviceStatusResponseMessage(sn, deviceID string) SipMessage {
 	if RecordActive != nil && RecordActive() {
 		record = "ON"
 	}
-	body := fmt.Sprintf(`<Response CmdType="DeviceStatus" SN="%s"><DeviceID>%s</DeviceID><Result>OK</Result><Online>ONLINE</Online><Status>OK</Status><Encode>ON</Encode><Record>%s</Record><DeviceTime>%s</DeviceTime></Response>`, sn, deviceID, record, time.Now().Format("2006-01-02T15:04:05"))
+	body := fmt.Sprintf(`<Response><CmdType>DeviceStatus</CmdType><SN>%s</SN><DeviceID>%s</DeviceID><Result>OK</Result><Online>ONLINE</Online><Status>OK</Status><Encode>ON</Encode><Record>%s</Record><DeviceTime>%s</DeviceTime></Response>`, sn, deviceID, record, time.Now().Format("2006-01-02T15:04:05"))
 	return SipMessage{
 		Method:      "MESSAGE",
 		ContentType: "Application/MANSCDP+xml",
@@ -618,7 +611,7 @@ func BuildDeviceStatusResponseMessage(sn, deviceID string) SipMessage {
 
 // BuildControlRejectResponseMessage creates a SIP MESSAGE with control rejection response.
 func BuildControlRejectResponseMessage(cmdType, sn, deviceID string) SipMessage {
-	body := fmt.Sprintf(`<Response CmdType="%s" SN="%s"><DeviceID>%s</DeviceID><Result>ERROR</Result></Response>`, cmdType, sn, deviceID)
+	body := fmt.Sprintf(`<Response><CmdType>%s</CmdType><SN>%s</SN><DeviceID>%s</DeviceID><Result>ERROR</Result></Response>`, cmdType, sn, deviceID)
 	return SipMessage{
 		Method:      "MESSAGE",
 		ContentType: "Application/MANSCDP+xml",
@@ -634,7 +627,7 @@ func BuildControlRejectResponseMessage(cmdType, sn, deviceID string) SipMessage 
 // sub-commands; sending the explicit Response as well keeps platforms
 // that parse the MANSCDP answer (mirrors the reject arm's ERROR shape).
 func BuildControlOKResponseMessage(cmdType, sn, deviceID string) SipMessage {
-	body := fmt.Sprintf(`<Response CmdType="%s" SN="%s"><DeviceID>%s</DeviceID><Result>OK</Result></Response>`, cmdType, sn, deviceID)
+	body := fmt.Sprintf(`<Response><CmdType>%s</CmdType><SN>%s</SN><DeviceID>%s</DeviceID><Result>OK</Result></Response>`, cmdType, sn, deviceID)
 	return SipMessage{
 		Method:      "MESSAGE",
 		ContentType: "Application/MANSCDP+xml",
@@ -654,7 +647,7 @@ func BuildDeviceConfigResponseMessage(sn, deviceID string, ok bool) SipMessage {
 	if ok {
 		result = "OK"
 	}
-	body := fmt.Sprintf(`<Response CmdType="DeviceConfig" SN="%s"><DeviceID>%s</DeviceID><Result>%s</Result></Response>`,
+	body := fmt.Sprintf(`<Response><CmdType>DeviceConfig</CmdType><SN>%s</SN><DeviceID>%s</DeviceID><Result>%s</Result></Response>`,
 		sn, deviceID, result)
 	return SipMessage{
 		Method:      "MESSAGE",
@@ -707,7 +700,7 @@ func BuildConfigDownloadResponseMessage(sn, deviceID string, basic *BasicParamCf
 		}
 		bp.WriteString("</VideoParamOpt>")
 	}
-	body := fmt.Sprintf(`<Response CmdType="ConfigDownload" SN="%s"><DeviceID>%s</DeviceID><Result>OK</Result>%s</Response>`,
+	body := fmt.Sprintf(`<Response><CmdType>ConfigDownload</CmdType><SN>%s</SN><DeviceID>%s</DeviceID><Result>OK</Result>%s</Response>`,
 		sn, deviceID, bp.String())
 	return SipMessage{
 		Method:      "MESSAGE",

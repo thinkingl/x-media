@@ -157,6 +157,7 @@ func (c *GB28181Config) toDeviceConfig() device.Config {
 		Transport:             c.Transport,
 		TCPRole:               c.TCPRole,
 		RTPMTU:                c.RTPMTU,
+		LocalIP:               c.LocalIP,
 	}
 }
 

@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -62,8 +63,12 @@ type Server struct {
 	cancel       context.CancelFunc
 	mediaCancel  context.CancelFunc
 	sub          *FrameSubscription
-	// Remote address for RTP streaming
+	// remoteRTPAddr is the platform's RTP destination of the current session.
 	remoteRTPAddr *net.UDPAddr
+	// externalIP/externalPort: this device's platform-visible address learned
+	// from response Via received/rport (NAT traversal, x-media §5.9).
+	externalIP   string
+	externalPort int
 	// Current media session metadata (local patch, x-media §9): the
 	// host-facing clients view reads these via LiveSession().
 	sessionSSRC      uint32
@@ -322,8 +327,15 @@ func (s *Server) Start(ctx context.Context) error {
 	}
 	s.mu.Lock()
 	s.sipConn = sipConn
+	// LocalSIPPort=0 means "kernel-assigned": record the real port so Via /
+	// Contact advertise something routable (a literal :0 breaks platforms
+	// that honor Contact). Local patch: x-media GB28181 sink design §5.9.
+	if s.cfg.LocalSIPPort == 0 {
+		s.cfg.LocalSIPPort = sipConn.LocalAddr().(*net.UDPAddr).Port
+	}
+	boundPort := s.cfg.LocalSIPPort
 	s.mu.Unlock()
-	slog.Info("gb28181: SIP UDP listener started", "port", s.cfg.LocalSIPPort)
+	slog.Info("gb28181: SIP UDP listener started", "port", boundPort)
 
 	// SUBSCRIBE/NOTIFY (issue #80): give the host-facing notifier the
 	// sending context before the loop starts answering SUBSCRIBEs.
@@ -915,6 +927,9 @@ func negotiatedExpiresSecs(expiresHeader, contact string) int64 {
 func (s *Server) handleResponse(msg SipMessage) {
 	// Any response proves the platform is alive (silence detector).
 	s.lastPlatformContact.Store(time.Now().UnixNano())
+	// Free NAT-traversal signal: the echoed Via carries received/rport
+	// (RFC 3581) — learn this device's external address for Contact headers.
+	s.noteExternalAddress(msg.Via)
 	// Route REGISTER responses to any active registration flow.
 	if strings.Contains(msg.CSeq, "REGISTER") {
 		select {
@@ -935,13 +950,19 @@ func (s *Server) handleResponse(msg SipMessage) {
 	switch msg.StatusCode {
 	case 200:
 		s.keepaliveFailures.Store(0)
-	case 401, 403, 404, 407:
+	case 401, 403, 407:
 		// Platform no longer recognizes us (e.g. it restarted and lost
 		// registration state) — re-register immediately. This is the
-		// self-heal path for keepalive rejection.
+		// self-heal path for keepalive rejection. NOTE: 404 is NOT in
+		// this set — platforms answer 404 for individual unhandled
+		// requests (e.g. a MESSAGE the peer parser didn't understand);
+		// treating it as "unregistered" loops registration
+		// (KDM answers 482 Loop Detected). Local patch: x-media §5.9.
 		failures := s.keepaliveFailures.Add(1)
 		slog.Warn("gb28181: request rejected by platform", "status", msg.StatusCode, "failures", failures)
 		s.signalReRegister()
+	case 404:
+		slog.Warn("gb28181: request not found by platform (ignored for re-registration)", "cseq", msg.CSeq)
 	default:
 		slog.Debug("gb28181: unhandled SIP response", "status", msg.StatusCode)
 	}
@@ -996,6 +1017,66 @@ func (s *Server) platformUser() string {
 	return s.cfg.SIPDomain
 }
 
+// viaReceivedRe / viaRportRe parse the RFC 3581 parameters a platform echoes
+// into its responses (received=<source ip>;rport=<source port>).
+var (
+	viaReceivedRe = regexp.MustCompile(`(?i)received=([0-9A-Fa-f\.:]+)`)
+	viaRportRe    = regexp.MustCompile(`(?i)rport=(\d+)`)
+)
+
+// noteExternalAddress learns this device's platform-visible address from a
+// response's echoed Via (received/rport). Behind NAT this is the only way to
+// build a Contact header a strict platform can reach.
+// Local patch: x-media GB28181 sink design §5.9 (NAT).
+func (s *Server) noteExternalAddress(via string) {
+	if via == "" {
+		return
+	}
+	ip := ""
+	if m := viaReceivedRe.FindStringSubmatch(via); len(m) == 2 {
+		ip = m[1]
+	}
+	port := 0
+	if m := viaRportRe.FindStringSubmatch(via); len(m) == 2 {
+		if p, err := strconv.Atoi(m[1]); err == nil {
+			port = p
+		}
+	}
+	if ip == "" {
+		return
+	}
+	s.mu.Lock()
+	changed := s.externalIP != ip || (port != 0 && s.externalPort != port)
+	s.externalIP = ip
+	if port != 0 {
+		s.externalPort = port
+	}
+	s.mu.Unlock()
+	if changed {
+		slog.Info("gb28181: learned external contact address", "ip", ip, "port", port)
+	}
+}
+
+// contactAddress resolves the host:port for Contact headers:
+// explicit Config.LocalIP override first, then the learned external address
+// (NAT traversal), else the route-probed local address.
+// Local patch: x-media GB28181 sink design §5.9 (NAT).
+func (s *Server) contactAddress(localIPAddr string) (string, int) {
+	if s.cfg.LocalIP != "" {
+		return s.cfg.LocalIP, s.cfg.LocalSIPPort
+	}
+	s.mu.Lock()
+	ip, port := s.externalIP, s.externalPort
+	s.mu.Unlock()
+	if ip != "" {
+		if port == 0 {
+			port = s.cfg.LocalSIPPort
+		}
+		return ip, port
+	}
+	return localIPAddr, s.cfg.LocalSIPPort
+}
+
 func (s *Server) viaTransportLabel() string {
 	switch s.cfg.Transport {
 	case "tls":
@@ -1034,9 +1115,10 @@ func (s *Server) runRegisterLifecycleInner(ctx context.Context, nextResponse reg
 		slog.Warn("gb28181: failed to determine local IP, falling back to interface scan", "error", err)
 		localIPAddr = localIP()
 	}
-	callID := fmt.Sprintf("%d@%s", time.Now().Unix(), localIPAddr)
+	callID := fmt.Sprintf("%d@%s", time.Now().UnixNano(), localIPAddr) // nanos: same-second re-register would collide (482 Loop Detected)
 	cseq := "1 REGISTER"
-	contact := fmt.Sprintf("<sip:%s@%s:%d>", s.cfg.DeviceID, localIPAddr, s.cfg.LocalSIPPort)
+	contactHost, contactPort := s.contactAddress(localIPAddr)
+	contact := fmt.Sprintf("<sip:%s@%s:%d>", s.cfg.DeviceID, contactHost, contactPort)
 	viaTransport := s.viaTransportLabel()
 	via := fmt.Sprintf("SIP/2.0/%s %s:%d;branch=z9hG4bK%016x", viaTransport, localIPAddr, s.cfg.LocalSIPPort, time.Now().UnixNano())
 
@@ -1063,10 +1145,16 @@ func (s *Server) runRegisterLifecycleInner(ctx context.Context, nextResponse reg
 	}
 	s.notePlatformProtocolVersion(*resp)
 	s.notePlatformDate(*resp)
+	s.noteExternalAddress(resp.Via)
 
 	// Handle 401 Unauthorized
 	if resp.StatusCode == 401 {
 		slog.Info("gb28181: received 401, authenticating")
+		// Rebuild Contact with any external address learned from the
+		// challenge's Via received/rport (NAT) before the authenticated
+		// leg goes out. Local patch: x-media §5.9.
+		contactHost, contactPort = s.contactAddress(localIPAddr)
+		contact = fmt.Sprintf("<sip:%s@%s:%d>", s.cfg.DeviceID, contactHost, contactPort)
 		var authHeader string
 		if s.cfg.RegisterAuthenticator != nil {
 			authHeader, err = s.cfg.RegisterAuthenticator.AuthorizeWithChallenge(resp.WWWAuthenticate)
@@ -1099,6 +1187,7 @@ func (s *Server) runRegisterLifecycleInner(ctx context.Context, nextResponse reg
 		}
 		s.notePlatformProtocolVersion(*resp)
 		s.notePlatformDate(*resp)
+		s.noteExternalAddress(resp.Via)
 
 		if resp.StatusCode == 200 {
 			if s.cfg.RegisterAuthenticator != nil {
@@ -1154,9 +1243,10 @@ func (s *Server) runDeregisterLifecycle(ctx context.Context, nextResponse regRes
 	if err != nil {
 		localIPAddr = localIP()
 	}
-	callID := fmt.Sprintf("%d@%s", time.Now().Unix(), localIPAddr)
+	callID := fmt.Sprintf("%d@%s", time.Now().UnixNano(), localIPAddr) // nanos: same-second re-register would collide (482 Loop Detected)
 	cseq := "1 REGISTER"
-	contact := fmt.Sprintf("<sip:%s@%s:%d>", s.cfg.DeviceID, localIPAddr, s.cfg.LocalSIPPort)
+	contactHost, contactPort := s.contactAddress(localIPAddr)
+	contact := fmt.Sprintf("<sip:%s@%s:%d>", s.cfg.DeviceID, contactHost, contactPort)
 	via := fmt.Sprintf("SIP/2.0/%s %s:%d;branch=z9hG4bK%016x", s.viaTransportLabel(), localIPAddr, s.cfg.LocalSIPPort, time.Now().UnixNano())
 
 	var initialAuth string
@@ -1177,6 +1267,7 @@ func (s *Server) runDeregisterLifecycle(ctx context.Context, nextResponse regRes
 	if err != nil {
 		return fmt.Errorf("reading de-REGISTER response: %w", err)
 	}
+	s.noteExternalAddress(resp.Via)
 	if resp.StatusCode == 200 {
 		slog.Info("gb28181: de-registered (Expires: 0 accepted)")
 		return nil
@@ -1184,6 +1275,10 @@ func (s *Server) runDeregisterLifecycle(ctx context.Context, nextResponse regRes
 	if resp.StatusCode != 401 {
 		return fmt.Errorf("unexpected de-REGISTER response: %d", resp.StatusCode)
 	}
+	// Rebuild Contact with the learned external address before the
+	// authenticated leg (NAT). Local patch: x-media §5.9.
+	contactHost, contactPort = s.contactAddress(localIPAddr)
+	contact = fmt.Sprintf("<sip:%s@%s:%d>", s.cfg.DeviceID, contactHost, contactPort)
 
 	var authHeader string
 	if s.cfg.RegisterAuthenticator != nil {
@@ -1303,7 +1398,8 @@ func (s *Server) sendKeepalive(ctx context.Context) error {
 		localIPAddr = localIP()
 	}
 	callID := fmt.Sprintf("keepalive-%d@%s", time.Now().Unix(), localIPAddr)
-	contact := fmt.Sprintf("<sip:%s@%s:%d>", s.cfg.DeviceID, localIPAddr, s.cfg.LocalSIPPort)
+	contactHost, contactPort := s.contactAddress(localIPAddr)
+	contact := fmt.Sprintf("<sip:%s@%s:%d>", s.cfg.DeviceID, contactHost, contactPort)
 
 	msg := BuildKeepaliveMessage(strconv.FormatInt(time.Now().Unix(), 10), s.cfg.DeviceID, "OK")
 	msg.RequestURI = requestURI
@@ -1577,7 +1673,8 @@ func (s *Server) handleInvite(ctx context.Context, msg SipMessage, fromAddr net.
 			cseqNum = strconv.Itoa(n + 1)
 		}
 		localIPAddr := localIP()
-		contact := fmt.Sprintf("<sip:%s@%s:%d>", s.cfg.DeviceID, localIPAddr, s.cfg.LocalSIPPort)
+		contactHost, contactPort := s.contactAddress(localIPAddr)
+		contact := fmt.Sprintf("<sip:%s@%s:%d>", s.cfg.DeviceID, contactHost, contactPort)
 		info := BuildMediaStatusInfo(
 			msg.RequestURI, msg.From, msg.To, msg.CallID,
 			cseqNum+" INFO", contact,

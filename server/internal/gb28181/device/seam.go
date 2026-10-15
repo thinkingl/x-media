@@ -94,6 +94,11 @@ type Config struct {
 	// "active" (device dials the platform), "passive" (device listens).
 	// Local patch (§5.9: vendor implementations that invert setup).
 	TCPRole string `yaml:"tcp_role,omitempty"`
+	// LocalIP overrides the advertised contact address (Contact headers).
+	// Empty = auto: route-probed local IP, upgraded to the NAT-external
+	// address learned from response Via received/rport when available.
+	// Local patch (§5.9: NAT deployments with a fixed mapping).
+	LocalIP string `yaml:"local_ip,omitempty"`
 
 	Transport string `yaml:"transport"` // SIP transport: udp (default), tcp (inbound listener), tcp-out (device dials the platform, full lifecycle), tls (SIPS outbound, GB/T 28181-2022 A-level), or tls-listen (inbound SIPS: the platform dials the device; requires the TLS pair)
 

@@ -57,8 +57,8 @@ func TestGB28181Sink_CommandMatrix(t *testing.T) {
 	t.Run("Catalog 目录查询", func(t *testing.T) {
 		ev := platform.query(t, `<Query><CmdType>Catalog</CmdType><SN>101</SN><DeviceID>`+gbTestDeviceID+`</DeviceID></Query>`)
 		body := ev.msg.Body
-		assert.Contains(t, body, `CmdType="Catalog"`)
-		assert.Contains(t, body, `SN="101"`)
+		assert.Contains(t, body, "<CmdType>Catalog</CmdType>")
+		assert.Contains(t, body, "<SN>101</SN>")
 		assert.Contains(t, body, "<DeviceID>"+gbTestDeviceID+"</DeviceID>")
 		assert.Contains(t, body, "<SumNum>1</SumNum>")
 		assert.Contains(t, body, "<DeviceID>"+gbTestChannelID+"</DeviceID>", "目录应包含配置的通道编码")
@@ -70,7 +70,7 @@ func TestGB28181Sink_CommandMatrix(t *testing.T) {
 	t.Run("DeviceInfo 设备信息", func(t *testing.T) {
 		ev := platform.query(t, `<Query><CmdType>DeviceInfo</CmdType><SN>102</SN><DeviceID>`+gbTestDeviceID+`</DeviceID></Query>`)
 		body := ev.msg.Body
-		assert.Contains(t, body, `CmdType="DeviceInfo"`)
+		assert.Contains(t, body, "<CmdType>DeviceInfo</CmdType>")
 		assert.Contains(t, body, "<Manufacturer>x-media</Manufacturer>")
 		assert.Contains(t, body, "<Model>gb28181-sink</Model>")
 		assert.Contains(t, body, "<Firmware>1.0.0</Firmware>")
@@ -79,7 +79,7 @@ func TestGB28181Sink_CommandMatrix(t *testing.T) {
 	t.Run("DeviceStatus 设备状态", func(t *testing.T) {
 		ev := platform.query(t, `<Query><CmdType>DeviceStatus</CmdType><SN>103</SN><DeviceID>`+gbTestDeviceID+`</DeviceID></Query>`)
 		body := ev.msg.Body
-		assert.Contains(t, body, `CmdType="DeviceStatus"`)
+		assert.Contains(t, body, "<CmdType>DeviceStatus</CmdType>")
 		assert.Contains(t, body, "<Online>ONLINE</Online>")
 		assert.Contains(t, body, "<Status>OK</Status>")
 	})
@@ -88,7 +88,7 @@ func TestGB28181Sink_CommandMatrix(t *testing.T) {
 		ev := platform.query(t, `<Query><CmdType>RecordInfo</CmdType><SN>104</SN><DeviceID>`+gbTestDeviceID+`</DeviceID>`+
 			`<StartTime>2026-10-15T00:00:00</StartTime><EndTime>2026-10-15T23:59:59</EndTime></Query>`)
 		body := ev.msg.Body
-		assert.Contains(t, body, `CmdType="RecordInfo"`)
+		assert.Contains(t, body, "<CmdType>RecordInfo</CmdType>")
 		assert.Contains(t, body, "<SumNum>0</SumNum>")
 		assert.Contains(t, body, `Num="0"`)
 	})
@@ -97,7 +97,7 @@ func TestGB28181Sink_CommandMatrix(t *testing.T) {
 		ev := platform.query(t, `<Query><CmdType>ConfigDownload</CmdType><SN>105</SN><DeviceID>`+gbTestDeviceID+`</DeviceID>`+
 			`<ConfigType>BasicParam</ConfigType></Query>`)
 		body := ev.msg.Body
-		assert.Contains(t, body, `CmdType="ConfigDownload"`)
+		assert.Contains(t, body, "<CmdType>ConfigDownload</CmdType>")
 		assert.Contains(t, body, "<Result>OK</Result>")
 		assert.Contains(t, body, "<BasicParam>")
 		assert.Contains(t, body, "<Expiration>3600</Expiration>")
@@ -108,7 +108,7 @@ func TestGB28181Sink_CommandMatrix(t *testing.T) {
 		ev := platform.query(t, `<Control><CmdType>DeviceControl</CmdType><SN>106</SN><DeviceID>`+gbTestDeviceID+`</DeviceID>`+
 			`<IFrameCmd>Send</IFrameCmd></Control>`)
 		body := ev.msg.Body
-		assert.Contains(t, body, `CmdType="DeviceControl"`)
+		assert.Contains(t, body, "<CmdType>DeviceControl</CmdType>")
 		assert.Contains(t, body, "<Result>OK</Result>")
 	})
 
@@ -117,7 +117,7 @@ func TestGB28181Sink_CommandMatrix(t *testing.T) {
 		ev := platform.query(t, `<Control><CmdType>DeviceControl</CmdType><SN>107</SN><DeviceID>`+gbTestDeviceID+`</DeviceID>`+
 			`<PTZCmd>A50F0120000000D5</PTZCmd></Control>`)
 		body := ev.msg.Body
-		assert.Contains(t, body, `CmdType="DeviceControl"`)
+		assert.Contains(t, body, "<CmdType>DeviceControl</CmdType>")
 		assert.Contains(t, body, "<Result>OK</Result>")
 	})
 
@@ -125,7 +125,7 @@ func TestGB28181Sink_CommandMatrix(t *testing.T) {
 		ev := platform.query(t, `<Control><CmdType>DeviceControl</CmdType><SN>108</SN><DeviceID>`+gbTestDeviceID+`</DeviceID>`+
 			`<TeleBoot>Boot</TeleBoot></Control>`)
 		body := ev.msg.Body
-		assert.Contains(t, body, `CmdType="DeviceControl"`)
+		assert.Contains(t, body, "<CmdType>DeviceControl</CmdType>")
 		assert.Contains(t, body, "<Result>ERROR</Result>")
 	})
 

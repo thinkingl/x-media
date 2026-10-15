@@ -50,6 +50,11 @@ type fakeSIPPlatform struct {
 
 	// M4：心跳静默模拟（忽略 MESSAGE 应答，验证静默→重注册）
 	silent atomic.Bool
+
+	// M4：NAT 模拟——响应 Via 回显 received/rport（外部映射地址），
+	// 设备应学习并在后续 Contact 中使用。
+	natExternalIP   string
+	natExternalPort int
 }
 
 type fakeSIPEvent struct {
@@ -360,6 +365,39 @@ func (p *fakeSIPPlatform) regCount() int {
 
 func (p *fakeSIPPlatform) setSilent(v bool) { p.silent.Store(v) }
 
+// setNAT 开启 NAT 模拟：此后所有响应的 Via 回显 received=<ip>;rport=<port>。
+func (p *fakeSIPPlatform) setNAT(ip string, port int) {
+	p.mu.Lock()
+	p.natExternalIP = ip
+	p.natExternalPort = port
+	p.mu.Unlock()
+}
+
+// contactOf 返回设备最近一条请求中的 Contact（按方法过滤，空串表示无）。
+func (p *fakeSIPPlatform) contactOf(method string) string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for i := len(p.requests) - 1; i >= 0; i-- {
+		if p.requests[i].Method == method {
+			return p.requests[i].Contact
+		}
+	}
+	return ""
+}
+
+// contactsOf 返回指定方法的全部 Contact（请求顺序）。
+func (p *fakeSIPPlatform) contactsOf(method string) []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	var out []string
+	for i := range p.requests {
+		if p.requests[i].Method == method {
+			out = append(out, p.requests[i].Contact)
+		}
+	}
+	return out
+}
+
 // readRTPFramed 读取 TCP 媒体流（GB/T 28181 附录 C.2 $-帧：
 // 0x24 | channel(1B) | 长度(2B 大端) | RTP 包），解析为 RTP 包收集。
 func (p *fakeSIPPlatform) readRTPFramed(conn net.Conn) {
@@ -460,6 +498,7 @@ func assemblePS(pkts []rtp.Packet) []byte {
 }
 
 var fakeSIPAuthKV = regexp.MustCompile(`(\w+)="?([^",]+)"?`)
+var fakeSIPRportRe = regexp.MustCompile(`(?i);rport(=\d+)?`)
 
 func (p *fakeSIPPlatform) verifyDigest(msg device.SipMessage) error {
 	kv := map[string]string{}
@@ -485,7 +524,17 @@ func (p *fakeSIPPlatform) reply(addr *net.UDPAddr, req device.SipMessage, code i
 	var b strings.Builder
 	fmt.Fprintf(&b, "SIP/2.0 %d %s\r\n", code, reasons[code])
 	if req.Via != "" {
-		fmt.Fprintf(&b, "Via: %s\r\n", req.Via)
+		via := req.Via
+		p.mu.Lock()
+		natIP, natPort := p.natExternalIP, p.natExternalPort
+		p.mu.Unlock()
+		if natIP != "" {
+			// NAT 模拟：覆盖为外部映射地址（RFC 3581 received/rport 回显）
+			via = fakeSIPRportRe.ReplaceAllString(via, "")
+			via = strings.TrimSuffix(via, ";received=")
+			via += fmt.Sprintf(";received=%s;rport=%d", natIP, natPort)
+		}
+		fmt.Fprintf(&b, "Via: %s\r\n", via)
 	}
 	fmt.Fprintf(&b, "From: %s\r\n", req.From)
 	to := req.To
@@ -570,10 +619,10 @@ func TestGB28181Sink_RegisterKeepaliveDeregister(t *testing.T) {
 	assert.NotEmpty(t, reqs[1].Authorization, "401 质询后应带 Authorization")
 
 	// 心跳 MESSAGE（heartbeat_interval=1s）
-	// 注：内置库输出 MANSCDP 属性形式 XML（<Notify CmdType="Keepalive" ...>），
-	// 与元素形式等价，wvp/ZLM 均接受。
+	// 注：出站 MANSCDP 为**元素形式**（<Notify><CmdType>Keepalive</CmdType>…），
+	// GB28181 规范形式；KDM 类平台解析器要求元素（属性形式会被判"未能解析"）。
 	ka := platform.waitEvent(t, "keepalive", 5*time.Second)
-	assert.Contains(t, ka.msg.Body, "Keepalive")
+	assert.Contains(t, ka.msg.Body, "<CmdType>Keepalive</CmdType>")
 	assert.Contains(t, ka.msg.Body, "<DeviceID>"+deviceID+"</DeviceID>")
 	assert.Contains(t, ka.msg.Body, "<Status>OK</Status>")
 

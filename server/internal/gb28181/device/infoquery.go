@@ -86,8 +86,8 @@ func (s *Server) SetInfoQueryProvider(p InfoQueryProvider) {
 
 type homePositionResponse struct {
 	XMLName      xml.Name `xml:"Response"`
-	CmdType      string   `xml:"CmdType,attr"`
-	SN           string   `xml:"SN,attr"`
+	CmdType      string   `xml:"CmdType"`
+	SN           string   `xml:"SN"`
 	DeviceID     string   `xml:"DeviceID"`
 	HomePosition *struct {
 		Enabled     int `xml:"Enabled"`
@@ -98,8 +98,8 @@ type homePositionResponse struct {
 
 type cruiseTrackListResponse struct {
 	XMLName  xml.Name `xml:"Response"`
-	CmdType  string   `xml:"CmdType,attr"`
-	SN       string   `xml:"SN,attr"`
+	CmdType  string   `xml:"CmdType"`
+	SN       string   `xml:"SN"`
 	DeviceID string   `xml:"DeviceID"`
 	SumNum   int      `xml:"SumNum"`
 	Tracks   *struct {
@@ -112,8 +112,8 @@ type cruiseTrackListResponse struct {
 
 type cruiseTrackResponse struct {
 	XMLName  xml.Name `xml:"Response"`
-	CmdType  string   `xml:"CmdType,attr"`
-	SN       string   `xml:"SN,attr"`
+	CmdType  string   `xml:"CmdType"`
+	SN       string   `xml:"SN"`
 	DeviceID string   `xml:"DeviceID"`
 	Number   int      `xml:"Number"`
 	Name     string   `xml:"Name,omitempty"`
@@ -129,8 +129,8 @@ type cruiseTrackResponse struct {
 
 type ptzPositionResponse struct {
 	XMLName              xml.Name `xml:"Response"`
-	CmdType              string   `xml:"CmdType,attr"`
-	SN                   string   `xml:"SN,attr"`
+	CmdType              string   `xml:"CmdType"`
+	SN                   string   `xml:"SN"`
 	DeviceID             string   `xml:"DeviceID"`
 	Pan                  *float64 `xml:"Pan,omitempty"`
 	Tilt                 *float64 `xml:"Tilt,omitempty"`
@@ -142,8 +142,8 @@ type ptzPositionResponse struct {
 
 type sdCardStatusResponse struct {
 	XMLName  xml.Name `xml:"Response"`
-	CmdType  string   `xml:"CmdType,attr"`
-	SN       string   `xml:"SN,attr"`
+	CmdType  string   `xml:"CmdType"`
+	SN       string   `xml:"SN"`
 	DeviceID string   `xml:"DeviceID"`
 	SumNum   int      `xml:"SumNum"`
 	Info     *struct {

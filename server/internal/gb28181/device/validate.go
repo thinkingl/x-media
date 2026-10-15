@@ -2,6 +2,7 @@ package device
 
 import (
 	"fmt"
+	"net"
 	"strings"
 )
 
@@ -93,6 +94,10 @@ func (c Config) Validate() error {
 	case "", "auto", "active", "passive":
 	default:
 		return fmt.Errorf("device.Config.TCPRole %q must be auto, active or passive", c.TCPRole)
+	}
+	// LocalIP override (local patch, x-media §5.9 NAT): must parse as an IP.
+	if c.LocalIP != "" && net.ParseIP(c.LocalIP) == nil {
+		return fmt.Errorf("device.Config.LocalIP %q is not a valid IP address", c.LocalIP)
 	}
 	return nil
 }

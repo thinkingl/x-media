@@ -6,6 +6,7 @@ package media
 
 import (
 	"bytes"
+	"context"
 	"testing"
 	"time"
 
@@ -134,6 +135,58 @@ func TestGB28181Sink_Clients(t *testing.T) {
 
 	platform.bye(t)
 	require.Eventually(t, func() bool { return len(sink.Clients()) == 0 }, 3*time.Second, 50*time.Millisecond)
+}
+
+// startGB28181SinkOnPlatform 在既有 fake 平台上启动 sink（NAT/覆盖类测试用）。
+func startGB28181SinkOnPlatform(t *testing.T, platform *fakeSIPPlatform, extra ...func(*GB28181Config)) *GB28181Sink {
+	t.Helper()
+	ip, port := platform.addr()
+	cfg := &GB28181Config{
+		PlatformIP:        ip,
+		PlatformPort:      port,
+		PlatformID:        gbTestPlatformID,
+		DeviceID:          gbTestDeviceID,
+		ChannelID:         gbTestChannelID,
+		SIPDomain:         gbTestRealm,
+		Password:          gbTestPassword,
+		HeartbeatInterval: 60,
+	}
+	for _, f := range extra {
+		if f != nil {
+			f(cfg)
+		}
+	}
+	sink, err := NewGB28181Sink(&OutputConfig{ID: "gb28181_m4_test", Type: "gb28181", GB28181: cfg})
+	require.NoError(t, err)
+	require.NoError(t, sink.Start(context.Background()))
+	t.Cleanup(func() { _ = sink.Stop() })
+	platform.waitEvent(t, "registered", 5*time.Second)
+	return sink
+}
+
+// TestGB28181Sink_NATContactLearning：平台响应回显 received/rport 后，
+// 设备应学习外部地址并在后续 Contact 中使用（NAT 穿越，§5.9）。
+func TestGB28181Sink_NATContactLearning(t *testing.T) {
+	platform := newFakeSIPPlatform(t, gbTestPlatformID, gbTestRealm, gbTestDeviceID, gbTestPassword)
+	platform.setNAT("203.0.113.9", 45678)
+	_ = startGB28181SinkOnPlatform(t, platform)
+
+	contacts := platform.contactsOf("REGISTER")
+	require.GreaterOrEqual(t, len(contacts), 2, "应有未认证+已认证两次 REGISTER")
+	assert.NotContains(t, contacts[0], "203.0.113.9", "首包 REGISTER 尚不可知外部地址")
+	assert.Contains(t, contacts[len(contacts)-1], "203.0.113.9:45678",
+		"学到外部地址后 Contact 应改用 NAT 映射地址")
+}
+
+// TestGB28181Sink_LocalIPOverride：local_ip 显式覆盖 Contact 地址（固定映射场景）。
+func TestGB28181Sink_LocalIPOverride(t *testing.T) {
+	platform := newFakeSIPPlatform(t, gbTestPlatformID, gbTestRealm, gbTestDeviceID, gbTestPassword)
+	_ = startGB28181SinkOnPlatform(t, platform, func(c *GB28181Config) {
+		c.LocalIP = "198.51.100.7"
+	})
+	contacts := platform.contactsOf("REGISTER")
+	require.NotEmpty(t, contacts)
+	assert.Contains(t, contacts[0], "198.51.100.7", "local_ip 覆盖应体现在首个 REGISTER")
 }
 
 // TestGB28181Sink_SilentPlatformReregister 心跳静默 → 静默检测触发自动重注册。
