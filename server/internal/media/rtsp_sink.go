@@ -524,6 +524,13 @@ func (r *RTSPSink) writeAudio(f *Frame, stream *gortsplib.ServerStream) error {
 			SequenceNumber: seq,
 			Timestamp:      pts,
 			SSRC:           0x12345678,
+			// 一包一 AU（完整帧），必须置 Marker 位：
+			// live555（VLC 的 RTSP 实现）用 Marker 判定帧完成并向上层交付
+			// （MPEG4GenericRTPSource 将 fCurrentPacketCompletesFrame 直接
+			// 取自 rtpMarkerBit，MultiFramedRTPSource::doGetNextFrame1
+			// 仅当其为真才交付帧）。不置则 VLC 永远收不到任何音频帧，
+			// 表现为统计只有视频、无音频；ffmpeg 不依赖 Marker 故无感。
+			Marker: true,
 		},
 		Payload: payload,
 	}
