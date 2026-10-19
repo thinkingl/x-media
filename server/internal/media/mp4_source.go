@@ -628,7 +628,20 @@ func (m *MP4Source) nextPaceTarget() time.Time {
 	if nextMedia < 0 || nextMedia <= anchorMedia {
 		return time.Time{}
 	}
-	return anchor.Add(time.Duration((nextMedia - anchorMedia) * int64(time.Second) / baseTS))
+	// 长跑溢出修复（2026-10-19）：原实现
+	//   anchor.Add(time.Duration((nextMedia - anchorMedia) * int64(time.Second) / baseTS))
+	// 先做刻度差 × 1e9 的乘法，媒体时长超过 int64/1e9/baseTS（90000Hz 约
+	// 28.5 小时）即溢出为负 → target 落在过去 → time.Until(target) <= 0 →
+	// readLoop 不睡眠全速忙转（实测 4 天实例 6278fps、CPU 140%）。
+	// 改为先做 64 位安全的部分商/余数分解：
+	//   delta = q*baseTS + r  →  q 秒 + r/baseTS 秒
+	// 全程无大数乘法。
+	delta := nextMedia - anchorMedia
+	secs := delta / baseTS
+	rem := delta % baseTS
+	offset := time.Duration(secs)*time.Second +
+		time.Duration(rem*int64(time.Second)/baseTS)
+	return anchor.Add(offset)
 }
 
 // nextSample 读取下一个 sample 的元数据并构造帧头。done=true 表示该轨道已读完。
@@ -726,7 +739,6 @@ func (m *MP4Source) throttle() time.Duration {
 	}
 	return 5 * time.Millisecond
 }
-
 
 // reAnchorPacing 在媒体时间轴相对墙钟跳变后重置无漂移节流锚点，
 // 避免按旧锚点休眠造成长时间等待或突发追赶。Start/Seek/Resume 时调用。
