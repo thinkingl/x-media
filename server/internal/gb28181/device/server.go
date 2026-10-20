@@ -980,10 +980,10 @@ func (s *Server) handleResponse(msg SipMessage) {
 		// 2026-10-20 KDM). The platform still answers, so the silence
 		// detector cannot catch this; count it explicitly and re-register
 		// after heartbeat_timeout_count consecutive rejections (self-heal).
-		if msg.StatusCode >= 400 && strings.Contains(msg.CSeq, "MESSAGE") {
+		if msg.StatusCode >= 400 && strings.HasPrefix(msg.CallID, "keepalive-") {
 			failures := s.keepaliveFailures.Add(1)
 			slog.Warn("gb28181: keepalive rejected by platform",
-				"status", msg.StatusCode, "failures", failures)
+				"status", msg.StatusCode, "call_id", msg.CallID, "failures", failures)
 			if failures >= int32(s.cfg.HeartbeatTimeoutCount) {
 				slog.Warn("gb28181: keepalive rejected repeatedly, re-registering", "failures", failures)
 				s.metrics.KeepaliveFail()
@@ -2051,13 +2051,22 @@ func (s *Server) handleMessage(ctx context.Context, msg SipMessage, fromAddr net
 	}
 }
 
+// responseCallID builds a globally unique Call-ID for device-originated
+// MANSCDP response MESSAGEs. Responses within the same second previously
+// shared "<unix>-resp@<deviceID>" with an identical CSeq, so the platform's
+// SIP stack answered 482 Loop Detected for the duplicates (startup sends
+// Catalog + DeviceInfo + DeviceStatus answers back-to-back; 2026-10-20 KDM).
+func responseCallID(deviceID, localIP string, now time.Time) string {
+	return fmt.Sprintf("%s-resp-%d@%s", deviceID, now.UnixNano(), localIP)
+}
+
 // sendResponseMessage sends a device-originated MANSCDP response MESSAGE
 // with fresh routing headers (the builders only carry the body).
 func (s *Server) sendResponseMessage(resp SipMessage, fromAddr net.Addr) {
 	resp.RequestURI = fmt.Sprintf("sip:%s@%s", s.cfg.SIPDomain, s.cfg.SIPDomain)
 	resp.From = fmt.Sprintf("<sip:%s@%s>", s.cfg.DeviceID, s.cfg.SIPDomain)
 	resp.To = fmt.Sprintf("<sip:%s@%s>", s.cfg.SIPDomain, s.cfg.SIPDomain)
-	resp.CallID = fmt.Sprintf("%d-resp@%s", time.Now().Unix(), s.cfg.DeviceID)
+	resp.CallID = responseCallID(s.cfg.DeviceID, localIP(), time.Now())
 	resp.Via = fmt.Sprintf("SIP/2.0/UDP %s:%d;rport;branch=z9hG4bK%016x", localIP(), s.cfg.LocalSIPPort, time.Now().UnixNano())
 	resp.MaxForwards = "70"
 	resp.CSeq = "2 MESSAGE"

@@ -26,3 +26,20 @@ func TestKeepaliveCallIDUniquePerDevice(t *testing.T) {
 		t.Fatalf("Call-ID %q 应包含设备编码", a)
 	}
 }
+
+// TestResponseCallIDUniquePerMessage 设备侧应答 MESSAGE 的 Call-ID 必须唯一：
+// 同一秒内连续应答 Catalog/DeviceInfo/DeviceStatus 时，旧实现共用
+// "<unix>-resp@<deviceID>" + "2 MESSAGE"，平台 SIP 栈回 482 Loop 丢弃后续应答
+// （2026-10-20 KDM 启动阶段实测）。
+func TestResponseCallIDUniquePerMessage(t *testing.T) {
+	now := time.Now()
+	a := responseCallID("32000000001120000286", "192.168.88.102", now)
+	b := responseCallID("32000000001120000286", "192.168.88.102", now.Add(time.Nanosecond))
+	if a == b {
+		t.Fatalf("同秒连续应答的 Call-ID 必须不同: %q", a)
+	}
+	c := responseCallID("32000000001120000287", "192.168.88.102", now)
+	if a == c {
+		t.Fatalf("同秒不同设备的应答 Call-ID 必须不同: %q", a)
+	}
+}
