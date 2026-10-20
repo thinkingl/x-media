@@ -30,6 +30,7 @@
 | `device/ps.go` | **Annex-B 起始码统一为 4 字节**（`00 00 00 01`）：科达 `CPSFrameParser::IsH265IFrame` 只识别 4 字节起始码，3 字节起始码会使 SPS 识别失败 → IDR 不判为 I 帧 → 平台报 "No stream received"（2026-10-20 H.265 实机定位） | §5.9 KDM |
 | `device/psmux`、`device/server.go`、`device/seam.go` | **B 帧时间戳**：`AccessUnit.DTS` + PES `PTS+DTS`（flags=0xC0/长度 10）。源含 B 帧时解码序 PTS 非单调；只写 PTS 会让接收端按 PTS 重排 → WebRTC 卡顿/回退（2026-10-20「远方的你-1080」定位）；PTS==DTS 时仍只写 PTS | §5.7 B 帧兼容 |
 | `device/server.go` | **多设备心跳 Call-ID 唯一化**：`keepalive-<设备编码>-<纳秒>@<本机IP>`（原 `keepalive-<Unix秒>@<本机IP>` 在多台模拟设备同秒心跳时完全相同，科达 SIP 栈回 **482 Loop** 并静默丢弃 → 100s 判离线）；REGISTER Call-ID 亦加入设备编码；4xx/5xx 心跳应答计入失败，达到 `heartbeat_timeout_count` 自动重注册（平台对非法信令只回 4xx/不处理时的自愈路径） | §5.9 KDM |
+| `device/server.go` | **注册 Call-ID 稳定化**：REGISTER 统一用 `<设备编码>@<SIP域>`（跨进程重启不变）+ 时间种子 CSeq 递增。科达在旧注册会话存在时收到不同 Call-ID 的 REGISTER 直接 403（`已经存在CallId为[...]注册会话`），导致注册任务无法重建、心跳报"找不到对应的注册task"；另：初始注册失败后按 5s/10s/20s/30s 退避快速重试（不再等半个 refresh 周期） | §5.9 KDM |
 | 未修改（保留上游） | 回放路径 `playback.go`（仍用 `MuxH264ToPS`，M5 范围）；`platform`/`security35114` 未内置 | — |
 
 维护约定：

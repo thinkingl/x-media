@@ -267,6 +267,60 @@ func TestGB28181Sink_SilentPlatformReregister(t *testing.T) {
 		"静默后应自动重注册")
 }
 
+// TestGB28181Sink_RegisterCallIDStableAcrossReregister 注册刷新（含静默/重启
+// 后的重注册）必须复用同一 Call-ID（RFC 3261 §10.2）：科达在旧注册会话仍
+// 存在时收到不同 Call-ID 的 REGISTER 会直接 403
+// （"已经存在CallId为[...]注册会话"），导致注册任务无法重建、心跳被丢弃。
+func TestGB28181Sink_RegisterCallIDStableAcrossReregister(t *testing.T) {
+	_, platform := startGB28181StreamSink(t, func(c *GB28181Config) {
+		c.HeartbeatInterval = 1
+		c.HeartbeatTimeoutCount = 2
+	})
+
+	platform.setSilent(true)
+	require.Eventually(t, func() bool { return platform.regCount() >= 2 },
+		10*time.Second, 100*time.Millisecond, "静默后应触发重注册")
+	platform.setSilent(false)
+
+	ids := platform.registerCallIDs()
+	require.GreaterOrEqual(t, len(ids), 3, "应至少包含初始两腿 + 重注册")
+	for i, id := range ids {
+		require.Equal(t, ids[0], id,
+			"REGISTER 刷新必须复用同一 Call-ID（第 %d 条为 %q，期望 %q）", i, id, ids[0])
+	}
+}
+
+// TestGB28181Sink_InitialRegisterFailureRetriesQuickly 初始 REGISTER 被平台
+// 403 拒绝（典型：重启后平台旧注册会话尚未过期）时，应在数秒内退避重试，
+// 而不是等半个 refresh 周期（默认 30 分钟）——否则设备长时间离线。
+func TestGB28181Sink_InitialRegisterFailureRetriesQuickly(t *testing.T) {
+	platform := newFakeSIPPlatform(t, gbTestPlatformID, gbTestRealm, gbTestDeviceID, gbTestPassword)
+	platform.setFailRegisters(true)
+	ip, port := platform.addr()
+
+	sink, err := NewGB28181Sink(&OutputConfig{ID: "gb_reg_retry", Type: "gb28181", GB28181: &GB28181Config{
+		PlatformIP:        ip,
+		PlatformPort:      port,
+		PlatformID:        gbTestPlatformID,
+		DeviceID:          gbTestDeviceID,
+		ChannelID:         gbTestChannelID,
+		SIPDomain:         gbTestRealm,
+		Password:          gbTestPassword,
+		HeartbeatInterval: 60,
+		RegisterInterval:  3600,
+	}})
+	require.NoError(t, err)
+	require.NoError(t, sink.Start(context.Background()))
+	t.Cleanup(func() { _ = sink.Stop() })
+
+	require.Eventually(t, func() bool { return platform.registerAttempts() >= 3 },
+		8*time.Second, 100*time.Millisecond,
+		"初始注册 403 后应在数秒内重试（而不是等待 refresh 周期）")
+
+	platform.setFailRegisters(false)
+	platform.waitEvent(t, "registered", 15*time.Second)
+}
+
 // TestGB28181Sink_KeepaliveRejectedTriggersReregister 平台对心跳回 482 Loop
 // （典型原因：多设备同秒 Call-ID 冲突，SIP 栈判重复）时，设备端应把连续拒绝
 // 计为心跳失败，达到 heartbeat_timeout_count 后重新注册自愈。

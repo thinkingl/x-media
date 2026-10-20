@@ -53,6 +53,9 @@ type fakeSIPPlatform struct {
 	// 心跳拒绝模拟：对 Keepalive MESSAGE 回 482 Loop（模拟平台对重复
 	// Call-ID 的 SIP 栈行为），验证设备端"被拒绝→重注册"自愈。
 	rejectKeepalives atomic.Bool
+	// 注册拒绝模拟：对 REGISTER 回 403（平台旧会话未过期等），验证初始
+	// 注册失败后的快速重试（而不是等 refresh 周期）。
+	failRegisters atomic.Bool
 
 	// M4：NAT 模拟——响应 Via 回显 received/rport（外部映射地址），
 	// 设备应学习并在后续 Contact 中使用。
@@ -129,6 +132,10 @@ func (p *fakeSIPPlatform) serve() {
 }
 
 func (p *fakeSIPPlatform) handleRegister(msg device.SipMessage, addr *net.UDPAddr) {
+	if p.failRegisters.Load() {
+		p.reply(addr, msg, 403, "")
+		return
+	}
 	if msg.Authorization == "" {
 		p.reply(addr, msg, 401, fmt.Sprintf(
 			`Digest realm="%s", nonce="%s", algorithm=MD5, qop="auth"`, p.realm, p.nonce))
@@ -381,6 +388,20 @@ func (p *fakeSIPPlatform) regCount() int {
 	return p.registered
 }
 
+// registerCallIDs 返回收到的所有 REGISTER 请求的 Call-ID（按到达顺序）。
+// 用于断言注册刷新复用同一 Call-ID（KDM 对变更 Call-ID 的重复注册回 403）。
+func (p *fakeSIPPlatform) registerCallIDs() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	var out []string
+	for _, m := range p.requests {
+		if m.Method == "REGISTER" {
+			out = append(out, m.CallID)
+		}
+	}
+	return out
+}
+
 func (p *fakeSIPPlatform) setSilent(v bool) { p.silent.Store(v) }
 
 // setNAT 开启 NAT 模拟：此后所有响应的 Via 回显 received=<ip>;rport=<port>。
@@ -422,6 +443,17 @@ func (p *fakeSIPPlatform) contactsOf(method string) []string {
 // 对重复 Call-ID 的拒绝），用于验证设备端"心跳被拒→重注册"自愈。
 func (p *fakeSIPPlatform) setRejectKeepalives(v bool) {
 	p.rejectKeepalives.Store(v)
+}
+
+// setFailRegisters 让平台对 REGISTER 回 403（模拟旧注册会话未过期），
+// 用于验证初始注册失败后的快速重试。
+func (p *fakeSIPPlatform) setFailRegisters(v bool) {
+	p.failRegisters.Store(v)
+}
+
+// registerAttempts 返回收到的 REGISTER 请求总数（含 401/403 腿与重试）。
+func (p *fakeSIPPlatform) registerAttempts() int {
+	return len(p.registerCallIDs())
 }
 
 // setTCPFraming 设置 TCP 媒体组帧模式（"dollar" 默认 / "length"）。

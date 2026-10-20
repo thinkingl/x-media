@@ -91,6 +91,16 @@ type Server struct {
 	regMu sync.Mutex
 	// keepaliveFailures counts consecutive keepalive failures/errors.
 	keepaliveFailures atomic.Int32
+	// registerCallID is the stable Call-ID used for every REGISTER of this
+	// device (RFC 3261 §10.2: re-REGISTER reuses it). KDM rejects a REGISTER
+	// carrying a different Call-ID while an older registration session
+	// exists ("已经存在CallId为[...]注册会话" → 403), which prevents the
+	// registration task from being rebuilt after a restart. Derived from the
+	// device ID so it also survives process restarts.
+	registerCallID string
+	// regCSeq is the monotonically increasing REGISTER CSeq (time-seeded so
+	// a restart with the same Call-ID never looks like a retransmission).
+	regCSeq atomic.Uint32
 	// lastPlatformContact is the UnixNano stamp of the last received SIP
 	// response — any response proves liveness for the silence detector.
 	lastPlatformContact atomic.Int64
@@ -164,6 +174,10 @@ func New(cfg Config, deviceCfg DeviceInfo, hub FrameSource) *Server {
 	}
 	// Upstream law defaults to PCMA — see the upstreamLaw field note.
 	s.upstreamLaw.Store(int32(AudioPCMA))
+	// Time-seeded REGISTER CSeq: a process restart reuses the same stable
+	// Call-ID but must not replay an old CSeq (would look like a
+	// retransmission to the platform).
+	s.regCSeq.Store(uint32(time.Now().Unix()))
 	// NOTIFYs of TCP/TLS-dialog subscriptions ride the server's
 	// connection table (same routing as every other TCP answer).
 	s.notifier.BindTCP(func(data []byte, addr *net.TCPAddr) error { return s.sendToTCP(data, addr) })
@@ -360,6 +374,9 @@ func (s *Server) Start(ctx context.Context) error {
 	if !s.testMode {
 		if err := s.runRegisterLifecycle(ctx); err != nil {
 			slog.Warn("gb28181: initial REGISTER failed, entering listen-only mode", "error", err)
+			// Retry soon (the lifecycle goroutine applies failure backoff)
+			// instead of waiting half the refresh interval (default 30 min).
+			s.signalReRegister()
 		}
 	}
 
@@ -752,18 +769,34 @@ func (s *Server) startLifecycles(ctx context.Context) {
 			return time.Duration(base/2) * time.Second
 		}
 		currentInterval := refreshInterval()
-		ticker := time.NewTicker(currentInterval)
-		defer ticker.Stop()
+		timer := time.NewTimer(currentInterval)
+		defer timer.Stop()
 		// Log re-register failures as state transitions, not per-tick
 		// noise: the platform routinely ignores refresh REGISTERs
 		// (NVR-observed) while keepalives keep the registration alive,
 		// which used to emit one WARN per interval forever.
 		consecFails := 0
+		// retryDelay backs off quickly after a failed REGISTER (5s/10s/20s/
+		// 30s cap). KDM rejects a restarted device until the old (100s)
+		// registration session expires (403) — waiting half the refresh
+		// interval would leave the device offline for ~30 minutes.
+		retryDelay := func(fails int) time.Duration {
+			switch {
+			case fails <= 1:
+				return 5 * time.Second
+			case fails == 2:
+				return 10 * time.Second
+			case fails == 3:
+				return 20 * time.Second
+			default:
+				return 30 * time.Second
+			}
+		}
 		for {
 			select {
 			case <-ctx.Done():
 				return
-			case <-ticker.C:
+			case <-timer.C:
 				slog.Debug("gb28181: periodic re-registration")
 			case <-s.reRegisterCh:
 				slog.Info("gb28181: re-registration triggered (keepalive rejected or failures)")
@@ -779,6 +812,7 @@ func (s *Server) startLifecycles(ctx context.Context) {
 				if consecFails == 1 || consecFails%30 == 0 {
 					slog.Warn("gb28181: re-register failed", "error", err, "consecutive_failures", consecFails)
 				}
+				timer.Reset(retryDelay(consecFails))
 				continue
 			}
 			if consecFails > 0 {
@@ -787,9 +821,9 @@ func (s *Server) startLifecycles(ctx context.Context) {
 			consecFails = 0
 			if next := refreshInterval(); next != currentInterval {
 				slog.Info("gb28181: registration refresh cadence updated", "interval", next)
-				ticker.Reset(next)
 				currentInterval = next
 			}
+			timer.Reset(currentInterval)
 		}
 	}()
 }
@@ -1151,8 +1185,8 @@ func (s *Server) runRegisterLifecycleInner(ctx context.Context, nextResponse reg
 		slog.Warn("gb28181: failed to determine local IP, falling back to interface scan", "error", err)
 		localIPAddr = localIP()
 	}
-	callID := fmt.Sprintf("%s-%d@%s", s.cfg.DeviceID, time.Now().UnixNano(), localIPAddr) // device-scoped nanos: same-second / multi-device collision would trigger 482 Loop Detected
-	cseq := "1 REGISTER"
+	callID := s.registrationCallID() // stable per device incl. restarts (KDM 403 on changed Call-ID)
+	cseq := s.nextRegisterCSeq()
 	contactHost, contactPort := s.contactAddress(localIPAddr)
 	contact := fmt.Sprintf("<sip:%s@%s:%d>", s.cfg.DeviceID, contactHost, contactPort)
 	viaTransport := s.viaTransportLabel()
@@ -1204,7 +1238,7 @@ func (s *Server) runRegisterLifecycleInner(ctx context.Context, nextResponse reg
 			}
 			authHeader = BuildAuthorizationHeader(auth, s.cfg.DeviceID, s.cfg.Password, requestURI, "REGISTER")
 		}
-		cseq = "2 REGISTER"
+		cseq = s.nextRegisterCSeq()
 		authMsg := BuildRegister(requestURI, from, to, callID, cseq, contact, authHeader)
 		via2 := fmt.Sprintf("SIP/2.0/%s %s:%d;branch=z9hG4bK%016x", viaTransport, localIPAddr, s.cfg.LocalSIPPort, time.Now().UnixNano())
 		authMsg.Via = via2
@@ -1279,8 +1313,8 @@ func (s *Server) runDeregisterLifecycle(ctx context.Context, nextResponse regRes
 	if err != nil {
 		localIPAddr = localIP()
 	}
-	callID := fmt.Sprintf("%s-%d@%s", s.cfg.DeviceID, time.Now().UnixNano(), localIPAddr) // device-scoped nanos: same-second / multi-device collision would trigger 482 Loop Detected
-	cseq := "1 REGISTER"
+	callID := s.registrationCallID() // stable per device incl. restarts (KDM 403 on changed Call-ID)
+	cseq := s.nextRegisterCSeq()
 	contactHost, contactPort := s.contactAddress(localIPAddr)
 	contact := fmt.Sprintf("<sip:%s@%s:%d>", s.cfg.DeviceID, contactHost, contactPort)
 	via := fmt.Sprintf("SIP/2.0/%s %s:%d;branch=z9hG4bK%016x", s.viaTransportLabel(), localIPAddr, s.cfg.LocalSIPPort, time.Now().UnixNano())
@@ -1329,7 +1363,7 @@ func (s *Server) runDeregisterLifecycle(ctx context.Context, nextResponse regRes
 		}
 		authHeader = BuildAuthorizationHeader(auth, s.cfg.DeviceID, s.cfg.Password, requestURI, "REGISTER")
 	}
-	cseq = "2 REGISTER"
+	cseq = s.nextRegisterCSeq()
 	authMsg := BuildRegister(requestURI, from, to, callID, cseq, contact, authHeader)
 	authMsg.Expires = "0"
 	authMsg.Via = fmt.Sprintf("SIP/2.0/%s %s:%d;branch=z9hG4bK%016x", s.viaTransportLabel(), localIPAddr, s.cfg.LocalSIPPort, time.Now().UnixNano())
@@ -1417,6 +1451,26 @@ func (s *Server) PlatformProtocolVersion() string {
 }
 
 // sendKeepalive sends a keepalive MESSAGE to the platform.
+// registrationCallID returns the stable Call-ID used for every REGISTER of
+// this device. RFC 3261 §10.2 requires a re-REGISTER to reuse the Call-ID;
+// KDM additionally rejects a different Call-ID while an older registration
+// session exists (403 "已经存在CallId为[...]注册会话"). Deriving it from the
+// device ID keeps it stable across process restarts too (2026-10-20 实机).
+func (s *Server) registrationCallID() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.registerCallID == "" {
+		s.registerCallID = fmt.Sprintf("%s@%s", s.cfg.DeviceID, s.cfg.SIPDomain)
+	}
+	return s.registerCallID
+}
+
+// nextRegisterCSeq returns the next REGISTER CSeq (monotonic; each digest
+// leg consumes one).
+func (s *Server) nextRegisterCSeq() string {
+	return fmt.Sprintf("%d REGISTER", s.regCSeq.Add(1))
+}
+
 // keepaliveCallID builds a globally unique Call-ID for a keepalive MESSAGE.
 // The Call-ID must be unique per request: the previous form
 // keepalive-<unix-second>@<localIP> collided across simulated devices sharing
