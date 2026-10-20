@@ -523,6 +523,7 @@ Web 表单（§7.2）
   "platform_id": "34020000002000000001",
   "device_id": "34020000001320000001",
   "channel_id": "34020000001310000001",
+  "alarm_channel_id": "",
   "sip_domain": "3402000000",
   "password": "******",
   "transport": "udp",
@@ -553,6 +554,7 @@ Web 表单（§7.2）
 | `platform_id` | "" | 平台 SIP 服务 ID（20 位）；用于请求 URI/To 头；留空=自动学习（从平台请求 From 提取），失败回退域形式（§5.9） |
 | `device_id` | 必填 | 20 位国标编码（设备身份，注册用户） |
 | `channel_id` | = device_id | 通道编码（目录 Item 的 DeviceID） |
+| `alarm_channel_id` | "" | 报警通道编码（20 位，类型码 134，可选）；作为目录**额外项**上报（ParentID=设备编码、Status=ON），供平台关联报警输入通道 |
 | `sip_domain` | 必填 | SIP 域（一般 = 设备 ID 前 10 位） |
 | `password` | 必填 | 平台约定密码（摘要认证密钥） |
 | `transport` | `udp` | 信令传输：`udp` / `tcp` / `tcp-out`（设备拨平台，保证 NAT 环境可用） |

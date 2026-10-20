@@ -265,6 +265,9 @@ func validateGB28181Config(c *model.OutputConfig) error {
 	if c.ChannelID != "" && !gb28181IDPattern.MatchString(c.ChannelID) {
 		return errors.NewValidationError("通道 ID（channel_id）需为 20 位数字")
 	}
+	if c.AlarmChannelID != "" && !gb28181IDPattern.MatchString(c.AlarmChannelID) {
+		return errors.NewValidationError("报警通道 ID（alarm_channel_id）需为 20 位数字")
+	}
 	if strings.TrimSpace(c.SIPDomain) == "" {
 		return errors.NewValidationError("SIP 域（sip_domain）不能为空")
 	}

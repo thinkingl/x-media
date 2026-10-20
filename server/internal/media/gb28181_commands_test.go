@@ -48,6 +48,23 @@ func startGB28181CommandTestSink(t *testing.T, extra func(*GB28181Config)) (*GB2
 	return sink, platform
 }
 
+// TestGB28181Sink_CatalogAlarmChannel 报警通道（类型码 134）作为额外目录项上报：
+// SumNum=2（视频通道 + 报警通道）、ParentID=设备编码、Status=ON。
+func TestGB28181Sink_CatalogAlarmChannel(t *testing.T) {
+	const alarmID = "34020000001340000001"
+	_, platform := startGB28181CommandTestSink(t, func(c *GB28181Config) {
+		c.AlarmChannelID = alarmID
+	})
+
+	ev := platform.query(t, `<Query><CmdType>Catalog</CmdType><SN>201</SN><DeviceID>`+gbTestDeviceID+`</DeviceID></Query>`)
+	body := ev.msg.Body
+	assert.Contains(t, body, "<SumNum>2</SumNum>", "目录应含视频通道+报警通道")
+	assert.Contains(t, body, "<DeviceID>"+gbTestChannelID+"</DeviceID>", "视频通道仍在")
+	assert.Contains(t, body, "<DeviceID>"+alarmID+"</DeviceID>", "目录应包含报警通道")
+	assert.Contains(t, body, "<ParentID>"+gbTestDeviceID+"</ParentID>", "报警通道父节点=设备编码")
+	assert.Contains(t, body, "<Status>ON</Status>")
+}
+
 // TestGB28181Sink_CommandMatrix 指令应答矩阵（方案 §5.3/§5.4）：
 // 平台下发 目录/设备信息/状态/录像查询/配置下载/控制/订阅/OPTIONS，
 // 断言设备侧 MANSCDP/SIP 应答内容。

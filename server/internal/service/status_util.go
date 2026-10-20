@@ -163,6 +163,7 @@ func buildMediaOutputConfig(id, outputType string, c *model.OutputConfig) *media
 		PlatformID:                 c.PlatformID,
 		DeviceID:                   c.DeviceID,
 		ChannelID:                  c.ChannelID,
+		AlarmChannelID:             c.AlarmChannelID,
 		SIPDomain:                  c.SIPDomain,
 		Password:                   c.Password,
 		Transport:                  c.Transport,

@@ -28,8 +28,11 @@ type GB28181Config struct {
 	PlatformID   string // 平台 SIP 服务 ID（20 位，可选；请求 URI/To 用，§5.9）
 	DeviceID     string // 设备国标编码（20 位，必填）
 	ChannelID    string // 通道国标编码（20 位，缺省 = DeviceID）
-	SIPDomain    string // SIP 域（必填）
-	Password     string // 摘要认证密码（必填）
+	// AlarmChannelID 报警通道国标编码（20 位，可选；类型码 134）。配置后作为
+	// 目录 ExtraChannels 项上报，父节点=设备编码，供平台关联报警输入通道（§5.3）。
+	AlarmChannelID string
+	SIPDomain      string // SIP 域（必填）
+	Password       string // 摘要认证密码（必填）
 
 	Transport string // 信令传输 udp（默认）/tcp/tcp-out
 	TCPRole   string // TCP 媒体角色 auto（默认）/active/passive，M4 生效（§5.9）
@@ -81,6 +84,9 @@ func (c *GB28181Config) applyDefaultsAndValidate() error {
 		c.ChannelID = c.DeviceID
 	} else if !gb28181IDPattern.MatchString(c.ChannelID) {
 		return errors.New("gb28181: 通道 ID（channel_id）必须为 20 位数字")
+	}
+	if c.AlarmChannelID != "" && !gb28181IDPattern.MatchString(c.AlarmChannelID) {
+		return errors.New("gb28181: 报警通道 ID（alarm_channel_id）必须为 20 位数字")
 	}
 	if c.PlatformID != "" && !gb28181IDPattern.MatchString(c.PlatformID) {
 		return errors.New("gb28181: 平台服务 ID（platform_id）必须为 20 位数字")
@@ -157,7 +163,7 @@ func (c *GB28181Config) applyDefaultsAndValidate() error {
 
 // toDeviceConfig 映射到内置设备端配置（internal/gb28181/device）。
 func (c *GB28181Config) toDeviceConfig() device.Config {
-	return device.Config{
+	cfg := device.Config{
 		Enabled:               true,
 		ProtocolVersion:       c.ProtocolVersion,
 		PlatformSIPAddress:    c.PlatformIP,
@@ -178,6 +184,20 @@ func (c *GB28181Config) toDeviceConfig() device.Config {
 		LocalIP:               c.LocalIP,
 		MediaTCPPort:          c.MediaTCPPort,
 	}
+	// 报警通道（类型码 134）作为额外目录项上报，父节点=设备编码（§5.3）。
+	if c.AlarmChannelID != "" {
+		cfg.ExtraChannels = append(cfg.ExtraChannels, device.ChannelItem{
+			DeviceID:     c.AlarmChannelID,
+			Name:         "报警通道",
+			Manufacturer: c.Manufacturer,
+			Model:        c.DeviceModel,
+			Owner:        c.DeviceID,
+			ParentID:     c.DeviceID,
+			RegisterWay:  1,
+			Status:       "ON",
+		})
+	}
+	return cfg
 }
 
 // GB28181Sink GB28181 输出端：把管道流作为"虚拟摄像机"注册到国标平台，

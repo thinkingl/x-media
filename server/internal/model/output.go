@@ -52,14 +52,16 @@ type OutputConfig struct {
 	PlatformID   string `json:"platform_id,omitempty"`
 	DeviceID     string `json:"device_id,omitempty"`
 	ChannelID    string `json:"channel_id,omitempty"`
-	SIPDomain    string `json:"sip_domain,omitempty"`
-	TCPRole      string `json:"tcp_role,omitempty"`
-	TCPFraming   string `json:"tcp_framing,omitempty"`
-	RTPMTU       int    `json:"rtp_mtu,omitempty"`
-	VideoCodec   string `json:"video_codec,omitempty"`
-	LocalSIPPort int    `json:"local_sip_port,omitempty"`
-	LocalIP      string `json:"local_ip,omitempty"`
-	MediaTCPPort int    `json:"media_tcp_port,omitempty"`
+	// AlarmChannelID 报警通道编码（20 位，类型码 134，可选；作为目录额外项上报）。
+	AlarmChannelID string `json:"alarm_channel_id,omitempty"`
+	SIPDomain      string `json:"sip_domain,omitempty"`
+	TCPRole        string `json:"tcp_role,omitempty"`
+	TCPFraming     string `json:"tcp_framing,omitempty"`
+	RTPMTU         int    `json:"rtp_mtu,omitempty"`
+	VideoCodec     string `json:"video_codec,omitempty"`
+	LocalSIPPort   int    `json:"local_sip_port,omitempty"`
+	LocalIP        string `json:"local_ip,omitempty"`
+	MediaTCPPort   int    `json:"media_tcp_port,omitempty"`
 
 	RegisterInterval      int    `json:"register_interval,omitempty"`
 	HeartbeatInterval     int    `json:"heartbeat_interval,omitempty"`

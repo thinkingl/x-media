@@ -107,6 +107,9 @@
           <el-form-item label="通道 ID">
             <el-input v-model="gb.channel_id" placeholder="留空 = 同设备 ID" />
           </el-form-item>
+          <el-form-item label="报警通道 ID">
+            <el-input v-model="gb.alarm_channel_id" placeholder="20 位，类型码 134（可选，目录额外上报）" />
+          </el-form-item>
           <el-form-item label="设备名称">
             <el-input v-model="gb.device_name" placeholder="平台目录中显示的通道名称" />
           </el-form-item>
@@ -237,6 +240,7 @@
             <el-descriptions-item v-if="parsedConfig.transport" label="传输协议">{{ transportLabel(parsedConfig.transport) }}</el-descriptions-item>
             <el-descriptions-item v-if="parsedConfig.device_id" label="设备 ID">{{ parsedConfig.device_id }}</el-descriptions-item>
             <el-descriptions-item v-if="parsedConfig.channel_id" label="通道 ID">{{ parsedConfig.channel_id }}</el-descriptions-item>
+            <el-descriptions-item v-if="parsedConfig.alarm_channel_id" label="报警通道 ID">{{ parsedConfig.alarm_channel_id }}</el-descriptions-item>
             <el-descriptions-item v-if="parsedConfig.platform_ip" label="注册平台">{{ parsedConfig.platform_ip }}:{{ parsedConfig.platform_port }}</el-descriptions-item>
             <el-descriptions-item v-if="parsedConfig.device_name" label="设备名称">{{ parsedConfig.device_name }}</el-descriptions-item>
           </el-descriptions>
@@ -312,6 +316,7 @@ const gbDefaults = {
   platform_id: '',
   device_id: '',
   channel_id: '',
+  alarm_channel_id: '',
   sip_domain: '',
   password: '',
   transport: 'udp',
@@ -357,6 +362,7 @@ function validateGbFields(): string {
   if (gb.platform_id && !/^\d{20}$/.test(gb.platform_id)) return '平台服务 ID 需为 20 位数字'
   if (!/^\d{20}$/.test(gb.device_id)) return '设备 ID 需为 20 位数字'
   if (gb.channel_id && !/^\d{20}$/.test(gb.channel_id)) return '通道 ID 需为 20 位数字'
+  if (gb.alarm_channel_id && !/^\d{20}$/.test(gb.alarm_channel_id)) return '报警通道 ID 需为 20 位数字'
   if (!gb.sip_domain) return '请输入 SIP 域'
   if (!gb.password) return '请输入 SIP 密码'
   if (gb.rtp_mtu && (gb.rtp_mtu < 400 || gb.rtp_mtu > 1400)) return 'RTP MTU 需在 400~1400'

@@ -44,6 +44,7 @@ func TestValidateOutputConfig_GB28181(t *testing.T) {
 		{"rtp_mtu 越界", `{"platform_ip":"1.2.3.4","platform_port":5060,"device_id":"34020000001320000001","sip_domain":"3402000000","password":"x","rtp_mtu":2000}`},
 		{"media_tcp_port 越界", `{"platform_ip":"1.2.3.4","platform_port":5060,"device_id":"34020000001320000001","sip_domain":"3402000000","password":"x","media_tcp_port":70000}`},
 		{"tcp_framing 非法", `{"platform_ip":"1.2.3.4","platform_port":5060,"device_id":"34020000001320000001","sip_domain":"3402000000","password":"x","tcp_framing":"ps"}`},
+		{"alarm_channel_id 非 20 位", `{"platform_ip":"1.2.3.4","platform_port":5060,"device_id":"34020000001320000001","sip_domain":"3402000000","password":"x","alarm_channel_id":"123"}`},
 		{"心跳周期越界", `{"platform_ip":"1.2.3.4","platform_port":5060,"device_id":"34020000001320000001","sip_domain":"3402000000","password":"x","heartbeat_interval":5000}`},
 		{"心跳超时次数越界", `{"platform_ip":"1.2.3.4","platform_port":5060,"device_id":"34020000001320000001","sip_domain":"3402000000","password":"x","heartbeat_timeout_count":11}`},
 	}
