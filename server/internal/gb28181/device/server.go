@@ -1922,8 +1922,17 @@ func (s *Server) handleInvite(ctx context.Context, msg SipMessage, fromAddr net.
 				for _, a := range au.Audio {
 					psData = mux.AppendAudioPES(psData, a.Data, int64(timeTo90kHz(a.Timestamp)))
 				}
+				// RTP timestamps advance on the decode timeline (DTS):
+				// with B-frames the presentation order (PTS) is
+				// non-monotonic, and gateways use the RTP timestamp for
+				// jitter-buffer ordering — backward jumps show up as
+				// stutter/rewind. PES still carries the true PTS+DTS.
+				rtpTS := au.Timestamp
+				if !au.DTS.IsZero() {
+					rtpTS = au.DTS
+				}
 				// Send PS data over RTP
-				if err := pusher.SendFrame(psData, au.KeyFrame, au.Timestamp, ssrc); err != nil {
+				if err := pusher.SendFrame(psData, au.KeyFrame, rtpTS, ssrc); err != nil {
 					slog.Warn("gb28181: failed to send RTP frame", "error", err)
 				}
 			}

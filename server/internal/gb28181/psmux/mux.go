@@ -38,17 +38,16 @@ const (
 type Muxer struct {
 	videoType byte // 0 until set
 	audioType byte // 0 = no audio track
-	psmDirty  bool // PSM (re)sent on next IDR
 
 	// mu serializes writers: GB28181 cascade sessions feed video AUs and
 	// G.711 frames from two hub callback goroutines. Unsynchronized calls
-	// raced on psmDirty/videoType and could interleave PS bursts (truncated
+	// raced on videoType and could interleave PS bursts (truncated
 	// video AUs at PES-chunk boundaries on the receiver — observed as
 	// bottom-half green/white frames on the upper platform, 2026-08-21).
 	mu sync.Mutex
 }
 
-func New() *Muxer { return &Muxer{psmDirty: true} }
+func New() *Muxer { return &Muxer{} }
 
 func (m *Muxer) SetVideoCodec(codec string) {
 	m.mu.Lock()
@@ -61,7 +60,6 @@ func (m *Muxer) SetVideoCodec(codec string) {
 	default:
 		m.videoType = streamTypeH264
 	}
-	m.psmDirty = true
 }
 
 // SetAudioCodec declares the audio track in the PSM ("" removes it).
@@ -80,7 +78,6 @@ func (m *Muxer) SetAudioCodec(codec string) {
 	default:
 		m.audioType = 0
 	}
-	m.psmDirty = true
 }
 
 // WriteAU returns the PS bytes for one video access unit (Annex-B NALUs).
@@ -90,13 +87,18 @@ func (m *Muxer) SetAudioCodec(codec string) {
 func (m *Muxer) WriteAU(annexB []byte, pts, dts int64, isIDR bool) []byte {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	out := packHeader(pts)
+	// SCR follows the decode time (DTS); PTS reorders with B-frames.
+	scr := dts
+	if scr == 0 {
+		scr = pts
+	}
+	out := packHeader(scr)
 	if isIDR {
+		// GB/T 28181 附录 C: system header + PSM belong to the keyframe PS
+		// structure — send them with EVERY IDR so a receiver resyncing on a
+		// later keyframe still gets the stream map.
 		out = append(out, systemHeader(m.videoType, m.audioType)...)
-		if m.psmDirty {
-			out = append(out, psm(m.videoType, m.audioType)...)
-			m.psmDirty = false
-		}
+		out = append(out, psm(m.videoType, m.audioType)...)
 	}
 	// Split into bounded PES packets: the first carries the PTS (and DTS
 	// when reordering is present), continuation packets carry raw payload.
@@ -130,20 +132,29 @@ func (m *Muxer) WriteAudio(payload []byte, pts int64) []byte {
 	return out
 }
 
-func packHeader(pts int64) []byte {
-	// 00 00 01 BA + SCR (6, derived from PTS/300, marker bits fixed) +
-	// program_mux_rate + stuffing. Devices vary in SCR precision; a PTS-derived
-	// base with extension 0 is widely accepted.
-	scr := pts / 300
-	if scr < 0 {
-		scr = 0
+// packHeader builds the PS pack header. ticks90k is the decode time (DTS) in
+// 90kHz ticks: SCR runs at 27MHz (x300) and must be monotonic — using PTS
+// would make it jump backwards with B-frames (MPEG-PS system clock violation).
+// Local patch (x-media §5.7 B 帧兼容).
+func packHeader(ticks90k int64) []byte {
+	if ticks90k < 0 {
+		ticks90k = 0
 	}
+	scr := (ticks90k * 300) & 0x1FFFFFFFF // 33-bit SCR base at 27MHz
 	h := make([]byte, 0, 14)
 	h = append(h, 0x00, 0x00, 0x01, 0xBA)
-	b := byte(scr>>27)&0x18 | 0x44 // '01' + SCR[32..30] + marker
-	h = append(h, b)
-	h = append(h, byte(scr>>19), byte(scr>>11)|0x01, byte(scr>>3), byte(scr&0x7)<<5|0x04)
-	h = append(h, 0x01) // SCR extension (0) + marker
+	// '01' + SCR[32..30] + marker + SCR[29..28]
+	h = append(h, 0x44|byte((scr>>30)&0x07)<<3|byte((scr>>28)&0x03))
+	// SCR[27..20]
+	h = append(h, byte(scr>>20))
+	// SCR[19..15] + marker + SCR[14..13]
+	h = append(h, byte((scr>>15)&0x1F)<<3|0x04|byte((scr>>13)&0x03))
+	// SCR[12..5]
+	h = append(h, byte(scr>>5))
+	// SCR[4..0] + marker + SCR_ext[8..7]
+	h = append(h, byte(scr&0x1F)<<3|0x04)
+	// SCR_ext[6..0] + marker
+	h = append(h, 0x01)
 	// program_mux_rate: 3.5Mbps (3500000/50 = 70000) with end markers.
 	rate := uint32(70000)
 	h = append(h, byte(rate>>14), byte(rate>>6), byte(rate&0x3F)<<2|0x03)

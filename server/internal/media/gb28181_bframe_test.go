@@ -117,6 +117,20 @@ func TestGB28181Sink_BFramePESCarriesDTS(t *testing.T) {
 	ps := assemblePS(pkts)
 	require.NotEmpty(t, ps)
 
+	// RTP 时间戳必须单调（按 DTS 打）：WebRTC/GB 网关常用 RTP 时间戳做
+	// 抖动缓冲与排序；B 帧下按 PTS 会出现回退，导致卡顿/回退。
+	var rtpTS []uint32
+	for _, p := range pkts {
+		if len(rtpTS) == 0 || p.Timestamp != rtpTS[len(rtpTS)-1] {
+			rtpTS = append(rtpTS, p.Timestamp)
+		}
+	}
+	require.GreaterOrEqual(t, len(rtpTS), 3, "应覆盖多个访问单元")
+	for i := 1; i < len(rtpTS); i++ {
+		require.GreaterOrEqual(t, rtpTS[i], rtpTS[i-1],
+			"RTP 时间戳必须单调不减（DTS），index %d: %d -> %d", i, rtpTS[i-1], rtpTS[i])
+	}
+
 	tsList := pesTimestamps(ps)
 	require.NotEmpty(t, tsList)
 
