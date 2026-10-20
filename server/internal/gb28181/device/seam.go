@@ -179,8 +179,14 @@ type NALU struct {
 type AccessUnit struct {
 	NALUs     []NALU
 	Timestamp time.Time
-	KeyFrame  bool // True if contains IDR
-	Audio     []AudioFrame
+	// DTS is the decode timestamp. With B-frames the presentation order
+	// differs from the decode order (Timestamp is non-monotonic while DTS
+	// is monotonic); the PS muxer then writes PTS+DTS in the PES header per
+	// ISO/IEC 13818-1. Zero (or equal to Timestamp) means no reordering and
+	// PTS-only is written. Local patch (x-media §5.7 B 帧兼容).
+	DTS      time.Time
+	KeyFrame bool // True if contains IDR
+	Audio    []AudioFrame
 }
 
 // AudioFrame is one audio frame riding with a video AU. Data is the codec

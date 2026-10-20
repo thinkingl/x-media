@@ -1826,10 +1826,14 @@ func (s *Server) handleInvite(ctx context.Context, msg SipMessage, fromAddr net.
 					return
 				}
 				// Annex-B reassembly from NALUs (mirrors MuxH264ToPS:
-				// 4-byte start code first, 3-byte for the rest).
+				// every NAL carries a 4-byte start code — KDM requires it).
 				annexB := annexBFromNALUs(au.NALUs)
 				pts90k := int64(timeTo90kHz(au.Timestamp))
-				psData := mux.WriteAU(annexB, pts90k, au.KeyFrame)
+				dts90k := pts90k
+				if !au.DTS.IsZero() {
+					dts90k = int64(timeTo90kHz(au.DTS))
+				}
+				psData := mux.WriteAU(annexB, pts90k, dts90k, au.KeyFrame)
 				// Audio rides inside the video AU's burst (§5.7): a
 				// standalone audio send would carry its own RTP marker
 				// and truncate the video frame at the receiver.

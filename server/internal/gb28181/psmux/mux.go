@@ -84,8 +84,10 @@ func (m *Muxer) SetAudioCodec(codec string) {
 }
 
 // WriteAU returns the PS bytes for one video access unit (Annex-B NALUs).
-// isIDR governs system-header + PSM inclusion.
-func (m *Muxer) WriteAU(annexB []byte, pts int64, isIDR bool) []byte {
+// isIDR governs system-header + PSM inclusion. When dts differs from pts
+// (B-frames), the first PES carries PTS+DTS per ISO/IEC 13818-1; otherwise
+// PTS only. Local patch (x-media §5.7 B 帧兼容).
+func (m *Muxer) WriteAU(annexB []byte, pts, dts int64, isIDR bool) []byte {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	out := packHeader(pts)
@@ -96,8 +98,8 @@ func (m *Muxer) WriteAU(annexB []byte, pts int64, isIDR bool) []byte {
 			m.psmDirty = false
 		}
 	}
-	// Split into bounded PES packets: the first carries the PTS, continuation
-	// packets carry raw payload only.
+	// Split into bounded PES packets: the first carries the PTS (and DTS
+	// when reordering is present), continuation packets carry raw payload.
 	first := true
 	for off := 0; off < len(annexB) || (off == 0 && len(annexB) == 0); {
 		end := off + maxPESPayload
@@ -106,10 +108,10 @@ func (m *Muxer) WriteAU(annexB []byte, pts int64, isIDR bool) []byte {
 		}
 		chunk := annexB[off:end]
 		if first {
-			out = append(out, videoPES(chunk, pts, true)...)
+			out = append(out, videoPES(chunk, pts, dts, true)...)
 			first = false
 		} else {
-			out = append(out, videoPES(chunk, 0, false)...)
+			out = append(out, videoPES(chunk, 0, 0, false)...)
 		}
 		off = end
 		if off >= len(annexB) {
@@ -186,17 +188,26 @@ func psm(videoType, audioType byte) []byte {
 	return append(h, body...)
 }
 
-func videoPES(payload []byte, pts int64, withPTS bool) []byte {
+func videoPES(payload []byte, pts, dts int64, withTimestamp bool) []byte {
 	hdrLen := 3
-	if withPTS {
+	if withTimestamp {
 		hdrLen += 5
+		if dts != 0 && dts != pts {
+			hdrLen += 5 // PTS+DTS
+		}
 	}
 	pes := make([]byte, 0, 6+hdrLen+len(payload))
 	pes = append(pes, 0x00, 0x00, 0x01, videoStreamID)
 	pes = binary.BigEndian.AppendUint16(pes, uint16(hdrLen+len(payload)))
-	if withPTS {
-		pes = append(pes, 0x80, 0x80, 0x05)
-		pes = append(pes, encodePTS(pts)...)
+	if withTimestamp {
+		if dts != 0 && dts != pts {
+			pes = append(pes, 0x80, 0xC0, 0x0A) // PTS+DTS present
+			pes = append(pes, encodePTS(pts)...)
+			pes = append(pes, encodeDTS(dts)...)
+		} else {
+			pes = append(pes, 0x80, 0x80, 0x05) // PTS only
+			pes = append(pes, encodePTS(pts)...)
+		}
 	} else {
 		pes = append(pes, 0x80, 0x00, 0x00)
 	}
@@ -231,6 +242,20 @@ func encodePTS(pts int64) []byte {
 	p := uint64(pts) & 0x1FFFFFFFF
 	b := make([]byte, 5)
 	b[0] = 0x21 | byte((p>>30)&0x07)<<1 | 1
+	b[1] = byte(p >> 22)
+	b[2] = byte(p>>14)&0xFE | 1
+	b[3] = byte(p >> 7)
+	b[4] = byte(p<<1)&0xFE | 1
+	return b
+}
+
+// encodeDTS packs a 33-bit DTS into the 5-byte MPEG form ('0001' prefix).
+// Written together with PTS when B-frames reorder presentation vs decode
+// order. Local patch (x-media §5.7 B 帧兼容).
+func encodeDTS(dts int64) []byte {
+	p := uint64(dts) & 0x1FFFFFFFF
+	b := make([]byte, 5)
+	b[0] = 0x11 | byte((p>>30)&0x07)<<1 | 1
 	b[1] = byte(p >> 22)
 	b[2] = byte(p>>14)&0xFE | 1
 	b[3] = byte(p >> 7)

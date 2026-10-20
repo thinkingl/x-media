@@ -133,7 +133,9 @@ func (p *gb28181FramePipe) videoAU(f *Frame) *device.AccessUnit {
 	au := &device.AccessUnit{
 		NALUs:     aus,
 		Timestamp: p.tsLocked(f.Header.PTS, p.videoClock),
-		KeyFrame:  isKey,
+		// DTS 同步换算：B 帧源的 PTS 非单调，PS/PES 必须同时携带 PTS+DTS。
+		DTS:      p.tsLocked(f.Header.DTS, p.videoClock),
+		KeyFrame: isKey,
 	}
 	if p.audioEnabled && len(p.audioQ) > 0 {
 		au.Audio = p.audioQ
