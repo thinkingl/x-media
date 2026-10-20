@@ -50,6 +50,9 @@ type fakeSIPPlatform struct {
 
 	// M4：心跳静默模拟（忽略 MESSAGE 应答，验证静默→重注册）
 	silent atomic.Bool
+	// 心跳拒绝模拟：对 Keepalive MESSAGE 回 482 Loop（模拟平台对重复
+	// Call-ID 的 SIP 栈行为），验证设备端"被拒绝→重注册"自愈。
+	rejectKeepalives atomic.Bool
 
 	// M4：NAT 模拟——响应 Via 回显 received/rport（外部映射地址），
 	// 设备应学习并在后续 Contact 中使用。
@@ -155,6 +158,13 @@ func (p *fakeSIPPlatform) handleRegister(msg device.SipMessage, addr *net.UDPAdd
 func (p *fakeSIPPlatform) handleMessage(msg device.SipMessage, addr *net.UDPAddr) {
 	if p.silent.Load() {
 		// 静默模拟：不回复 MESSAGE（心跳无应答）——验证设备端静默检测→重注册。
+		return
+	}
+	if p.rejectKeepalives.Load() && strings.Contains(msg.Body, "Keepalive") {
+		p.reply(addr, msg, 482, "")
+		p.mu.Lock()
+		p.keepalives++
+		p.mu.Unlock()
 		return
 	}
 	p.reply(addr, msg, 200, "")
@@ -408,6 +418,12 @@ func (p *fakeSIPPlatform) contactsOf(method string) []string {
 
 // readRTPFramed 读取 TCP 媒体流（GB/T 28181 附录 C.2 $-帧：
 // 0x24 | channel(1B) | 长度(2B 大端) | RTP 包），解析为 RTP 包收集。
+// setRejectKeepalives 让平台对 Keepalive MESSAGE 回 482 Loop（模拟 SIP 栈
+// 对重复 Call-ID 的拒绝），用于验证设备端"心跳被拒→重注册"自愈。
+func (p *fakeSIPPlatform) setRejectKeepalives(v bool) {
+	p.rejectKeepalives.Store(v)
+}
+
 // setTCPFraming 设置 TCP 媒体组帧模式（"dollar" 默认 / "length"）。
 // 仅影响此后接受到的媒体连接。
 func (p *fakeSIPPlatform) setTCPFraming(mode string) {

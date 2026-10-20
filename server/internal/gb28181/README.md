@@ -29,6 +29,7 @@
 | `device/rtp_pusher.go`、`device/server.go`、`device/seam.go`、`device/validate.go` | **TCP 组帧开关**（科达 KDM 实测）：`Config.TCPFraming`/`RtpPusher.SetTCPFraming`/`Server.SetMediaTCPFraming` —— `dollar`（默认，国标 Annex C.2 `[0x24][channel][len16][RTP]`）/`length`（RFC 4571 `[len16][RTP]`，KDM/海康类平台要求） | §5.9 KDM |
 | `device/ps.go` | **Annex-B 起始码统一为 4 字节**（`00 00 00 01`）：科达 `CPSFrameParser::IsH265IFrame` 只识别 4 字节起始码，3 字节起始码会使 SPS 识别失败 → IDR 不判为 I 帧 → 平台报 "No stream received"（2026-10-20 H.265 实机定位） | §5.9 KDM |
 | `device/psmux`、`device/server.go`、`device/seam.go` | **B 帧时间戳**：`AccessUnit.DTS` + PES `PTS+DTS`（flags=0xC0/长度 10）。源含 B 帧时解码序 PTS 非单调；只写 PTS 会让接收端按 PTS 重排 → WebRTC 卡顿/回退（2026-10-20「远方的你-1080」定位）；PTS==DTS 时仍只写 PTS | §5.7 B 帧兼容 |
+| `device/server.go` | **多设备心跳 Call-ID 唯一化**：`keepalive-<设备编码>-<纳秒>@<本机IP>`（原 `keepalive-<Unix秒>@<本机IP>` 在多台模拟设备同秒心跳时完全相同，科达 SIP 栈回 **482 Loop** 并静默丢弃 → 100s 判离线）；REGISTER Call-ID 亦加入设备编码；4xx/5xx 心跳应答计入失败，达到 `heartbeat_timeout_count` 自动重注册（平台对非法信令只回 4xx/不处理时的自愈路径） | §5.9 KDM |
 | 未修改（保留上游） | 回放路径 `playback.go`（仍用 `MuxH264ToPS`，M5 范围）；`platform`/`security35114` 未内置 | — |
 
 维护约定：

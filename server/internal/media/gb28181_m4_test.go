@@ -266,3 +266,20 @@ func TestGB28181Sink_SilentPlatformReregister(t *testing.T) {
 	require.Eventually(t, func() bool { return platform.regCount() >= 2 }, 10*time.Second, 200*time.Millisecond,
 		"静默后应自动重注册")
 }
+
+// TestGB28181Sink_KeepaliveRejectedTriggersReregister 平台对心跳回 482 Loop
+// （典型原因：多设备同秒 Call-ID 冲突，SIP 栈判重复）时，设备端应把连续拒绝
+// 计为心跳失败，达到 heartbeat_timeout_count 后重新注册自愈。
+func TestGB28181Sink_KeepaliveRejectedTriggersReregister(t *testing.T) {
+	platform := newFakeSIPPlatform(t, gbTestPlatformID, gbTestRealm, gbTestDeviceID, gbTestPassword)
+	platform.setRejectKeepalives(true)
+	_ = startGB28181SinkOnPlatform(t, platform, func(c *GB28181Config) {
+		c.HeartbeatInterval = 1
+		c.HeartbeatTimeoutCount = 2
+	})
+	require.Equal(t, 1, platform.regCount(), "首次注册完成")
+
+	require.Eventually(t, func() bool { return platform.regCount() >= 2 },
+		10*time.Second, 200*time.Millisecond,
+		"心跳被 482 拒绝达到阈值后应自动重注册")
+}

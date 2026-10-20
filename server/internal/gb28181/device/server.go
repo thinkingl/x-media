@@ -974,6 +974,24 @@ func (s *Server) handleResponse(msg SipMessage) {
 	case 404:
 		slog.Warn("gb28181: request not found by platform (ignored for re-registration)", "cseq", msg.CSeq)
 	default:
+		// Any other 4xx/5xx on our keepalive MESSAGE means the platform
+		// received but refused it — e.g. 482 Loop Detected from a SIP-stack
+		// duplicate-Call-ID check (multi-device same-second Call-IDs,
+		// 2026-10-20 KDM). The platform still answers, so the silence
+		// detector cannot catch this; count it explicitly and re-register
+		// after heartbeat_timeout_count consecutive rejections (self-heal).
+		if msg.StatusCode >= 400 && strings.Contains(msg.CSeq, "MESSAGE") {
+			failures := s.keepaliveFailures.Add(1)
+			slog.Warn("gb28181: keepalive rejected by platform",
+				"status", msg.StatusCode, "failures", failures)
+			if failures >= int32(s.cfg.HeartbeatTimeoutCount) {
+				slog.Warn("gb28181: keepalive rejected repeatedly, re-registering", "failures", failures)
+				s.metrics.KeepaliveFail()
+				s.signalReRegister()
+				s.keepaliveFailures.Store(0)
+			}
+			return
+		}
 		slog.Debug("gb28181: unhandled SIP response", "status", msg.StatusCode)
 	}
 }
@@ -1133,7 +1151,7 @@ func (s *Server) runRegisterLifecycleInner(ctx context.Context, nextResponse reg
 		slog.Warn("gb28181: failed to determine local IP, falling back to interface scan", "error", err)
 		localIPAddr = localIP()
 	}
-	callID := fmt.Sprintf("%d@%s", time.Now().UnixNano(), localIPAddr) // nanos: same-second re-register would collide (482 Loop Detected)
+	callID := fmt.Sprintf("%s-%d@%s", s.cfg.DeviceID, time.Now().UnixNano(), localIPAddr) // device-scoped nanos: same-second / multi-device collision would trigger 482 Loop Detected
 	cseq := "1 REGISTER"
 	contactHost, contactPort := s.contactAddress(localIPAddr)
 	contact := fmt.Sprintf("<sip:%s@%s:%d>", s.cfg.DeviceID, contactHost, contactPort)
@@ -1261,7 +1279,7 @@ func (s *Server) runDeregisterLifecycle(ctx context.Context, nextResponse regRes
 	if err != nil {
 		localIPAddr = localIP()
 	}
-	callID := fmt.Sprintf("%d@%s", time.Now().UnixNano(), localIPAddr) // nanos: same-second re-register would collide (482 Loop Detected)
+	callID := fmt.Sprintf("%s-%d@%s", s.cfg.DeviceID, time.Now().UnixNano(), localIPAddr) // device-scoped nanos: same-second / multi-device collision would trigger 482 Loop Detected
 	cseq := "1 REGISTER"
 	contactHost, contactPort := s.contactAddress(localIPAddr)
 	contact := fmt.Sprintf("<sip:%s@%s:%d>", s.cfg.DeviceID, contactHost, contactPort)
@@ -1399,6 +1417,16 @@ func (s *Server) PlatformProtocolVersion() string {
 }
 
 // sendKeepalive sends a keepalive MESSAGE to the platform.
+// keepaliveCallID builds a globally unique Call-ID for a keepalive MESSAGE.
+// The Call-ID must be unique per request: the previous form
+// keepalive-<unix-second>@<localIP> collided across simulated devices sharing
+// one host (same second, same local IP), and KDM's SIP stack answered
+// 482 Loop Detected — the keepalives were dropped and the devices went
+// offline after 100s without heartbeat (2026-10-20 实机定位).
+func keepaliveCallID(deviceID, localIP string, now time.Time) string {
+	return fmt.Sprintf("keepalive-%s-%d@%s", deviceID, now.UnixNano(), localIP)
+}
+
 func (s *Server) sendKeepalive(ctx context.Context) error {
 	platformAddr := &net.UDPAddr{
 		IP:   net.ParseIP(s.cfg.PlatformSIPAddress),
@@ -1415,7 +1443,7 @@ func (s *Server) sendKeepalive(ctx context.Context) error {
 		slog.Warn("gb28181: failed to determine local IP, falling back to interface scan", "error", err)
 		localIPAddr = localIP()
 	}
-	callID := fmt.Sprintf("keepalive-%d@%s", time.Now().Unix(), localIPAddr)
+	callID := keepaliveCallID(s.cfg.DeviceID, localIPAddr, time.Now())
 	contactHost, contactPort := s.contactAddress(localIPAddr)
 	contact := fmt.Sprintf("<sip:%s@%s:%d>", s.cfg.DeviceID, contactHost, contactPort)
 
