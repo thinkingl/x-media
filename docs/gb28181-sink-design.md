@@ -756,6 +756,7 @@ Web 表单（§7.2）
 - **点播媒体（TCP）发送端匹配**（2026-10-15 晚）：平台点播邀约为 TCP 媒体（设备主动连平台 34xxx 端口），平台按**应答 SDP `c=/m=` 登记的预期发送端 ip:port** 匹配到达的连接——随机源端口的连接只会进 `waitCon` 直至超时 `No stream received`。修复：出站 socket 先选本地端口并**绑定拨出**（公告端口=连接源端口，实测本 NAT 保端口）、应答 SDP `c=` 用学习到的外部 IP、200 OK 后再拨号（确保平台已登记预期发送端）；对照实测：平台自有 IPC `32000000001320000103`（172.16.194.68，设备本体 `32000000001120000203`）以同一契约从公告端口 56004 拨出被平台立即匹配（ESTAB `172.16.240.76:34670 ↔ 172.16.194.68:56004`）。
 - **TCP 组帧（RFC 4571 vs 国标 `$-组帧`）**（2026-10-15 晚，匹配修复后暴露）：连接被匹配后平台仍报 `No stream received`，NMediaService 日志：`total wrong tcp rtp data length is: 5994311Bytes`（12s 会话全量丢弃）。抓包对照：平台自有 IPC 的 TCP 流为 **RFC 4571 长度前缀**（`0574 8060…` = `[len16][RTP]`），我们为 `$-组帧`（`2400 0584 8060…`）→ 平台把 `24 00` 当长度 9216 解析。新增 `tcp_framing: dollar（默认）/ length（科达/海康类）` 开关，KDM 部署选 `length`。
 - **最终实机验证（19:36:50 会话，三项修复齐备）**：连接 `AcceptSenderTcpCon 172.16.194.145:33157` 匹配（公告端口=源端口）→ **1s 后平台 `rtc receive first frame to send, len=289580, bIFrame=1`**、`video_resolution 1920×1080` → 会话稳定保持 **60s**（此前均 12s 超时"No stream"）至用户正常停止，无任何 wrong-length 告警；Web 预览端正常出画。
+- **H.265 实机联调（2026-10-20）**：GB/T 28181-2022 附录 C 规定 H.265 PS 封装（stream_type=0x24、PT=96、PS/90000），每个 I 帧前应有 VPS/SPS/PPS。平台库 `libNMediaRTP.so` 具备 `IsH265IFrame`/`CheckVideoPSM` 等能力，但 `CPSFrameParser::IsH265IFrame` **只扫描 4 字节起始码**（`00 00 00 01`）；实时路径 `annexBFromNALUs` 对首个 NAL 用 4 字节、其余用 3 字节 → 平台识别到 VPS 但识别不到 SPS → `VPS && SPS` 判定失败 → IDR 不算 I 帧 → `No stream received`。修复：实时/回放路径**所有 NAL 统一 4 字节起始码**（红→绿：`TestAnnexBFromNALUsUsesFourByteStartCodes` + PS 端到端断言）。
 
 ---
 

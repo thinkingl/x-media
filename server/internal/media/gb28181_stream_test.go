@@ -316,6 +316,22 @@ func TestGB28181Sink_InviteStreamsH265(t *testing.T) {
 	types := psStreamTypes(ps)
 	require.NotEmpty(t, types)
 	assert.Equal(t, byte(0x24), types[0], "H265 stream_type=0x24")
+
+	// KDM 兼容（实测）：H.265 I 帧判定只扫描 4 字节起始码——视频 PES 负载中
+	// 每个 NAL 之前都必须是 00 00 00 01（3 字节起始码会使 SPS 识别失败）。
+	pesIdx := bytes.Index(ps, []byte{0x00, 0x00, 0x01, 0xE0})
+	require.GreaterOrEqual(t, pesIdx, 0, "应有视频 PES")
+	payloadStart := pesIdx + 9 + int(ps[pesIdx+8])
+	nextAU := bytes.Index(ps[payloadStart:], []byte{0x00, 0x00, 0x01, 0xBA})
+	require.Greater(t, nextAU, 0, "应能定位下一 PS 包头")
+	payload := ps[payloadStart : payloadStart+nextAU]
+	for i := 0; i+2 < len(payload); i++ {
+		if payload[i] == 0 && payload[i+1] == 0 && payload[i+2] == 1 && (i == 0 || payload[i-1] != 0) {
+			t.Fatalf("视频 PES 中发现 3 字节起始码 @%d（KDM 只识别 00 00 00 01）", i)
+		}
+	}
+	assert.True(t, bytes.Contains(payload, []byte{0x00, 0x00, 0x00, 0x01, 0x42}),
+		"SPS 前必须是 4 字节起始码（否则 KDM 不判 I 帧）")
 }
 
 // TestGB28181Sink_L3_MP4ToFFmpeg L3：MP4Source → DefaultPipe → Gb28181Sink →

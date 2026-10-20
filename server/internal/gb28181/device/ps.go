@@ -243,13 +243,10 @@ func MuxH264ToPS(nalus [][]byte, isKeyFrame bool, pts, dts time.Time) []byte {
 
 	// Concatenate NAL units with Annex-B start codes
 	payload := make([]byte, 0, len(nalus)*10) // Pre-allocate with headroom
-	for i, nalu := range nalus {
-		// Use 4-byte start code for all NALs (simpler, universally accepted)
-		if i == 0 {
-			payload = append(payload, 0x00, 0x00, 0x00, 0x01)
-		} else {
-			payload = append(payload, 0x00, 0x00, 0x01)
-		}
+	for _, nalu := range nalus {
+		// 4-byte start code for every NAL (KDM 的 H.265 I 帧判定只认
+		// 00 00 00 01，见 annexBFromNALUs；H.264 同样兼容)。
+		payload = append(payload, 0x00, 0x00, 0x00, 0x01)
 		payload = append(payload, nalu...)
 	}
 
@@ -275,22 +272,22 @@ func MuxH264ToPS(nalus [][]byte, isKeyFrame bool, pts, dts time.Time) []byte {
 	return ps
 }
 
-// annexBFromNALUs reassembles NALU payloads into an Annex-B byte stream:
-// 4-byte start code for the first NALU, 3-byte for the rest — the same
-// framing MuxH264ToPS uses. Local patch (x-media GB28181 sink design §5.7):
-// psmux takes Annex-B bytes, the AU hub carries NALUs.
+// annexBFromNALUs reassembles NALU payloads into an Annex-B byte stream.
+// Local patch (x-media GB28181 sink design §5.9, KDM 实测): EVERY NALU gets
+// a 4-byte start code (00 00 00 01). KDM's H.265 I-frame detector
+// (CPSFrameParser::IsH265IFrame) only scans 4-byte start codes — with
+// 3-byte codes on SPS/PPS it sees VPS but not SPS, so the IDR is not
+// recognized as an I-frame and the platform reports "No stream received".
+// 4-byte codes are equally valid for H.264 (and already used by the legacy
+// MuxH264ToPS path), so the cost is one byte per NALU.
 func annexBFromNALUs(nalus []NALU) []byte {
 	size := 0
 	for _, n := range nalus {
 		size += len(n.Data) + 4
 	}
 	out := make([]byte, 0, size)
-	for i, n := range nalus {
-		if i == 0 {
-			out = append(out, 0x00, 0x00, 0x00, 0x01)
-		} else {
-			out = append(out, 0x00, 0x00, 0x01)
-		}
+	for _, n := range nalus {
+		out = append(out, 0x00, 0x00, 0x00, 0x01)
 		out = append(out, n.Data...)
 	}
 	return out

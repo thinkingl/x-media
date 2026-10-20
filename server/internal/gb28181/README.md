@@ -27,6 +27,7 @@
 | `device/server.go` | **NAT 穿越**：响应 Via `received/rport` 学习外部地址 → Contact 使用（认证腿起生效）、`Config.LocalIP` 显式覆盖、`LocalSIPPort=0` 绑定后回填真实端口；404 响应不触发重注册；REGISTER Call-ID 用纳秒（避免 482 Loop Detected） | §5.9 NAT |
 | `device/server.go`、`device/seam.go`、`device/validate.go` | **TCP 媒体发送端匹配**（科达 KDM 实测）：出站 TCP 媒体先选本地端口（`Config.MediaTCPPort`，0=自动）→ 应答 SDP `c=` 用 NAT 学习到的外部 IP、`m=` 用该端口 → 200 OK 后从该端口拨出（平台按 `c=/m=` 登记预期发送端、连接到达时按源 ip:port 匹配） | §5.9 NAT/KDM |
 | `device/rtp_pusher.go`、`device/server.go`、`device/seam.go`、`device/validate.go` | **TCP 组帧开关**（科达 KDM 实测）：`Config.TCPFraming`/`RtpPusher.SetTCPFraming`/`Server.SetMediaTCPFraming` —— `dollar`（默认，国标 Annex C.2 `[0x24][channel][len16][RTP]`）/`length`（RFC 4571 `[len16][RTP]`，KDM/海康类平台要求） | §5.9 KDM |
+| `device/ps.go` | **Annex-B 起始码统一为 4 字节**（`00 00 00 01`）：科达 `CPSFrameParser::IsH265IFrame` 只识别 4 字节起始码，3 字节起始码会使 SPS 识别失败 → IDR 不判为 I 帧 → 平台报 "No stream received"（2026-10-20 H.265 实机定位） | §5.9 KDM |
 | 未修改（保留上游） | 回放路径 `playback.go`（仍用 `MuxH264ToPS`，M5 范围）；`platform`/`security35114` 未内置 | — |
 
 维护约定：
