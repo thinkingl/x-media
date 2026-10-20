@@ -54,6 +54,9 @@ type GB28181Config struct {
 	ProtocolVersion       string // X-GB-Ver：""（省略）/"2.0"（2016）/"3.0"（2022）
 
 	AudioEnable bool // 是否推送音频（默认 true，service 层填默认；M3 生效）
+	// DropBFrames 丢弃非参考 B 帧（保持解码序=显示序）。部分平台（科达 KDM）
+	// 的 GB→WebRTC 链路不按 PES DTS 重排，B 帧会造成回退/只等 IDR。
+	DropBFrames bool
 
 	DeviceName   string // 目录/设备信息展示字段
 	Manufacturer string
@@ -340,7 +343,7 @@ func (s *GB28181Sink) Stop() error {
 // Configure 管道协商：校验媒体能力（仅 H.264/H.265 视频；video_codec=h264 拒绝 H265 源），
 // 填充帧转换参数并把协商到的编码同步给内置设备端（媒体会话按 INVITE 时点取用）。
 func (s *GB28181Sink) Configure(streams []StreamInfo) error {
-	if err := s.pipe.configure(streams, s.cfg.VideoCodec, s.cfg.AudioEnable); err != nil {
+	if err := s.pipe.configure(streams, s.cfg.VideoCodec, s.cfg.AudioEnable, s.cfg.DropBFrames); err != nil {
 		return err
 	}
 	s.mu.Lock()

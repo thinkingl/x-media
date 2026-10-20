@@ -127,6 +127,10 @@
           <el-form-item label="推送音频">
             <el-switch v-model="gb.audio_enable" />
           </el-form-item>
+          <el-form-item label="丢弃 B 帧">
+            <el-switch v-model="gb.drop_bframes" />
+            <span class="form-hint">平台不回退重排时开启（解码序=显示序，帧率会降低）</span>
+          </el-form-item>
           <el-form-item label="GOP 重放">
             <el-switch v-model="gb.gop_replay" />
           </el-form-item>
@@ -332,6 +336,7 @@ const gbDefaults = {
   heartbeat_interval: 60,
   heartbeat_timeout_count: 3,
   audio_enable: true,
+  drop_bframes: false,
   gop_replay: true,
   tele_boot_restart: false,
   control_reject_unimplemented: false,

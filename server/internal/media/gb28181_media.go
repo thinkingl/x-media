@@ -28,6 +28,7 @@ type gb28181FramePipe struct {
 	configNALUs [][]byte // H264: SPS/PPS；H265: VPS/SPS/PPS
 
 	audioEnabled bool
+	dropBFrames  bool
 	audioClock   int
 	adts         [7]byte
 
@@ -40,7 +41,7 @@ func newGB28181FramePipe() *gb28181FramePipe {
 }
 
 // configure 从管道协商结果填充转换参数（校验规则与旧实现保持一致）。
-func (p *gb28181FramePipe) configure(streams []StreamInfo, codecLimit string, audioEnable bool) error {
+func (p *gb28181FramePipe) configure(streams []StreamInfo, codecLimit string, audioEnable, dropBFrames bool) error {
 	var video, audio *StreamInfo
 	for i := range streams {
 		st := &streams[i]
@@ -93,6 +94,7 @@ func (p *gb28181FramePipe) configure(streams []StreamInfo, codecLimit string, au
 	}
 	p.configNALUs = configNALUs
 	p.audioEnabled = audioEnable && audio != nil
+	p.dropBFrames = dropBFrames
 	if p.audioEnabled {
 		clock, adts, err := gb28181ADTSHeader(audio.CodecConfig, audio.ClockRate)
 		if err != nil {
@@ -114,6 +116,14 @@ func (p *gb28181FramePipe) videoAU(f *Frame) *device.AccessUnit {
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
+
+	// drop_bframes：丢弃非参考 B 帧，保持解码顺序=显示顺序。平台链路若
+	// 不按 PES DTS 重排，B 帧会导致图像回退或“只等下一个 IDR”。在消费
+	// audioQ 之前返回，排队的音频会随下一个保留的 AU 发出。
+	// H.265 的参考标记不在 NAL 头（在 slice header），保守起见不丢。
+	if p.dropBFrames && p.videoCodec != "h265" && isReorderedNonRefAU(f, nals) {
+		return nil
+	}
 
 	if isKey && len(p.configNALUs) > 0 && !hasVideoParameterSets(nals, p.videoCodec) {
 		all := make([][]byte, 0, len(p.configNALUs)+len(nals))
@@ -280,4 +290,30 @@ func gb28181ADTSHeader(asc []byte, clock int) (int, [7]byte, error) {
 	h[6] = 0xFC                    // buffer fullness 0x7FF + raw blocks 0
 	logger.Debugf("gb28181: ADTS template ready (sample_rate=%d channels=%d)", sr, chanCfg)
 	return clock, h, nil
+}
+
+// isReorderedNonRefAU 判断一个视频帧是否可安全丢弃的 B 帧：
+//   - PTS < DTS：该帧在解码前就要显示（B 帧重排）；
+//   - 所有 H.264 VCL NAL 的 nal_ref_idc == 0：不被后续帧参考。
+//
+// 两者同时成立时丢弃不会破坏后续 I/P 帧的解码依赖。
+func isReorderedNonRefAU(f *Frame, nals [][]byte) bool {
+	if f.Header.PTS >= f.Header.DTS {
+		return false
+	}
+	sawVCL := false
+	for _, n := range nals {
+		if len(n) == 0 {
+			continue
+		}
+		typ := n[0] & 0x1F
+		if typ != 1 && typ != 5 { // H.264 non-IDR/IDR slice
+			continue
+		}
+		sawVCL = true
+		if n[0]&0x60 != 0 { // nal_ref_idc != 0
+			return false
+		}
+	}
+	return sawVCL
 }

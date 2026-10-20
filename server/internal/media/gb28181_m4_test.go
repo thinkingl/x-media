@@ -321,6 +321,101 @@ func TestGB28181Sink_InitialRegisterFailureRetriesQuickly(t *testing.T) {
 	platform.waitEvent(t, "registered", 15*time.Second)
 }
 
+// TestGB28181Sink_DropBFrames drop_bframes=true 时必须丢弃非参考 B 帧：
+// 剩余视频帧的 PTS 单调、PES 不再需要 DTS（解码序=显示序），音频不丢失。
+// 适用于不按 DTS 重排的 GB28181→WebRTC 链路（科达 KDM 实测）。
+func TestGB28181Sink_DropBFrames(t *testing.T) {
+	sink, platform := startGB28181StreamSink(t, func(c *GB28181Config) {
+		c.DropBFrames = true
+	})
+	require.NoError(t, sink.Configure(gbStreamsH264AAC()))
+
+	const ssrc = uint32(0x55AA55AA)
+	platform.invite(t, ssrc)
+
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		f := int64(3600)
+		// ref=false 的帧模拟非参考 B 帧（nal_ref_idc=0）
+		frames := []struct {
+			pts, dts int64
+			key, ref bool
+		}{
+			{0, 0, true, true},
+			{3 * f, 1 * f, false, true},
+			{1 * f, 2 * f, false, false},
+			{2 * f, 3 * f, false, false},
+			{6 * f, 4 * f, false, true},
+			{4 * f, 5 * f, false, false},
+			{5 * f, 6 * f, false, false},
+			{9 * f, 7 * f, false, true},
+			{7 * f, 8 * f, false, false},
+			{8 * f, 9 * f, false, false},
+		}
+		for i := 0; i < 4; i++ {
+			base := int64(i) * 10 * f
+			for _, fr := range frames {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				nal := byte(0x41) // P slice, nal_ref_idc=2
+				switch {
+				case fr.key:
+					nal = 0x65 // IDR, nal_ref_idc=3
+				case !fr.ref:
+					nal = 0x01 // B slice, nal_ref_idc=0（可安全丢弃）
+				}
+				payload := append([]byte{0x00, 0x00, 0x00, 0x01, nal}, bytes.Repeat([]byte{0x20}, 64)...)
+				ff := testFrame(0, FrameTypeVideo, CodecH264, base+fr.pts, payload)
+				ff.Header.DTS = base + fr.dts
+				if fr.key {
+					ff.Header.Flags |= FlagKeyframe
+				}
+				_ = sink.WriteFrame(ff)
+				_ = sink.WriteFrame(audioFrame(base+fr.pts, []byte{0xDE, 0xAD, 0xBE, 0xEF, 0x01, 0x02}))
+				time.Sleep(10 * time.Millisecond)
+			}
+		}
+	}()
+	defer func() { close(stop); <-done }()
+
+	pkts := platform.waitRTP(t, 10, 5*time.Second)
+	ps := assemblePS(pkts)
+	require.NotEmpty(t, ps)
+
+	tsList := pesTimestamps(ps)
+	var ptsList []int64
+	for _, ts := range tsList {
+		ptsList = append(ptsList, ts.pts)
+		// 丢弃 B 帧后不应再出现 PTS<DTS（重排帧）；P 帧 PTS>DTS 是正常的。
+		if ts.hasDTS {
+			require.GreaterOrEqual(t, ts.pts, ts.dts,
+				"丢弃 B 帧后不应存在 PTS<DTS 的重排帧")
+		}
+	}
+	require.NotEmpty(t, ptsList)
+	for i := 1; i < len(ptsList); i++ {
+		require.Greater(t, ptsList[i], ptsList[i-1],
+			"丢弃 B 帧后视频 PTS 必须单调递增，index %d", i)
+	}
+	// 必须确实发生了丢弃：至少一处帧间隔 > 1 帧（3600 ticks）
+	hasGap := false
+	for i := 1; i < len(ptsList); i++ {
+		if ptsList[i]-ptsList[i-1] > 3600 {
+			hasGap = true
+			break
+		}
+	}
+	require.True(t, hasGap, "应丢弃 B 帧（帧间隔出现 >1 帧）")
+
+	// 音频不应丢失（随保留下来的视频 AU 发送）
+	require.True(t, bytes.Contains(ps, []byte{0x00, 0x00, 0x01, 0xC0}), "音频 PES 应保留")
+}
+
 // TestGB28181Sink_KeepaliveRejectedTriggersReregister 平台对心跳回 482 Loop
 // （典型原因：多设备同秒 Call-ID 冲突，SIP 栈判重复）时，设备端应把连续拒绝
 // 计为心跳失败，达到 heartbeat_timeout_count 后重新注册自愈。

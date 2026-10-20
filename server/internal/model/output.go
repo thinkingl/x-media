@@ -68,6 +68,8 @@ type OutputConfig struct {
 	HeartbeatTimeoutCount int    `json:"heartbeat_timeout_count,omitempty"`
 	ProtocolVersion       string `json:"protocol_version,omitempty"`
 	AudioEnable           *bool  `json:"audio_enable,omitempty"`
+	// DropBFrames 丢弃非参考 B 帧（GB28181 平台链路不按 DTS 重排时的兼容开关）
+	DropBFrames bool `json:"drop_bframes,omitempty"`
 
 	DeviceName   string `json:"device_name,omitempty"`
 	Manufacturer string `json:"manufacturer,omitempty"`

@@ -179,6 +179,7 @@ func buildMediaOutputConfig(id, outputType string, c *model.OutputConfig) *media
 		HeartbeatTimeoutCount:      c.HeartbeatTimeoutCount,
 		ProtocolVersion:            c.ProtocolVersion,
 		AudioEnable:                audioEnable,
+		DropBFrames:                c.DropBFrames,
 		DeviceName:                 c.DeviceName,
 		Manufacturer:               c.Manufacturer,
 		DeviceModel:                c.DeviceModel,
