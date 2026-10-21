@@ -417,6 +417,13 @@ func (r *RTSPInput) handleVideoPacket(medi *description.Media, f *format.H264, p
 	}
 	r.pktCount++
 
+	// 必须在 Decode 之前调用：timeDecoder 只在 PTSEqualsDTS 的包上初始化
+	// （IDR/SPS/PPS，或 FU-A 起始分片）。大关键帧的 AU 在最后一个 FU-A 分片
+	// 才组装完成，旧实现此时才取 PTS，起始分片已被跳过，timeDecoder 永不
+	// 初始化 → 所有帧 PTS=0。提前到每个 RTP 包调用，IDR 起始分片即可完成
+	// 初始化；初始化前的帧（中途接入的 GOP）丢弃，避免把 PTS=0 传给下游。
+	pts, ptsOK := r.client.PacketPTS(medi, pkt)
+
 	nalus, err := dec.Decode(pkt)
 	if err != nil {
 		if err != rtph264.ErrMorePacketsNeeded {
@@ -440,8 +447,11 @@ func (r *RTSPInput) handleVideoPacket(medi *description.Media, f *format.H264, p
 	if len(data) == 0 {
 		return
 	}
+	if !ptsOK {
+		logger.Debugf("RTSP input drop frame before PTS init [%s] ch=%d ts=%d", r.id, channelID, pkt.Timestamp)
+		return
+	}
 
-	pts, _ := r.client.PacketPTS(medi, pkt)
 	frame := &Frame{
 		Header: FrameHeader{
 			Magic:     FrameMagic,
