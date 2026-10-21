@@ -43,3 +43,57 @@ func TestResponseCallIDUniquePerMessage(t *testing.T) {
 		t.Fatalf("同秒不同设备的应答 Call-ID 必须不同: %q", a)
 	}
 }
+
+// TestRegisterResponseMatches 校验 REGISTER 响应必须按 Call-ID + CSeq 关联：
+// 共享响应通道里的残留响应绝不能当成本次注册的成功应答（KDM 2026-10-21）。
+func TestRegisterResponseMatches(t *testing.T) {
+	resp := &SipMessage{CallID: "cur", CSeq: "  9   REGISTER ", StatusCode: 200}
+	if !registerResponseMatches(resp, "cur", "9 REGISTER") {
+		t.Fatal("matching Call-ID/CSeq (with whitespace) should match")
+	}
+	if registerResponseMatches(resp, "old", "9 REGISTER") {
+		t.Fatal("different Call-ID must not match")
+	}
+	if registerResponseMatches(resp, "cur", "10 REGISTER") {
+		t.Fatal("different CSeq must not match")
+	}
+	if registerResponseMatches(nil, "cur", "9 REGISTER") {
+		t.Fatal("nil response must not match")
+	}
+}
+
+// TestChannelResponseSourceDiscardsStale 旧响应应被丢弃，匹配的响应才返回。
+func TestChannelResponseSourceDiscardsStale(t *testing.T) {
+	s := New(Config{DeviceID: "34020000001320000001", SIPDomain: "3402000000"}, DeviceInfo{}, nil)
+	s.regRespCh <- SipMessage{CallID: "old", CSeq: "7 REGISTER", StatusCode: 200}
+	s.regRespCh <- SipMessage{CallID: "cur", CSeq: "9 REGISTER", StatusCode: 401}
+
+	resp, err := s.channelResponseSource()(time.Second, "cur", "9 REGISTER")
+	if err != nil {
+		t.Fatalf("expected matching response, got error: %v", err)
+	}
+	if resp.CallID != "cur" || resp.StatusCode != 401 {
+		t.Fatalf("unexpected response: %+v", resp)
+	}
+	select {
+	case extra := <-s.regRespCh:
+		t.Fatalf("stale response should have been discarded, got %+v", extra)
+	default:
+	}
+}
+
+// TestChannelResponseSourceTimeoutOnMismatch 只有不匹配的响应时必须超时，
+// 绝不能误判成功。
+func TestChannelResponseSourceTimeoutOnMismatch(t *testing.T) {
+	s := New(Config{DeviceID: "34020000001320000001", SIPDomain: "3402000000"}, DeviceInfo{}, nil)
+	s.regRespCh <- SipMessage{CallID: "old", CSeq: "7 REGISTER", StatusCode: 200}
+
+	start := time.Now()
+	_, err := s.channelResponseSource()(120*time.Millisecond, "cur", "9 REGISTER")
+	if err == nil {
+		t.Fatal("expected timeout when only stale responses are present")
+	}
+	if elapsed := time.Since(start); elapsed < 80*time.Millisecond {
+		t.Fatalf("returned too early (%v), must keep waiting for the matching response", elapsed)
+	}
+}

@@ -862,37 +862,79 @@ func getLocalIP(ctx context.Context, remoteAddr string) (string, error) {
 // reads (initial registration, before the recv loop exists) or the
 // regRespCh channel fed by the recv loop (all later re-registrations —
 // prevents the recv loop and the register flow from racing on sipConn).
-type regResponseSource func(timeout time.Duration) (*SipMessage, error)
+type regResponseSource func(timeout time.Duration, callID, cseq string) (*SipMessage, error)
 
 // socketResponseSource reads responses directly from the SIP socket
 // (only safe before the recv loop starts).
 func (s *Server) socketResponseSource() regResponseSource {
-	return func(timeout time.Duration) (*SipMessage, error) {
+	return func(timeout time.Duration, callID, cseq string) (*SipMessage, error) {
+		deadline := time.Now().Add(timeout)
 		buf := make([]byte, 4096)
-		_ = s.sipConn.SetReadDeadline(time.Now().Add(timeout))
-		n, _, err := s.sipConn.ReadFromUDP(buf)
-		_ = s.sipConn.SetReadDeadline(time.Time{})
-		if err != nil {
-			return nil, err
+		for {
+			remaining := time.Until(deadline)
+			if remaining <= 0 {
+				return nil, fmt.Errorf("timeout waiting for REGISTER response")
+			}
+			_ = s.sipConn.SetReadDeadline(time.Now().Add(remaining))
+			n, _, err := s.sipConn.ReadFromUDP(buf)
+			_ = s.sipConn.SetReadDeadline(time.Time{})
+			if err != nil {
+				return nil, err
+			}
+			resp, err := Parse(buf[:n])
+			if err != nil {
+				continue
+			}
+			// Ignore requests and stale responses unrelated to the current
+			// REGISTER transaction (a leftover answer from an earlier flow
+			// must never be taken as this flow's success).
+			if resp.StatusCode == 0 || !registerResponseMatches(&resp, callID, cseq) {
+				continue
+			}
+			return &resp, nil
 		}
-		resp, err := Parse(buf[:n])
-		if err != nil {
-			return nil, err
-		}
-		return &resp, nil
 	}
 }
 
 // channelResponseSource reads responses routed by the recv loop.
 func (s *Server) channelResponseSource() regResponseSource {
-	return func(timeout time.Duration) (*SipMessage, error) {
-		select {
-		case resp := <-s.regRespCh:
-			return &resp, nil
-		case <-time.After(timeout):
-			return nil, fmt.Errorf("timeout waiting for REGISTER response")
+	return func(timeout time.Duration, callID, cseq string) (*SipMessage, error) {
+		timer := time.NewTimer(timeout)
+		defer timer.Stop()
+		for {
+			select {
+			case resp := <-s.regRespCh:
+				if registerResponseMatches(&resp, callID, cseq) {
+					return &resp, nil
+				}
+				// Stale/unrelated response — discard and keep waiting.
+			case <-timer.C:
+				return nil, fmt.Errorf("timeout waiting for REGISTER response")
+			}
 		}
 	}
+}
+
+// registerResponseMatches reports whether a SIP response belongs to the
+// outstanding REGISTER transaction (Call-ID + CSeq). The response channel is
+// shared across flows; consuming an uncorrelated leftover (platform UDP
+// retransmission or a late answer from a previous flow) used to make a new
+// REGISTER look successful without ever sending the authenticated leg, so the
+// device silently stopped re-registering and went offline (KDM, 2026-10-21).
+func registerResponseMatches(resp *SipMessage, callID, cseq string) bool {
+	if resp == nil {
+		return false
+	}
+	if callID != "" && resp.CallID != callID {
+		return false
+	}
+	return normalizeCSeq(resp.CSeq) == normalizeCSeq(cseq)
+}
+
+// normalizeCSeq collapses whitespace so "2  REGISTER" and "2 REGISTER"
+// compare equal.
+func normalizeCSeq(v string) string {
+	return strings.Join(strings.Fields(v), " ")
 }
 
 // reregister runs the REGISTER lifecycle with responses routed through the
@@ -1209,7 +1251,7 @@ func (s *Server) runRegisterLifecycleInner(ctx context.Context, nextResponse reg
 	}
 
 	// Wait for response (5s)
-	resp, err := nextResponse(5 * time.Second)
+	resp, err := nextResponse(5*time.Second, callID, cseq)
 	if err != nil {
 		return fmt.Errorf("reading REGISTER response: %w", err)
 	}
@@ -1251,7 +1293,7 @@ func (s *Server) runRegisterLifecycleInner(ctx context.Context, nextResponse reg
 		}
 
 		// Wait for 200 OK
-		resp, err = nextResponse(5 * time.Second)
+		resp, err = nextResponse(5*time.Second, callID, cseq)
 		if err != nil {
 			return fmt.Errorf("reading 200 OK response: %w", err)
 		}
@@ -1333,7 +1375,7 @@ func (s *Server) runDeregisterLifecycle(ctx context.Context, nextResponse regRes
 	if err := s.sendToPlatform(dereg, platformAddr); err != nil {
 		return fmt.Errorf("sending de-REGISTER: %w", err)
 	}
-	resp, err := nextResponse(2 * time.Second)
+	resp, err := nextResponse(2*time.Second, callID, cseq)
 	if err != nil {
 		return fmt.Errorf("reading de-REGISTER response: %w", err)
 	}
@@ -1373,7 +1415,7 @@ func (s *Server) runDeregisterLifecycle(ctx context.Context, nextResponse regRes
 	if err := s.sendToPlatform(authMsg, platformAddr); err != nil {
 		return fmt.Errorf("sending authenticated de-REGISTER: %w", err)
 	}
-	resp, err = nextResponse(2 * time.Second)
+	resp, err = nextResponse(2*time.Second, callID, cseq)
 	if err != nil {
 		return fmt.Errorf("reading de-REGISTER 200 OK: %w", err)
 	}
