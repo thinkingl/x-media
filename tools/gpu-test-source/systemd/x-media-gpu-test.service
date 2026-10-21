@@ -1,0 +1,14 @@
+[Unit]
+Description=x-media 4K CUDA fireworks test source
+After=network-online.target
+
+[Service]
+Type=simple
+Environment=LOG_DIR=%h/.local/state/x-media-gpu-test
+Environment=RTSP_URL=rtsp://127.0.0.1:5544/gpu_test
+ExecStart=%h/code/x-media/tools/gpu-test-source/supervisor.sh
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=default.target

@@ -1,9 +1,10 @@
 # GPU 连续测试码流（GPU Test Source）详细方案
 
-> 状态：**已落地并连续运行，等待 KDM 286 最终预览确认** ｜ 版本：v1.0 ｜ 日期：2026-10-21
+> 状态：**4K CUDA Fireworks 已接入 286（x-test），KDM 预览确认正常** ｜ 版本：v1.1 ｜ 日期：2026-10-21
 > 相关代码：`server/internal/media/rtsp_input.go`（PTS 修复）、`server/internal/media/rtsp_input_pts_test.go`
-> 当前生成器：`/tmp/opencode/gpu_live.py`（完整脚本见附录 A）
-> 当前 supervisor：`/tmp/opencode/gpu_live_supervisor.sh`（附录 B）
+> 当前生成器：`tools/gpu-test-source/gpu_live_4k_fireworks.py`（4K CUDA Fireworks）
+> 当前 supervisor：`tools/gpu-test-source/supervisor.sh`
+> 4K 渲染器：`tools/gpu-test-source/fireworks_cuda.py`（CUDA 粒子 + bloom + NV12）
 
 ---
 
@@ -14,7 +15,9 @@
 | 主机 / 网卡 | `192.168.88.102`（NAT 后 `172.16.194.145`） |
 | x-media API | `http://127.0.0.1:18090`，dev key `dev-api-key` |
 | x-media RTSP server | `:5544` |
-| 原始测试流 | `rtsp://192.168.88.102:5544/gpu_test` |
+| 当前生成器 | `tools/gpu-test-source/gpu_live_4k_fireworks.py`（4K CUDA Fireworks） |
+| 当前 supervisor | `tools/gpu-test-source/supervisor.sh` |
+| 原始测试流 | `rtsp://192.168.88.102:5544/gpu_test`（3840×2160@25，20 Mbps） |
 | x-media 测试输出 | `rtsp://192.168.88.102:5544/live/78ac5050-a745-b6f6-a83b-5f5f3b88e6ce` |
 | 测试输入 | `9a1f1a00-6476-6250-60e4-bb3fba5482dd`（`GPU Test Source`） |
 | 测试输出 | `78ac5050-a745-b6f6-a83b-5f5f3b88e6ce`（`GPU Test RTSP Out`） |
@@ -24,7 +27,7 @@
 | 286 原输入 | `36f9dc0f-9eba-8f3f-b192-5b851698238d`（`kdm-测试源`，仍 running，可随时切回） |
 | KDM 平台 | `172.16.240.76:33001`，SIP 域 `3200000000`，平台 ID `32000000002000000000` |
 
-> 286 的切换是**临时测试**，287/288/289 未动。切换/回退方法见 §6.4。
+> **v1.1（2026-10-21）**：当前部署已从 1080p mixed 升级为 **4K CUDA Fireworks**（3840×2160@25、20 Mbps、32 组×256 粒子），286 预览确认正常。代码/运行手册见 `tools/gpu-test-source/README.md`；本文 §5–§8 保留 1080p mixed 基线。287/288/289 未动。286 切换/回退见 §6.4。
 
 ---
 
@@ -492,7 +495,7 @@ if !ptsOK {
 
 ---
 
-## 8. 性能与稳定性实测
+## 8. 性能与稳定性实测（1080p mixed 基线）
 
 ### 8.1 当前方案 C（1080p25，8 Mbps）
 
@@ -662,7 +665,48 @@ loginctl enable-linger "$USER"   # 需要权限；否则登录后才启动
 
 ---
 
-## 附录 A：完整生成器脚本（`gpu_live.py`）
+## 12. 4K CUDA Fireworks（当前部署）
+
+### 12.1 运行文件
+
+| 文件 | 作用 |
+|---|---|
+| `tools/gpu-test-source/fireworks_cuda.py` | CUDA 粒子模拟、splatting、1/4 bloom、NV12 直出 |
+| `tools/gpu-test-source/gpu_live_4k_fireworks.py` | 4K25 生成器：渲染 + 毫秒时钟/帧号 + NVENC + Annex-B |
+| `tools/gpu-test-source/supervisor.sh` | 循环拉起 + ffmpeg RTSP 推流 |
+| `tools/gpu-test-source/README.md` | 安装、运行、x-media 接入、排障 |
+
+### 12.2 4K25 实测
+
+| 指标 | 实测 |
+|---|---|
+| 分辨率/帧率 | 3840×2160 @ 25.0 fps |
+| 编码 | H.264 High，level 5.1，无 B 帧，20 Mbps CBR |
+| 生成器 CPU | **14.3% 单核** |
+| GPU SM | ~6% 平均 |
+| NVENC | ~17% 平均 |
+| 显存 | ~553 MiB |
+| CUDA 渲染 | 约 4 ms/帧 |
+| 286 管道 | 25fps，`dropped=0` |
+| KDM 286 | 重新注册 + 心跳 OK；预览确认正常 |
+
+### 12.3 渲染参数
+
+- 32 组烟花 × 最多 256 粒子；寿命约 2.2–6.5s，随机衰减/错峰重生。
+- 深度 `z=0.25–1.0`：近处更大/更亮/寿命更长，远处更小/更暗/位置偏高。
+- HDR 核心 + 1/4 分辨率 bloom + 3×3 blur + tone mapping；NV12 在 CUDA 中直出。
+- 左上角叠加 `HH:MM:SS.mmm` + `Fxxxxxx`（5×7 字体，4K 下 scale=8）。
+- 当前 286：`9a1f… → 8521…`；测试 RTSP 输出：`78ac…`。
+
+### 12.4 与 x-media PTS 修复的关系
+
+4K 大关键帧被 RTP FU-A 分片后，旧版 RTSP input 的 PTS 会全为 0。必须先部署 commit `08fe39d`（在 `Decode` 前初始化 `PacketPTS`，丢弃初始化前帧），4K 烟花才能在 RTSP/GB28181 路径正常出图。回归测试为 `TestRTSPInput_PTSForFragmentedIDR`。
+
+---
+
+## 附录 A：完整生成器脚本（1080p mixed 基线，`gpu_live.py`）
+
+> 说明：以下为 1080p mixed 基线的完整脚本；当前 4K CUDA Fireworks 的代码见 `tools/gpu-test-source/`。
 
 ```python
 #!/usr/bin/env python3
