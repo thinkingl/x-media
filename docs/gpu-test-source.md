@@ -17,7 +17,8 @@
 | x-media RTSP server | `:5544` |
 | 当前生成器 | `tools/gpu-test-source/gpu_live_4k_fireworks.py`（4K CUDA Fireworks） |
 | 当前 supervisor | `tools/gpu-test-source/supervisor.sh` |
-| 原始测试流 | `rtsp://192.168.88.102:5544/gpu_test`（3840×2160@25，20 Mbps） |
+| 音频 | AAC-LC 48 kHz stereo 128 kbps，`-stream_loop -1` 循环 |
+| 原始测试流 | `rtsp://192.168.88.102:5544/gpu_test`（3840×2160@25，20 Mbps + AAC） |
 | x-media 测试输出 | `rtsp://192.168.88.102:5544/live/78ac5050-a745-b6f6-a83b-5f5f3b88e6ce` |
 | 测试输入 | `9a1f1a00-6476-6250-60e4-bb3fba5482dd`（`GPU Test Source`） |
 | 测试输出 | `78ac5050-a745-b6f6-a83b-5f5f3b88e6ce`（`GPU Test RTSP Out`） |
@@ -27,7 +28,7 @@
 | 286 原输入 | `36f9dc0f-9eba-8f3f-b192-5b851698238d`（`kdm-测试源`，仍 running，可随时切回） |
 | KDM 平台 | `172.16.240.76:33001`，SIP 域 `3200000000`，平台 ID `32000000002000000000` |
 
-> **v1.1（2026-10-21）**：当前部署已从 1080p mixed 升级为 **4K CUDA Fireworks**（3840×2160@25、20 Mbps、32 组×256 粒子），286 预览确认正常。代码/运行手册见 `tools/gpu-test-source/README.md`；本文 §5–§8 保留 1080p mixed 基线。287/288/289 未动。286 切换/回退见 §6.4。
+> **v1.1（2026-10-21）**：当前部署已从 1080p mixed 升级为 **4K CUDA Fireworks + AAC 背景音乐**（3840×2160@25、20 Mbps、32 组×256 粒子），286 预览确认正常。代码/运行手册见 `tools/gpu-test-source/README.md`；本文 §5–§8 保留 1080p mixed 基线。287/288/289 未动。286 切换/回退见 §6.4。
 
 ---
 
@@ -649,7 +650,7 @@ loginctl enable-linger "$USER"   # 需要权限；否则登录后才启动
 
 **已知边界：**
 
-- 当前测试流**视频-only**，没有音频；GB28181 平台若强制要求音频，需要额外加 1 kHz 测试音或静音 AAC。
+- 当前测试流已带 **AAC 背景音乐**（48 kHz stereo 128 kbps，循环）；音频素材不提交仓库，见 §12.4。
 - 画面时钟是 wall clock，不是 NTP 同步源；跨机测延迟时需保证主机时间准确。
 - PTS 是 CFR 25fps；若需要逐帧 wall-clock/VFR PTS，需要自定义 muxer（PyAV/自写 RTP），当前未实现。
 - 生成器/Python 包在 `/tmp`，不具备重启自启；测试 input/output/pipe 是 x-media 运行时 DB 对象，重启后可能需要手动 start。
@@ -657,7 +658,7 @@ loginctl enable-linger "$USER"   # 需要权限；否则登录后才启动
 
 **后续可选项：**
 
-1. **加音频**：在 ffmpeg 推流侧混入 1 kHz `sine` 或 `anullsrc`，`-c:a aac`；注意音视频两路实时源的漂移。
+1. **音频增强**：当前已循环 AAC 背景音乐；如需测试音/静音，可替换 `AUDIO_FILE`。
 2. **持久化**：脚本进仓库 + `pip install --user` + systemd user service。
 3. **VFR 毫秒 PTS**：用 PyAV 或自写 RTP/PS 封装，把生成时刻的 ms 直接写入 PTS。
 4. **方案 D**：C/CUDA + NVENC SDK，进一步降低 CPU/RSS，适合多路/4K 生产级测试源。
@@ -682,10 +683,13 @@ loginctl enable-linger "$USER"   # 需要权限；否则登录后才启动
 |---|---|
 | 分辨率/帧率 | 3840×2160 @ 25.0 fps |
 | 编码 | H.264 High，level 5.1，无 B 帧，20 Mbps CBR |
-| 生成器 CPU | **14.3% 单核** |
-| GPU SM | ~6% 平均 |
-| NVENC | ~17% 平均 |
-| 显存 | ~553 MiB |
+| 生成器 CPU | ~13% 单核 |
+| ffmpeg（NVDEC+NVENC+AAC）CPU | ~19% 单核 |
+| 合计 CPU | ~32% 单核（4 核约 8%） |
+| GPU SM | ~17% 平均 |
+| NVENC | ~34% 平均（生成器 + ffmpeg 重编码） |
+| NVDEC | ~12% 平均 |
+| 显存 | ~762 MiB |
 | CUDA 渲染 | 约 4 ms/帧 |
 | 286 管道 | 25fps，`dropped=0` |
 | KDM 286 | 重新注册 + 心跳 OK；预览确认正常 |
@@ -698,7 +702,16 @@ loginctl enable-linger "$USER"   # 需要权限；否则登录后才启动
 - 左上角叠加 `HH:MM:SS.mmm` + `Fxxxxxx`（5×7 字体，4K 下 scale=8）。
 - 当前 286：`9a1f… → 8521…`；测试 RTSP 输出：`78ac…`。
 
-### 12.4 与 x-media PTS 修复的关系
+### 12.4 音频与双编码
+
+- 素材：`/tmp/opencode/黄霄雲 - 烟火里的尘埃.flac`（48 kHz stereo）。
+- 转换：`tools/gpu-test-source/prepare_audio.sh` → AAC-LC 48 kHz stereo 128 kbps ADTS；音频文件不提交仓库。
+- 循环：ffmpeg `-stream_loop -1 -re -i fireworks_audio.aac`，AAC 重新编码后送入 RTSP。
+- **视频侧必须重编码**：裸 H.264 管道包没有可靠 PTS，`-c:v copy` 时 VLC 能解析音频 codec 但音频帧为 0；当前使用 `h264_cuvid` 解码 + `h264_nvenc` 重编码（4K25），音频才能正常交织。
+- 286 GB28181 输出已启用 `audio_enable: true`；平台预览会带 AAC 音频。
+- 音视频起始 PTS 偏差约 50–150 ms；背景音乐足够。
+
+### 12.5 与 x-media PTS 修复的关系
 
 4K 大关键帧被 RTP FU-A 分片后，旧版 RTSP input 的 PTS 会全为 0。必须先部署 commit `08fe39d`（在 `Decode` 前初始化 `PacketPTS`，丢弃初始化前帧），4K 烟花才能在 RTSP/GB28181 路径正常出图。回归测试为 `TestRTSPInput_PTSForFragmentedIDR`。
 
