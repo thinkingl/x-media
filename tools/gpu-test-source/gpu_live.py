@@ -67,8 +67,10 @@ FONT = {
     ":": ["00000", "00100", "00100", "00000", "00100", "00100", "00000"],
     ".": ["00000", "00000", "00000", "00000", "00000", "00110", "00110"],
     "F": ["11111", "10000", "10000", "11110", "10000", "10000", "10000"],
+    "-": ["00000", "00000", "00000", "11111", "00000", "00000", "00000"],
+    " ": ["00000", "00000", "00000", "00000", "00000", "00000", "00000"],
 }
-CHARS = "0123456789:.F"
+CHARS = "0123456789:.F- "
 CHAR_IDX = {c: i for i, c in enumerate(CHARS)}
 
 
@@ -177,7 +179,7 @@ def main():
     if not args.no_overlay:
         overlay = Overlay(h, scale)
         pad = 6
-        box_w = 12 * overlay.glyph_w + 2 * pad
+        box_w = 23 * overlay.glyph_w + 2 * pad
         box_h = 2 * overlay.glyph_h + 3 * pad
         ox, oy = 20, 20
         if box_w + ox > w or box_h + oy > h:
@@ -216,10 +218,10 @@ def main():
             if overlay is not None:
                 now = time.time()
                 ms = int((now - int(now)) * 1000)
-                clock = time.strftime("%H:%M:%S", time.localtime(now)) + f".{ms:03d}"
+                clock = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now)) + f".{ms:03d}"
                 pad = 6
                 ox, oy = 20, 20
-                bw = 12 * overlay.glyph_w + 2 * pad
+                bw = 23 * overlay.glyph_w + 2 * pad
                 bh = 2 * overlay.glyph_h + 3 * pad
                 y[oy:oy + bh, ox:ox + bw, 0] = 16
                 uv[oy // 2:(oy + bh) // 2, ox // 2:(ox + bw) // 2, :] = 128

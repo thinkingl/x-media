@@ -76,7 +76,7 @@ def main():
 
     pad = 6
     ox, oy = 40, 40
-    bw = 12 * overlay.glyph_w + 2 * pad
+    bw = 23 * overlay.glyph_w + 2 * pad
     bh = 2 * overlay.glyph_h + 3 * pad
 
     stop = False
@@ -113,7 +113,7 @@ def main():
             uv[oy // 2:(oy + bh) // 2, ox // 2:(ox + bw) // 2, :] = 128
             now = time.time()
             ms = int((now - int(now)) * 1000)
-            clock = time.strftime("%H:%M:%S", time.localtime(now)) + f".{ms:03d}"
+            clock = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now)) + f".{ms:03d}"
             overlay.draw(y, uv, ox + pad, oy + pad, clock)
             overlay.draw(y, uv, ox + pad, oy + 2 * pad + overlay.glyph_h, f"F{i:06d}")
 

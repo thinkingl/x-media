@@ -23,7 +23,7 @@ x-media RTSP server  rtsp://127.0.0.1:5544/gpu_test
 
 - 4K CUDA 渲染器每帧约 **4 ms**；当前带音频的 4K25 管线实测：生成器 CPU ~13%、ffmpeg CPU ~19%（合计约 32% 单核），GPU SM ~17%、NVENC ~34%、NVDEC ~12%。
 - **为什么 ffmpeg 要重编码视频**：裸 H.264 管道包没有可靠 PTS，`-c:v copy` 时音频无法正确交织（VLC 会显示音频 codec 但音频帧为 0）。用 `h264_cuvid` 解码 + `h264_nvenc` 重编码后，视频帧有了真实 PTS，AAC 才能正常与视频交织。
-- 视频 + AAC 背景音乐（`AUDIO_FILE` 可选）；左上角保留 `HH:MM:SS.mmm` + `Fxxxxxx` 帧号。
+- 视频 + AAC 背景音乐（`AUDIO_FILE` 可选）；左上角保留 `YYYY-MM-DD HH:MM:SS.mmm` + `Fxxxxxx` 帧号。
 - 4K 大关键帧依赖 x-media RTSP input 的 PTS 修复（commit `08fe39d`）。
 
 ---

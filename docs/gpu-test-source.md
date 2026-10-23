@@ -40,7 +40,7 @@
 |---|---|
 | 低 CPU | GPU 生成 NV12 + NVENC 零拷贝编码；PyTorch 侧约 11% 单核，推流 ffmpeg 约 1.2% |
 | 图像随机性 | 每帧 6 个随机位置/大小/颜色的矩形 + 可选随机噪声 + 移动的亮条 |
-| 毫秒级时间戳 | 画面左上角烧录 `HH:MM:SS.mmm`，另带 `Fxxxxxx` 帧号；时间取生成时 wall clock |
+| 毫秒级时间戳 | 画面左上角烧录 `YYYY-MM-DD HH:MM:SS.mmm`，另带 `Fxxxxxx` 帧号；时间取生成时 wall clock |
 | 利用 GPU | torch CUDA 生成 NV12，PyNvVideoCodec 直接从 CUDA 显存编码，无 CPU 回传 |
 | 持续运行 | supervisor 循环拉起；x-media 重启后推流自动重连；当前已连续运行数万帧 |
 | 兼容性 | H.264 High、1080p25、8 Mbps CBR、无 B 帧、GOP 25，适合 GB28181/WebRTC/RTSP 预览 |
@@ -224,7 +224,7 @@ class Nv12Frame:
 ### 5.3 毫秒时间戳叠加
 
 - 5x7 点阵字体，字符集 `0123456789:.F`；
-- 第一行 `HH:MM:SS.mmm`（12 字符，wall clock，毫秒）；
+- 第一行 `YYYY-MM-DD HH:MM:SS.mmm`（23 字符，wall clock，毫秒）；
 - 第二行 `F%06d` 帧号（用于检查是否丢帧/冻结）；
 - 黑色底框 + 白色文字；底框区域 UV 置 128，避免彩色噪声影响可读性；
 - 字体缩放自动 `max(2, H//240)`：1080p → 4，720p → 3；
@@ -699,7 +699,7 @@ loginctl enable-linger "$USER"   # 需要权限；否则登录后才启动
 - 32 组烟花 × 最多 256 粒子；寿命约 2.2–6.5s，随机衰减/错峰重生。
 - 深度 `z=0.25–1.0`：近处更大/更亮/寿命更长，远处更小/更暗/位置偏高。
 - HDR 核心 + 1/4 分辨率 bloom + 3×3 blur + tone mapping；NV12 在 CUDA 中直出。
-- 左上角叠加 `HH:MM:SS.mmm` + `Fxxxxxx`（5×7 字体，4K 下 scale=8）。
+- 左上角叠加 `YYYY-MM-DD HH:MM:SS.mmm` + `Fxxxxxx`（5×7 字体，4K 下 scale=8）。
 - 当前 286：`9a1f… → 8521…`；测试 RTSP 输出：`78ac…`。
 
 ### 12.4 音频与双编码
